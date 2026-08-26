@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RobStride Dashboard</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <div>
+          <h1>RobStride Dashboard</h1>
+          <p id="subtitle">SocketCAN control surface</p>
+        </div>
+        <div class="status-pill" id="connectionStatus">Offline</div>
+      </header>
+
+      <section class="control-band">
+        <div class="field-grid">
+          <label>
+            <span>Interface</span>
+            <input id="interfaceInput" value="can0" autocomplete="off">
+          </label>
+          <label>
+            <span>Motor ID</span>
+            <input id="motorIdInput" value="0x7F" autocomplete="off">
+          </label>
+          <label>
+            <span>Host ID</span>
+            <input id="hostIdInput" value="0xFD" autocomplete="off">
+          </label>
+          <label>
+            <span>Feedback ID</span>
+            <input id="feedbackIdInput" value="0xFD" autocomplete="off">
+          </label>
+          <label>
+            <span>Model</span>
+            <select id="modelInput">
+              <option value="rs-05">RS-05</option>
+              <option value="rs-00">RS-00</option>
+              <option value="rs-01">RS-01</option>
+              <option value="rs-02">RS-02</option>
+              <option value="rs-03">RS-03</option>
+              <option value="rs-04">RS-04</option>
+              <option value="rs-06">RS-06</option>
+              <option value="el-05">EL-05</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="segmented" role="group" aria-label="Protocol">
+          <button id="privateProtocolBtn" data-protocol="private">Private</button>
+          <button id="mitProtocolBtn" data-protocol="mit">MIT Std</button>
+        </div>
+
+        <div class="button-row">
+          <button data-command="reopen">Reconnect</button>
+          <button data-command="scan">Scan Both</button>
+          <button data-command="scan-private">Scan Private</button>
+          <button data-command="scan-mit">Scan MIT</button>
+        </div>
+      </section>
+
+      <section class="dashboard-grid">
+        <div class="panel controls-panel">
+          <div class="panel-head">
+            <h2>Motion</h2>
+            <span id="configuredState">Not configured</span>
+          </div>
+
+          <div class="speed-control">
+            <label for="speedSlider">Speed</label>
+            <input id="speedSlider" type="range" min="0" max="3" step="0.1" value="0.3">
+            <output id="speedValue">0.30 rad/s</output>
+          </div>
+
+          <div class="motion-grid">
+            <button class="soft" data-command="configure">Configure</button>
+            <button class="danger" data-command="stop">Stop</button>
+            <button data-command="jog-left">Jog Left</button>
+            <button data-command="jog-right">Jog Right</button>
+            <button data-command="backward">Reverse</button>
+            <button data-command="forward">Forward</button>
+            <button data-command="zero-speed">Zero Speed</button>
+            <button data-command="toggle-oscillation">Oscillate</button>
+          </div>
+
+          <div class="toggle-row">
+            <label class="switch">
+              <input id="activeReportsToggle" type="checkbox">
+              <span>Active Reports</span>
+            </label>
+            <button data-command="status">Read Status</button>
+            <button data-command="raw">Raw Trace</button>
+          </div>
+        </div>
+
+        <div class="panel telemetry-panel">
+          <div class="panel-head">
+            <h2>Telemetry</h2>
+            <span id="feedbackAge">No feedback</span>
+          </div>
+          <div class="metric-grid">
+            <div class="metric">
+              <span>Position</span>
+              <strong id="positionMetric">--</strong>
+            </div>
+            <div class="metric">
+              <span>Velocity</span>
+              <strong id="velocityMetric">--</strong>
+            </div>
+            <div class="metric">
+              <span>Torque</span>
+              <strong id="torqueMetric">--</strong>
+            </div>
+            <div class="metric">
+              <span>Temp</span>
+              <strong id="tempMetric">--</strong>
+            </div>
+          </div>
+          <div class="flag-row">
+            <span id="modeState">mode --</span>
+            <span id="faultState">fault --</span>
+            <span id="warningState">warn --</span>
+          </div>
+        </div>
+
+        <div class="panel bus-panel">
+          <div class="panel-head">
+            <h2>CAN Bus</h2>
+            <span id="busyState">Idle</span>
+          </div>
+          <div class="bus-grid">
+            <span>RX packets</span><strong id="rxPackets">--</strong>
+            <span>TX packets</span><strong id="txPackets">--</strong>
+            <span>RX errors</span><strong id="rxErrors">--</strong>
+            <span>TX errors</span><strong id="txErrors">--</strong>
+            <span>Dropped</span><strong id="droppedPackets">--</strong>
+          </div>
+          <pre id="lastFrame">No CAN frame yet</pre>
+        </div>
+
+        <div class="panel scan-panel">
+          <div class="panel-head">
+            <h2>Discovered</h2>
+            <span id="selectedMotor">0x7F</span>
+          </div>
+          <div class="list-pair">
+            <div>
+              <h3>Private</h3>
+              <div id="privateList" class="chip-list"></div>
+            </div>
+            <div>
+              <h3>MIT Std</h3>
+              <div id="mitList" class="chip-list"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel repo-panel">
+          <div class="panel-head">
+            <h2>Repository</h2>
+            <span id="updateState">Ready</span>
+          </div>
+          <div class="repo-grid">
+            <span>Branch</span><strong id="repoBranch">--</strong>
+            <span>Commit</span><strong id="repoCommit">--</strong>
+            <span>Changes</span><strong id="repoDirty">--</strong>
+          </div>
+          <pre id="repoRemote">origin</pre>
+          <div class="button-row update-row">
+            <button id="updateRepoBtn" class="soft">Update From GitHub</button>
+            <button id="showUpdateLogBtn">Update Log</button>
+          </div>
+        </div>
+
+        <div class="panel log-panel">
+          <div class="panel-head">
+            <h2>Event Log</h2>
+            <button id="clearLogBtn" class="ghost">Clear</button>
+          </div>
+          <pre id="logOutput"></pre>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

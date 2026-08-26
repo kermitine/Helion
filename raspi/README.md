@@ -1,0 +1,109 @@
+# RobStride On Raspberry Pi
+
+This folder contains the Raspberry Pi SocketCAN command-line tool and
+Pi-local web dashboard:
+
+```bash
+python3 raspi/robstride_socketcan.py --interface can0
+python3 raspi/robstride_dashboard.py --interface can0 --host 0.0.0.0 --port 8080
+```
+
+It has no Python package dependencies. It uses Linux raw SocketCAN directly.
+
+Bring up the official RobStride USB-CAN adapter, or any SocketCAN-compatible
+adapter, at 1 Mbps first:
+
+```bash
+sudo bash raspi/can_up.sh can0
+```
+
+## Dashboard Install
+
+From a fresh Pi:
+
+```bash
+sudo apt update
+sudo apt install -y git
+git clone https://github.com/kermitine/Helion.git
+cd Helion
+bash raspi/install_dashboard.sh
+```
+
+Open the dashboard from another machine on the same network:
+
+```text
+http://<pi-ip-address>:8080
+```
+
+The install creates these commands:
+
+```bash
+helion-can-up can0
+helion-dashboard --interface can0 --host 0.0.0.0 --port 8080
+helion-update
+```
+
+`helion-update` pulls the current GitHub branch with `git pull --ff-only`,
+checks the Python files, and restarts the dashboard service.
+
+Normal terminal update flow:
+
+```bash
+# On your dev machine
+git add .
+git commit -m "Update RobStride dashboard"
+git push
+
+# On the Pi
+helion-update
+```
+
+Normal web update flow:
+
+```bash
+# On your dev machine
+git add .
+git commit -m "Update RobStride dashboard"
+git push
+```
+
+Then open the dashboard and press **Update From GitHub** in the Repository
+panel. The dashboard will run the pull/check/restart sequence in the
+background. The page may disconnect for a few seconds while the service
+restarts.
+
+Keep the dashboard on a trusted local network only. It can move the motor and
+pull executable code from the configured Git remote.
+
+Useful service checks:
+
+```bash
+systemctl status robstride-dashboard.service
+journalctl -u robstride-dashboard.service -f
+ip -details -statistics link show can0
+```
+
+Useful first tests:
+
+```bash
+python3 raspi/robstride_socketcan.py --self-test
+python3 raspi/robstride_socketcan.py --interface can0 --command scan
+python3 raspi/robstride_socketcan.py --interface can0 --command configure
+python3 raspi/robstride_socketcan.py --interface can0 --command jog-right
+```
+
+The default protocol is RobStride private extended-ID mode with motor `0x7F`
+and host `0xFD`. To try the MotorBridge MIT-standard path instead:
+
+```bash
+python3 raspi/robstride_socketcan.py --interface can0 --protocol mit
+```
+
+For a one-shot MIT-standard jog:
+
+```bash
+python3 raspi/robstride_socketcan.py --interface can0 --protocol mit --command jog-right
+```
+
+Interactive commands: `p`, `v`, `f`, `b`, `<`, `>`, `g`, `0`, `s`, `+`, `-`,
+`r`, `a`, `m`, `x`, `d`, `c`, `h`, `t`, `?`, and `q`.
