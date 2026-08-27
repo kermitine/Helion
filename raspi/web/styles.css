@@ -1,14 +1,14 @@
 :root {
   color-scheme: dark;
-  --bg: #101414;
-  --band: #151b1b;
-  --panel: #1b2424;
-  --panel-2: #202b2a;
-  --line: #334241;
-  --text: #f3f7f5;
-  --muted: #9dafac;
-  --accent: #56d6a8;
-  --accent-2: #72b7ff;
+  --bg: #050505;
+  --band: #0c0c0c;
+  --panel: #111111;
+  --panel-2: #17130a;
+  --line: #332a16;
+  --text: #f7f1df;
+  --muted: #b9ad8e;
+  --accent: #f6c445;
+  --accent-2: #d99a24;
   --danger: #ff6b5f;
   --warn: #ffd166;
 }
@@ -39,7 +39,7 @@ button {
   min-height: 42px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #24302f;
+  background: #17130a;
   color: var(--text);
   cursor: pointer;
 }
@@ -60,8 +60,8 @@ button.danger {
 }
 
 button.soft {
-  background: #163429;
-  border-color: #2c745d;
+  background: #2a1f09;
+  border-color: #8f6619;
 }
 
 button.ghost {
@@ -130,7 +130,7 @@ h3 {
 }
 
 .status-pill.online {
-  border-color: #2c745d;
+  border-color: #8f6619;
   color: var(--accent);
 }
 
@@ -174,7 +174,7 @@ select {
   min-height: 38px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #101717;
+  background: #090909;
   color: var(--text);
   padding: 0 10px;
 }
@@ -190,11 +190,11 @@ select {
 .segmented button {
   border: 0;
   border-radius: 0;
-  background: #111919;
+  background: #111111;
 }
 
 .segmented button.active {
-  background: #163429;
+  background: #2a1f09;
   color: var(--accent);
 }
 
@@ -252,7 +252,7 @@ select {
   gap: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #121a1a;
+  background: #090909;
   padding: 12px;
 }
 
@@ -296,7 +296,7 @@ select {
   height: 180px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #101819;
+  background: #080808;
   cursor: pointer;
 }
 
@@ -307,7 +307,7 @@ select {
   display: grid;
   place-items: center;
   padding: 18px;
-  background: rgba(6, 9, 9, 0.82);
+  background: rgba(0, 0, 0, 0.86);
 }
 
 .wizard-overlay[hidden] {
@@ -364,7 +364,7 @@ select {
   min-height: 520px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #101819;
+  background: #080808;
   cursor: grab;
   touch-action: none;
 }
@@ -456,7 +456,7 @@ select {
   align-items: center;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #0f1717;
+  background: #090909;
   padding: 10px;
 }
 
@@ -471,7 +471,7 @@ select {
   height: 14px;
   border: 2px solid var(--warn);
   border-radius: 50%;
-  background: #221d12;
+  background: #211806;
 }
 
 .wizard-joint-visual i {
@@ -506,7 +506,7 @@ select {
   height: 150px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #0f1717;
+  background: #090909;
   overflow: hidden;
 }
 
@@ -602,7 +602,7 @@ select {
   min-height: 420px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #111819;
+  background: #080808;
   touch-action: none;
 }
 
@@ -616,7 +616,7 @@ select {
   min-width: 0;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #101717;
+  background: #090909;
   color: var(--muted);
   padding: 9px 10px;
   font-size: 0.8rem;
@@ -660,15 +660,15 @@ button.jog {
 }
 
 button.jog-left {
-  background: #203351;
-  border-color: #5d9ef7;
-  color: #eaf3ff;
+  background: #2f2208;
+  border-color: #b98421;
+  color: #ffe7a3;
 }
 
 button.jog-right {
-  background: #14392e;
-  border-color: #56d6a8;
-  color: #eafff7;
+  background: #33270d;
+  border-color: #f6c445;
+  color: #fff1c2;
 }
 
 .position-control {
@@ -700,7 +700,7 @@ button.jog-right {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 0 10px;
-  background: #121919;
+  background: #0d0d0d;
 }
 
 .switch input {
@@ -751,8 +751,8 @@ pre {
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #0b1111;
-  color: #cce0dc;
+  background: #050505;
+  color: #e6d8b0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.82rem;
 }
@@ -780,7 +780,7 @@ pre {
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 6px 9px;
-  background: #111919;
+  background: #111111;
   color: var(--accent-2);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }

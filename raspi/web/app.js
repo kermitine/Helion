@@ -612,13 +612,13 @@ function drawIkCanvas(preview) {
   const project = (point) => projected(point, scale, centerX, centerY);
 
   const gradient = ctx.createLinearGradient(0, 0, width, height);
-  gradient.addColorStop(0, "#101819");
-  gradient.addColorStop(1, "#182424");
+  gradient.addColorStop(0, "#060606");
+  gradient.addColorStop(1, "#151007");
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, width, height);
 
   ctx.lineWidth = 1;
-  ctx.strokeStyle = "#273938";
+  ctx.strokeStyle = "#2d2616";
   for (let i = -4; i <= 4; i += 1) {
     const offset = (sceneRadius * i) / 4;
     const a = project({ x: -sceneRadius, y: offset, z: 0 });
@@ -634,17 +634,17 @@ function drawIkCanvas(preview) {
   }
 
   ctx.setLineDash([6, 5]);
-  ctx.strokeStyle = "#395453";
+  ctx.strokeStyle = "#59451f";
   drawGroundCircle(ctx, preview.joints.maxReach || preview.arm.link1 + preview.arm.link2, project);
-  ctx.strokeStyle = "#54443a";
+  ctx.strokeStyle = "#5f332e";
   drawGroundCircle(ctx, preview.joints.minReach || 0, project);
   ctx.setLineDash([]);
 
   const origin = project({ x: 0, y: 0, z: 0 });
   const axes = [
-    [{ x: sceneRadius * 0.45, y: 0, z: 0 }, "#ff7d73", "X"],
-    [{ x: 0, y: sceneRadius * 0.45, z: 0 }, "#72b7ff", "Y"],
-    [{ x: 0, y: 0, z: sceneRadius * 0.45 }, "#56d6a8", "Z"],
+    [{ x: sceneRadius * 0.45, y: 0, z: 0 }, "#d99a24", "X"],
+    [{ x: 0, y: sceneRadius * 0.45, z: 0 }, "#f6c445", "Y"],
+    [{ x: 0, y: 0, z: sceneRadius * 0.45 }, "#ffe7a3", "Z"],
   ];
   axes.forEach(([axisPoint, color, label]) => {
     const end = project(axisPoint);
@@ -680,7 +680,7 @@ function drawIkCanvas(preview) {
     ctx.lineJoin = "round";
     ctx.shadowColor = "rgba(0, 0, 0, 0.35)";
     ctx.shadowBlur = 12;
-    ctx.strokeStyle = "#56d6a8";
+    ctx.strokeStyle = "#d99a24";
     ctx.lineWidth = 13;
     ctx.beginPath();
     ctx.moveTo(points[0].x, points[0].y);
@@ -688,7 +688,7 @@ function drawIkCanvas(preview) {
     ctx.lineTo(points[2].x, points[2].y);
     ctx.stroke();
     ctx.shadowBlur = 0;
-    ctx.strokeStyle = "#baf8e0";
+    ctx.strokeStyle = "#ffe7a3";
     ctx.lineWidth = 4;
     ctx.beginPath();
     ctx.moveTo(points[0].x, points[0].y);
@@ -763,13 +763,13 @@ function drawTargetScene(preview, canvasId, options = {}) {
   const project = (point) => projectPoint(point, scale, centerX, centerY, targetViewYaw, targetViewPitch);
 
   const gradient = ctx.createLinearGradient(0, 0, width, height);
-  gradient.addColorStop(0, "#0f1717");
-  gradient.addColorStop(1, "#142020");
+  gradient.addColorStop(0, "#060606");
+  gradient.addColorStop(1, "#151007");
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, width, height);
 
   ctx.lineWidth = 1;
-  ctx.strokeStyle = "#243635";
+  ctx.strokeStyle = "#2d2616";
   for (let i = -4; i <= 4; i += 1) {
     const offset = (sceneRadius * i) / 4;
     ctx.beginPath();
@@ -786,9 +786,9 @@ function drawTargetScene(preview, canvasId, options = {}) {
 
   const origin = project({ x: 0, y: 0, z: 0 });
   [
-    [{ x: sceneRadius * 0.55, y: 0, z: 0 }, "#ff7d73", "X"],
-    [{ x: 0, y: sceneRadius * 0.55, z: 0 }, "#72b7ff", "Y"],
-    [{ x: 0, y: 0, z: sceneRadius * 0.55 }, "#56d6a8", "Z"],
+    [{ x: sceneRadius * 0.55, y: 0, z: 0 }, "#d99a24", "X"],
+    [{ x: 0, y: sceneRadius * 0.55, z: 0 }, "#f6c445", "Y"],
+    [{ x: 0, y: 0, z: sceneRadius * 0.55 }, "#ffe7a3", "Z"],
   ].forEach(([axisPoint, color, label]) => {
     const end = project(axisPoint);
     ctx.strokeStyle = color;
@@ -803,7 +803,7 @@ function drawTargetScene(preview, canvasId, options = {}) {
   });
 
   ctx.setLineDash([6, 5]);
-  ctx.strokeStyle = "#395453";
+  ctx.strokeStyle = "#59451f";
   drawGroundCircle(ctx, preview.joints.maxReach || preview.arm.link1 + preview.arm.link2, project);
   ctx.setLineDash([]);
 
@@ -822,14 +822,14 @@ function drawTargetScene(preview, canvasId, options = {}) {
     const points = preview.points.map(project);
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    ctx.strokeStyle = "#56d6a8";
+    ctx.strokeStyle = "#d99a24";
     ctx.lineWidth = 10;
     ctx.beginPath();
     ctx.moveTo(points[0].x, points[0].y);
     ctx.lineTo(points[1].x, points[1].y);
     ctx.lineTo(points[2].x, points[2].y);
     ctx.stroke();
-    ctx.strokeStyle = "#baf8e0";
+    ctx.strokeStyle = "#ffe7a3";
     ctx.lineWidth = 3;
     ctx.beginPath();
     ctx.moveTo(points[0].x, points[0].y);
@@ -842,7 +842,7 @@ function drawTargetScene(preview, canvasId, options = {}) {
   ctx.beginPath();
   ctx.arc(targetTop.x, targetTop.y, 8, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = "#101819";
+  ctx.strokeStyle = "#080808";
   ctx.lineWidth = 3;
   ctx.stroke();
 
@@ -851,9 +851,9 @@ function drawTargetScene(preview, canvasId, options = {}) {
     const xEnd = project({ x: target.x + gizmoLength, y: target.y, z: target.z });
     const yEnd = project({ x: target.x, y: target.y + gizmoLength, z: target.z });
     const zEnd = project({ x: target.x, y: target.y, z: target.z + gizmoLength });
-    drawGizmoArrow(ctx, targetTop, xEnd, "#ff7d73", "X");
-    drawGizmoArrow(ctx, targetTop, yEnd, "#72b7ff", "Y");
-    drawGizmoArrow(ctx, targetTop, zEnd, "#56d6a8", "Z");
+    drawGizmoArrow(ctx, targetTop, xEnd, "#d99a24", "X");
+    drawGizmoArrow(ctx, targetTop, yEnd, "#f6c445", "Y");
+    drawGizmoArrow(ctx, targetTop, zEnd, "#ffe7a3", "Z");
     targetGizmoHitZones = [
       { axis: "x", start: targetTop, end: xEnd, scale, length: gizmoLength },
       { axis: "y", start: targetTop, end: yEnd, scale, length: gizmoLength },
@@ -1110,7 +1110,7 @@ function render(state) {
   const status = $("connectionStatus");
   status.textContent = state.connected ? "Online" : "Offline";
   status.className = `status-pill ${state.connected ? "online" : "offline"}`;
-  $("subtitle").textContent = state.openError || state.transportLabel || "RobStride USB";
+  $("subtitle").textContent = state.openError || state.transportLabel || "Helion control surface";
   $("appVersion").textContent = state.appVersion ? `v${state.appVersion}` : "v--";
   $("configuredState").textContent = state.positionConfigured
     ? "Position configured"
