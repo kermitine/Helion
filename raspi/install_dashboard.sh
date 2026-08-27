@@ -11,7 +11,7 @@ SERIAL_BAUD="${SERIAL_BAUD:-921600}"
 BITRATE="${BITRATE:-1000000}"
 RESTART_MS="${RESTART_MS:-100}"
 TX_QUEUE_LEN="${TX_QUEUE_LEN:-2000}"
-DASHBOARD_PORT="${DASHBOARD_PORT:-8080}"
+DASHBOARD_PORT="${DASHBOARD_PORT:-80}"
 DASHBOARD_HOST="${DASHBOARD_HOST:-0.0.0.0}"
 SERVICE_USER="${HELION_USER:-${SUDO_USER:-$(id -un)}}"
 SERVICE_GROUP="${HELION_GROUP:-$(id -gn "$SERVICE_USER")}"
@@ -21,6 +21,21 @@ escape_sh() {
 }
 
 REPO_ESC="$(escape_sh "$REPO_DIR")"
+
+DASHBOARD_CAPABILITIES=()
+if [[ "$HELION_TRANSPORT" == "socketcan" ]]; then
+  DASHBOARD_CAPABILITIES+=(CAP_NET_RAW)
+fi
+if (( DASHBOARD_PORT < 1024 )); then
+  DASHBOARD_CAPABILITIES+=(CAP_NET_BIND_SERVICE)
+fi
+
+DASHBOARD_CAPABILITY_LINES=""
+if (( ${#DASHBOARD_CAPABILITIES[@]} > 0 )); then
+  DASHBOARD_CAPS="${DASHBOARD_CAPABILITIES[*]}"
+  DASHBOARD_CAPABILITY_LINES="AmbientCapabilities=$DASHBOARD_CAPS
+CapabilityBoundingSet=$DASHBOARD_CAPS"
+fi
 
 sudo apt update
 sudo apt install -y git python3 can-utils iproute2
@@ -121,6 +136,7 @@ Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_GROUP
 SupplementaryGroups=dialout
+$DASHBOARD_CAPABILITY_LINES
 NoNewPrivileges=false
 ExecStart=/usr/local/bin/helion-dashboard --host $DASHBOARD_HOST --port $DASHBOARD_PORT --transport robstride-serial --interface $CAN_INTERFACE --serial-port $SERIAL_PORT --serial-baud $SERIAL_BAUD
 Restart=on-failure
@@ -140,8 +156,7 @@ Wants=network-online.target robstride-can.service
 Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_GROUP
-AmbientCapabilities=CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_RAW
+$DASHBOARD_CAPABILITY_LINES
 NoNewPrivileges=false
 ExecStart=/usr/local/bin/helion-dashboard --host $DASHBOARD_HOST --port $DASHBOARD_PORT --transport socketcan --interface $CAN_INTERFACE
 Restart=on-failure
@@ -160,8 +175,15 @@ else
 fi
 sudo systemctl enable --now robstride-dashboard.service
 
+PI_IP="$(hostname -I | awk '{print $1}')"
+if [[ "$DASHBOARD_PORT" == "80" ]]; then
+  DASHBOARD_URL="http://${PI_IP}"
+else
+  DASHBOARD_URL="http://${PI_IP}:${DASHBOARD_PORT}"
+fi
+
 echo "Dashboard installed."
-echo "Open: http://$(hostname -I | awk '{print $1}'):${DASHBOARD_PORT}"
+echo "Open: ${DASHBOARD_URL}"
 echo "Update later with: helion-update"
 echo "Web updates run as user: ${SERVICE_USER}"
 echo "Transport: ${HELION_TRANSPORT}"

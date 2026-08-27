@@ -74,6 +74,9 @@ cd Helion
 bash raspi/install_dashboard.sh
 ```
 
+The installer creates and enables `robstride-dashboard.service`, so the
+dashboard starts automatically every time the Pi boots.
+
 For the official RobStride CH340 serial adapter, install the services with:
 
 ```bash
@@ -89,15 +92,20 @@ HELION_TRANSPORT=socketcan CAN_INTERFACE=can0 bash raspi/install_dashboard.sh
 Open the dashboard from another machine on the same network:
 
 ```text
-http://<pi-ip-address>:8080
+http://<pi-ip-address>
 ```
+
+The installed service listens on port `80` by default, which is why the browser
+URL does not need `:8080`. The service grants the Python dashboard only the
+`CAP_NET_BIND_SERVICE` capability needed to bind that low port. To keep using
+the old explicit port instead, reinstall with `DASHBOARD_PORT=8080`.
 
 The install creates these commands:
 
 ```bash
 helion-can-up can0
 helion-can-down can0
-helion-dashboard --transport robstride-serial --serial-port auto --host 0.0.0.0 --port 8080
+helion-dashboard --transport robstride-serial --serial-port auto --host 0.0.0.0 --port 80
 helion-update
 ```
 
@@ -130,6 +138,15 @@ panel. The dashboard will run the pull/check/restart sequence in the
 background. The page may disconnect for a few seconds while the service
 restarts.
 
+To apply a service setting change, such as switching an existing install to port
+`80`, pull the latest repo and rerun the installer:
+
+```bash
+cd ~/Helion
+git pull
+bash raspi/install_dashboard.sh
+```
+
 Keep the dashboard on a trusted local network only. It can move the motor and
 pull executable code from the configured Git remote.
 
@@ -137,6 +154,7 @@ Useful service checks:
 
 ```bash
 systemctl status robstride-dashboard.service
+systemctl is-enabled robstride-dashboard.service
 journalctl -u robstride-dashboard.service -f
 ls -l /dev/serial/by-id /dev/ttyUSB* /dev/ttyACM*
 ```
