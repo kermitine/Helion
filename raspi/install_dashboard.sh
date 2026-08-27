@@ -3,6 +3,11 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CAN_INTERFACE="${CAN_INTERFACE:-can0}"
+HELION_CAN_BACKEND="${HELION_CAN_BACKEND:-${CAN_BACKEND:-auto}}"
+SLCAN_PORT="${SLCAN_PORT:-}"
+BITRATE="${BITRATE:-1000000}"
+RESTART_MS="${RESTART_MS:-100}"
+TX_QUEUE_LEN="${TX_QUEUE_LEN:-2000}"
 DASHBOARD_PORT="${DASHBOARD_PORT:-8080}"
 DASHBOARD_HOST="${DASHBOARD_HOST:-0.0.0.0}"
 SERVICE_USER="${HELION_USER:-${SUDO_USER:-$(id -un)}}"
@@ -21,6 +26,7 @@ chmod +x "$REPO_DIR/raspi/robstride_socketcan.py"
 chmod +x "$REPO_DIR/raspi/robstride_dashboard.py"
 chmod +x "$REPO_DIR/raspi/update_from_github.sh"
 chmod +x "$REPO_DIR/raspi/can_up.sh"
+chmod +x "$REPO_DIR/raspi/can_down.sh"
 
 sudo tee /usr/local/bin/helion-dashboard >/dev/null <<EOF
 #!/usr/bin/env bash
@@ -43,7 +49,14 @@ cd '$REPO_ESC'
 exec bash raspi/can_up.sh "\$@"
 EOF
 
-sudo chmod +x /usr/local/bin/helion-dashboard /usr/local/bin/helion-update /usr/local/bin/helion-can-up
+sudo tee /usr/local/bin/helion-can-down >/dev/null <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd '$REPO_ESC'
+exec bash raspi/can_down.sh "\$@"
+EOF
+
+sudo chmod +x /usr/local/bin/helion-dashboard /usr/local/bin/helion-update /usr/local/bin/helion-can-up /usr/local/bin/helion-can-down
 
 sudo tee /usr/local/sbin/helion-restart-dashboard >/dev/null <<'EOF'
 #!/usr/bin/env bash
@@ -68,8 +81,13 @@ After=network.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+Environment=HELION_CAN_BACKEND=$HELION_CAN_BACKEND
+Environment=SLCAN_PORT=$SLCAN_PORT
+Environment=BITRATE=$BITRATE
+Environment=RESTART_MS=$RESTART_MS
+Environment=TX_QUEUE_LEN=$TX_QUEUE_LEN
 ExecStart=/usr/local/bin/helion-can-up $CAN_INTERFACE
-ExecStop=/sbin/ip link set $CAN_INTERFACE down
+ExecStop=/usr/local/bin/helion-can-down $CAN_INTERFACE
 
 [Install]
 WantedBy=multi-user.target
@@ -104,3 +122,4 @@ echo "Dashboard installed."
 echo "Open: http://$(hostname -I | awk '{print $1}'):${DASHBOARD_PORT}"
 echo "Update later with: helion-update"
 echo "Web updates run as user: ${SERVICE_USER}"
+echo "CAN backend: ${HELION_CAN_BACKEND}${SLCAN_PORT:+ via ${SLCAN_PORT}}"

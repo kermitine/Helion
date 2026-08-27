@@ -10,12 +10,21 @@ python3 raspi/robstride_dashboard.py --interface can0 --host 0.0.0.0 --port 8080
 
 It has no Python package dependencies. It uses Linux raw SocketCAN directly.
 
-Bring up the official RobStride USB-CAN adapter, or any SocketCAN-compatible
-adapter, at 1 Mbps first:
+Bring up a SocketCAN-compatible adapter at 1 Mbps first:
 
 ```bash
 sudo bash raspi/can_up.sh can0
 ```
+
+If the official RobStride adapter appears as a CH340 serial device
+(`/dev/ttyUSB0`) instead of a native `can0` adapter, run it through SLCAN:
+
+```bash
+sudo HELION_CAN_BACKEND=slcan SLCAN_PORT=/dev/ttyUSB0 bash raspi/can_up.sh can0
+```
+
+`ip -details link show can0` may show `bitrate 0` for SLCAN adapters. That is
+normal; the CAN bitrate is selected by `slcand -s8` for 1 Mbps.
 
 ## Dashboard Install
 
@@ -29,6 +38,12 @@ cd Helion
 bash raspi/install_dashboard.sh
 ```
 
+For the official RobStride CH340 serial adapter, install the services with:
+
+```bash
+HELION_CAN_BACKEND=slcan SLCAN_PORT=/dev/ttyUSB0 bash raspi/install_dashboard.sh
+```
+
 Open the dashboard from another machine on the same network:
 
 ```text
@@ -39,6 +54,7 @@ The install creates these commands:
 
 ```bash
 helion-can-up can0
+helion-can-down can0
 helion-dashboard --interface can0 --host 0.0.0.0 --port 8080
 helion-update
 ```
