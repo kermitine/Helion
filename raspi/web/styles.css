@@ -230,6 +230,36 @@ select {
   grid-column: span 1;
 }
 
+.arm-panel {
+  grid-column: span 2;
+}
+
+.arm-panel h3 {
+  margin: 14px 0 8px;
+}
+
+.arm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.arm-grid-wide {
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+}
+
+.arm-actions {
+  grid-template-columns: 1fr 1fr 1fr;
+  margin-top: 14px;
+}
+
+#armSolution {
+  min-height: 72px;
+  margin: 12px 0 0;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
 .speed-control {
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -444,6 +474,8 @@ pre {
 
   .field-grid,
   .button-row,
+  .arm-actions,
+  .arm-grid,
   .toggle-row,
   .motion-grid,
   .jog-grid,

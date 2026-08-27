@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -92,15 +93,17 @@ MOTOR_STUDIO_JOG_S = 0.75
 OSCILLATION_PERIOD_S = 2.5
 VELOCITY_REFRESH_S = 0.10
 POSITION_REFRESH_S = 0.10
+ARM_POSITION_REFRESH_S = 0.10
 MAX_LOG_LINES = 240
 MAX_FRAME_HISTORY = 600
 COMMAND_TIMEOUT_S = 0.6
+ARM_AXES = ("base", "shoulder", "elbow")
 
 ROOT_DIR = Path(__file__).resolve().parent
 REPO_DIR = ROOT_DIR.parent
 WEB_DIR = ROOT_DIR / "web"
 UPDATE_LOG_PATH = ROOT_DIR / "update.log"
-APP_VERSION = "2026.08.27.4"
+APP_VERSION = "2026.08.27.5"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -135,6 +138,50 @@ def nonnegative_float(value: Any, default: float, maximum: float) -> float:
     if not math.isfinite(parsed) or parsed < 0.0:
         parsed = default
     return min(parsed, maximum)
+
+
+def signed_direction(value: Any, default: int = 1) -> int:
+    try:
+        parsed = int(str(value), 0)
+    except (TypeError, ValueError):
+        parsed = default
+    return -1 if parsed < 0 else 1
+
+
+@dataclass
+class ArmIkSolution:
+    base: float
+    shoulder: float
+    elbow: float
+
+
+def solve_three_axis_arm_ik(
+    x: float,
+    y: float,
+    z: float,
+    link_1: float,
+    link_2: float,
+    elbow_up: bool,
+) -> ArmIkSolution:
+    link_1 = max(abs(link_1), 0.001)
+    link_2 = max(abs(link_2), 0.001)
+    radial = math.hypot(x, y)
+    reach = math.hypot(radial, z)
+    max_reach = link_1 + link_2
+    min_reach = abs(link_1 - link_2)
+    if reach > max_reach or reach < min_reach:
+        raise ValueError(
+            f"IK target unreachable: reach={reach:.3f}, allowed={min_reach:.3f}..{max_reach:.3f}"
+        )
+
+    base = math.atan2(y, x)
+    cos_elbow = (radial * radial + z * z - link_1 * link_1 - link_2 * link_2) / (2.0 * link_1 * link_2)
+    cos_elbow = max(-1.0, min(1.0, cos_elbow))
+    elbow = math.acos(cos_elbow)
+    if elbow_up:
+        elbow = -elbow
+    shoulder = math.atan2(z, radial) - math.atan2(link_2 * math.sin(elbow), link_1 + link_2 * math.cos(elbow))
+    return ArmIkSolution(base=base, shoulder=shoulder, elbow=elbow)
 
 
 def can_stats(interface: str) -> Dict[str, str]:
@@ -213,6 +260,23 @@ class DashboardController:
         self.position_kp = DEFAULT_POSITION_KP
         self.velocity_configured = False
         self.position_configured = False
+        self.arm_motor_ids = {
+            "base": self.motor_id,
+            "shoulder": 0x01,
+            "elbow": 0x02,
+        }
+        self.arm_offsets = {axis: 0.0 for axis in ARM_AXES}
+        self.arm_directions = {axis: 1 for axis in ARM_AXES}
+        self.arm_link_1 = 0.25
+        self.arm_link_2 = 0.25
+        self.arm_target = {"x": 0.25, "y": 0.0, "z": 0.10}
+        self.arm_elbow_up = False
+        self.arm_velocity_limit = DEFAULT_POSITION_VEL_RAD_S
+        self.arm_acceleration = DEFAULT_POSITION_ACCEL_RAD_S2
+        self.arm_position_kp = DEFAULT_POSITION_KP
+        self.arm_position_configured = False
+        self.arm_motor_targets = {axis: 0.0 for axis in ARM_AXES}
+        self.arm_joint_angles = {axis: 0.0 for axis in ARM_AXES}
         self.active_reports = False
         self.oscillating = False
         self.jog_active = False
@@ -220,6 +284,7 @@ class DashboardController:
         self.last_oscillation_at = time.monotonic()
         self.last_velocity_refresh_at = 0.0
         self.last_position_refresh_at = 0.0
+        self.last_arm_position_refresh_at = 0.0
         self.last_feedback_at = 0.0
         self.last_private_fault_at = 0.0
         self.last_raw_frame: Optional[Dict[str, Any]] = None
@@ -390,6 +455,7 @@ class DashboardController:
             self.jog_active = False
             self.velocity_configured = False
             self.position_configured = False
+            self.arm_position_configured = False
             next_transport = transport or self.bus_transport()
             next_interface = interface or self.bus.interface
             next_serial_port = serial_port or getattr(self.bus, "serial_port", DEFAULT_SERIAL_PORT)
@@ -423,30 +489,45 @@ class DashboardController:
     def send_private_get_id(self, target_id: int) -> None:
         self.send_private(COMM_GET_ID, self.host_id, target_id, bytes(8))
 
-    def send_private_disable(self, clear_error: bool = False) -> None:
+    def send_private_disable_to(self, target_id: int, clear_error: bool = False) -> None:
         payload = bytearray(8)
         payload[0] = 1 if clear_error else 0
-        self.send_private(COMM_DISABLE, self.host_id, self.motor_id, bytes(payload))
+        self.send_private(COMM_DISABLE, self.host_id, target_id & 0xFF, bytes(payload))
+
+    def send_private_disable(self, clear_error: bool = False) -> None:
+        self.send_private_disable_to(self.motor_id, clear_error)
+
+    def send_private_enable_to(self, target_id: int) -> None:
+        self.send_private(COMM_ENABLE, self.host_id, target_id & 0xFF, bytes(8))
 
     def send_private_enable(self) -> None:
-        self.send_private(COMM_ENABLE, self.host_id, self.motor_id, bytes(8))
+        self.send_private_enable_to(self.motor_id)
 
-    def write_private_param_u8(self, index: int, value: int) -> None:
+    def write_private_param_u8_to(self, target_id: int, index: int, value: int) -> None:
         payload = bytearray(8)
         payload[0:2] = (index & 0xFFFF).to_bytes(2, "little")
         payload[4] = value & 0xFF
-        self.send_private(COMM_WRITE_PARAM, self.host_id, self.motor_id, bytes(payload))
+        self.send_private(COMM_WRITE_PARAM, self.host_id, target_id & 0xFF, bytes(payload))
 
-    def write_private_param_f32(self, index: int, value: float) -> None:
+    def write_private_param_u8(self, index: int, value: int) -> None:
+        self.write_private_param_u8_to(self.motor_id, index, value)
+
+    def write_private_param_f32_to(self, target_id: int, index: int, value: float) -> None:
         payload = bytearray(8)
         payload[0:2] = (index & 0xFFFF).to_bytes(2, "little")
         payload[4:8] = f32_le(value)
-        self.send_private(COMM_WRITE_PARAM, self.host_id, self.motor_id, bytes(payload))
+        self.send_private(COMM_WRITE_PARAM, self.host_id, target_id & 0xFF, bytes(payload))
 
-    def read_private_param(self, index: int) -> None:
+    def write_private_param_f32(self, index: int, value: float) -> None:
+        self.write_private_param_f32_to(self.motor_id, index, value)
+
+    def read_private_param_from(self, target_id: int, index: int) -> None:
         payload = bytearray(8)
         payload[0:2] = (index & 0xFFFF).to_bytes(2, "little")
-        self.send_private(COMM_READ_PARAM, self.host_id, self.motor_id, bytes(payload))
+        self.send_private(COMM_READ_PARAM, self.host_id, target_id & 0xFF, bytes(payload))
+
+    def read_private_param(self, index: int) -> None:
+        self.read_private_param_from(self.motor_id, index)
 
     def send_mit_to_motor(self, payload: bytes) -> None:
         self.send(self.motor_id, payload, extended=False)
@@ -612,18 +693,21 @@ class DashboardController:
                     return None
                 self.frame_cv.wait(remaining)
 
-    def wait_private_status(self, timeout_s: float, after_seq: Optional[int] = None) -> Optional[Any]:
+    def wait_private_status_for(self, target_id: int, timeout_s: float, after_seq: Optional[int] = None) -> Optional[Any]:
         def matches(frame: Any) -> bool:
             if not frame.extended:
                 return False
             comm_type, extra, _host = split_private_ext_id(frame.arbitration_id)
-            return comm_type == COMM_OPERATION_STATUS and (extra & 0xFF) == self.motor_id
+            return comm_type == COMM_OPERATION_STATUS and (extra & 0xFF) == (target_id & 0xFF)
 
         return self.wait_for_frame(matches, timeout_s, after_seq)
 
-    def wait_private_param(self, index: int, timeout_s: float) -> Optional[bytes]:
+    def wait_private_status(self, timeout_s: float, after_seq: Optional[int] = None) -> Optional[Any]:
+        return self.wait_private_status_for(self.motor_id, timeout_s, after_seq)
+
+    def wait_private_param_from(self, target_id: int, index: int, timeout_s: float) -> Optional[bytes]:
         start_seq = self.current_seq()
-        self.read_private_param(index)
+        self.read_private_param_from(target_id, index)
 
         def matches(frame: Any) -> bool:
             if not frame.extended or len(frame.data) < 8:
@@ -631,12 +715,15 @@ class DashboardController:
             comm_type, extra, _host = split_private_ext_id(frame.arbitration_id)
             return (
                 comm_type == COMM_READ_PARAM
-                and (extra & 0xFF) == self.motor_id
+                and (extra & 0xFF) == (target_id & 0xFF)
                 and int.from_bytes(frame.data[0:2], "little") == index
             )
 
         frame = self.wait_for_frame(matches, timeout_s, start_seq)
         return None if frame is None else frame.data[4:8]
+
+    def wait_private_param(self, index: int, timeout_s: float) -> Optional[bytes]:
+        return self.wait_private_param_from(self.motor_id, index, timeout_s)
 
     def wait_mit_feedback(self, timeout_s: float, motor_id: Optional[int] = None, after_seq: Optional[int] = None) -> Optional[Any]:
         expected_motor_id = self.motor_id if motor_id is None else motor_id
@@ -648,14 +735,20 @@ class DashboardController:
 
     def run_command(self, command: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not self.command_lock.acquire(blocking=False):
-            if command in ("stop", "clear-fault"):
+            if command in ("stop", "clear-fault", "arm-stop", "arm-clear-fault"):
                 try:
                     if command == "stop":
                         self.stop_and_disable()
                         message = "Stop sent while another command was running."
-                    else:
+                    elif command == "clear-fault":
                         self.clear_fault()
                         message = "Clear fault sent while another command was running."
+                    elif command == "arm-stop":
+                        self.stop_arm()
+                        message = "Arm stop sent while another command was running."
+                    else:
+                        self.clear_arm_faults()
+                        message = "Arm clear fault sent while another command was running."
                     return {"ok": True, "message": message}
                 except Exception as exc:
                     return {"ok": False, "message": str(exc)}
@@ -713,6 +806,14 @@ class DashboardController:
             acceleration = positive_float(payload.get("acceleration"), self.position_acceleration, 200.0)
             position_kp = nonnegative_float(payload.get("positionKp"), self.position_kp, 200.0)
             return {"ok": self.move_position(position, velocity_limit, acceleration, position_kp)}
+        if command == "arm-move":
+            return {"ok": self.move_arm_ik(payload)}
+        if command == "arm-stop":
+            self.stop_arm()
+            return {"ok": True}
+        if command == "arm-clear-fault":
+            self.clear_arm_faults()
+            return {"ok": True}
         if command == "zero-speed":
             self.oscillating = False
             self.jog_active = False
@@ -789,6 +890,7 @@ class DashboardController:
                     self.model = new_model
                     self.velocity_configured = False
                     self.position_configured = False
+                    self.arm_position_configured = False
                     self.oscillating = False
                     self.jog_active = False
             if bus_changed:
@@ -819,26 +921,30 @@ class DashboardController:
             self.last_private_fault_at = 0.0
         self.log(label)
 
-    def prepare_private_mode_switch(self, label: str) -> None:
+    def prepare_private_mode_switch_for(self, target_id: int, label: str) -> None:
         # Some RobStride firmware ignores run_mode writes unless torque is
         # explicitly disabled first. Clear-error alone can still leave the
         # controller reporting the old run_mode.
-        self.send_private_disable(False)
-        self.wait_private_status(0.30)
+        self.send_private_disable_to(target_id, False)
+        self.wait_private_status_for(target_id, 0.30)
         time.sleep(0.08)
-        self.send_private_disable(True)
-        self.wait_private_status(0.30)
+        self.send_private_disable_to(target_id, True)
+        self.wait_private_status_for(target_id, 0.30)
         with self.lock:
             self.last_private_fault = None
             self.last_private_fault_at = 0.0
         self.log(label)
         time.sleep(0.08)
 
+    def prepare_private_mode_switch(self, label: str) -> None:
+        self.prepare_private_mode_switch_for(self.motor_id, label)
+
     def clear_fault(self) -> None:
         self.oscillating = False
         self.jog_active = False
         self.velocity_configured = False
         self.position_configured = False
+        self.arm_position_configured = False
         if self.protocol == PROTOCOL_MIT:
             self.send_mit_to_motor(mit_fault_query_payload(True))
             self.wait_mit_feedback(0.35)
@@ -849,6 +955,7 @@ class DashboardController:
     def configure_private_velocity(self) -> bool:
         self.velocity_configured = False
         self.position_configured = False
+        self.arm_position_configured = False
         self.oscillating = False
         self.jog_active = False
         self.log(
@@ -875,6 +982,7 @@ class DashboardController:
     def configure_mit_velocity(self) -> bool:
         self.velocity_configured = False
         self.position_configured = False
+        self.arm_position_configured = False
         self.oscillating = False
         self.jog_active = False
         self.log(
@@ -902,22 +1010,25 @@ class DashboardController:
         self.log("MIT velocity mode configured")
         return True
 
-    def write_private_run_mode_verified(self, desired_mode: int) -> bool:
+    def write_private_run_mode_verified_for(self, target_id: int, desired_mode: int) -> bool:
         original_host = self.host_id
         for host in self.private_host_candidates():
             self.host_id = host
             for attempt in range(1, 4):
-                self.write_private_param_u8(PARAM_RUN_MODE, desired_mode)
+                self.write_private_param_u8_to(target_id, PARAM_RUN_MODE, desired_mode)
                 time.sleep(0.03)
-                raw = self.wait_private_param(PARAM_RUN_MODE, COMMAND_TIMEOUT_S)
+                raw = self.wait_private_param_from(target_id, PARAM_RUN_MODE, COMMAND_TIMEOUT_S)
                 if raw is None:
-                    self.log(f"host={fmt_id(host)} attempt={attempt} run_mode timeout")
+                    self.log(f"motor={fmt_id(target_id)} host={fmt_id(host)} attempt={attempt} run_mode timeout")
                     continue
-                self.log(f"host={fmt_id(host)} attempt={attempt} run_mode readback={raw[0]}")
+                self.log(f"motor={fmt_id(target_id)} host={fmt_id(host)} attempt={attempt} run_mode readback={raw[0]}")
                 if raw[0] == desired_mode:
                     return True
         self.host_id = original_host
         return False
+
+    def write_private_run_mode_verified(self, desired_mode: int) -> bool:
+        return self.write_private_run_mode_verified_for(self.motor_id, desired_mode)
 
     def move_position(self, position: float, velocity_limit: float, acceleration: float, position_kp: float) -> bool:
         self.position_target = position
@@ -994,6 +1105,153 @@ class DashboardController:
         self.log(f"mit position target={position:+.3f} rad vlim={velocity_limit:.2f} rad/s sent")
         return True
 
+    def configure_private_position_motor(
+        self,
+        axis: str,
+        motor_id: int,
+        position: float,
+        velocity_limit: float,
+        acceleration: float,
+        position_kp: float,
+    ) -> bool:
+        motor_id &= 0xFF
+        self.prepare_private_mode_switch_for(
+            motor_id,
+            f"{axis} {fmt_id(motor_id)} disabled/clear-error before position configure",
+        )
+        if not self.write_private_run_mode_verified_for(motor_id, RUN_MODE_POSITION):
+            self.log(f"{axis} {fmt_id(motor_id)} position setup failed: run_mode did not verify")
+            return False
+        self.send_private_enable_to(motor_id)
+        self.wait_private_status_for(motor_id, 0.30)
+        self.write_private_param_f32_to(motor_id, PARAM_LIMIT_CUR, DEFAULT_CURRENT_LIMIT_A)
+        self.write_private_param_f32_to(motor_id, PARAM_PP_VEL_MAX, velocity_limit)
+        self.write_private_param_f32_to(motor_id, PARAM_PP_ACC_SET, acceleration)
+        self.write_private_param_f32_to(motor_id, PARAM_LOC_KP, position_kp)
+        self.write_private_param_f32_to(motor_id, PARAM_LOC_REF, position)
+        return True
+
+    def apply_arm_payload(self, payload: Dict[str, Any]) -> None:
+        self.arm_motor_ids = {
+            "base": parse_int(payload.get("armBaseMotorId"), self.arm_motor_ids["base"]) & 0xFF,
+            "shoulder": parse_int(payload.get("armShoulderMotorId"), self.arm_motor_ids["shoulder"]) & 0xFF,
+            "elbow": parse_int(payload.get("armElbowMotorId"), self.arm_motor_ids["elbow"]) & 0xFF,
+        }
+        self.arm_offsets = {
+            "base": parse_float(payload.get("armBaseOffset"), self.arm_offsets["base"]),
+            "shoulder": parse_float(payload.get("armShoulderOffset"), self.arm_offsets["shoulder"]),
+            "elbow": parse_float(payload.get("armElbowOffset"), self.arm_offsets["elbow"]),
+        }
+        self.arm_directions = {
+            "base": signed_direction(payload.get("armBaseDirection"), self.arm_directions["base"]),
+            "shoulder": signed_direction(payload.get("armShoulderDirection"), self.arm_directions["shoulder"]),
+            "elbow": signed_direction(payload.get("armElbowDirection"), self.arm_directions["elbow"]),
+        }
+        self.arm_link_1 = positive_float(payload.get("armLink1"), self.arm_link_1, 10.0)
+        self.arm_link_2 = positive_float(payload.get("armLink2"), self.arm_link_2, 10.0)
+        self.arm_target = {
+            "x": parse_float(payload.get("armTargetX"), self.arm_target["x"]),
+            "y": parse_float(payload.get("armTargetY"), self.arm_target["y"]),
+            "z": parse_float(payload.get("armTargetZ"), self.arm_target["z"]),
+        }
+        self.arm_elbow_up = bool(payload.get("armElbowUp", self.arm_elbow_up))
+        self.arm_velocity_limit = positive_float(payload.get("armVelocityLimit"), self.arm_velocity_limit, 20.0)
+        self.arm_acceleration = positive_float(payload.get("armAcceleration"), self.arm_acceleration, 200.0)
+        self.arm_position_kp = nonnegative_float(payload.get("armPositionKp"), self.arm_position_kp, 200.0)
+
+    def arm_motor_target(self, axis: str, joint_angle: float) -> float:
+        return self.arm_offsets[axis] + (self.arm_directions[axis] * joint_angle)
+
+    def move_arm_ik(self, payload: Dict[str, Any]) -> bool:
+        if self.protocol != PROTOCOL_PRIVATE:
+            self.log("Arm IK uses private protocol; switch Protocol to Private first")
+            return False
+        self.apply_arm_payload(payload)
+        solution = solve_three_axis_arm_ik(
+            self.arm_target["x"],
+            self.arm_target["y"],
+            self.arm_target["z"],
+            self.arm_link_1,
+            self.arm_link_2,
+            self.arm_elbow_up,
+        )
+        joint_angles = {
+            "base": solution.base,
+            "shoulder": solution.shoulder,
+            "elbow": solution.elbow,
+        }
+        motor_targets = {
+            axis: self.arm_motor_target(axis, joint_angles[axis])
+            for axis in ARM_AXES
+        }
+        self.oscillating = False
+        self.jog_active = False
+        self.velocity_configured = False
+        self.position_configured = False
+        self.arm_position_configured = False
+        self.commanded_speed = 0.0
+        self.log(
+            "Arm IK target "
+            f"x={self.arm_target['x']:+.3f} y={self.arm_target['y']:+.3f} z={self.arm_target['z']:+.3f} "
+            f"joints base={joint_angles['base']:+.3f} shoulder={joint_angles['shoulder']:+.3f} elbow={joint_angles['elbow']:+.3f}"
+        )
+        for axis in ARM_AXES:
+            if not self.configure_private_position_motor(
+                axis,
+                self.arm_motor_ids[axis],
+                motor_targets[axis],
+                self.arm_velocity_limit,
+                self.arm_acceleration,
+                self.arm_position_kp,
+            ):
+                self.stop_arm()
+                return False
+        self.arm_joint_angles = joint_angles
+        self.arm_motor_targets = motor_targets
+        self.arm_position_configured = True
+        self.last_arm_position_refresh_at = time.monotonic()
+        self.log(
+            "Arm targets sent "
+            f"base={motor_targets['base']:+.3f} shoulder={motor_targets['shoulder']:+.3f} elbow={motor_targets['elbow']:+.3f}"
+        )
+        return True
+
+    def send_arm_position_targets(self) -> None:
+        for axis in ARM_AXES:
+            self.write_private_param_f32_to(
+                self.arm_motor_ids[axis],
+                PARAM_LOC_REF,
+                self.arm_motor_targets[axis],
+            )
+        self.last_arm_position_refresh_at = time.monotonic()
+
+    def stop_arm(self) -> None:
+        self.arm_position_configured = False
+        self.velocity_configured = False
+        self.position_configured = False
+        self.oscillating = False
+        self.jog_active = False
+        self.commanded_speed = 0.0
+        for motor_id in sorted(set(self.arm_motor_ids.values())):
+            self.send_private_disable_to(motor_id, False)
+            self.wait_private_status_for(motor_id, 0.20)
+        self.log("Arm stop/disable sent")
+
+    def clear_arm_faults(self) -> None:
+        self.arm_position_configured = False
+        self.velocity_configured = False
+        self.position_configured = False
+        self.oscillating = False
+        self.jog_active = False
+        self.commanded_speed = 0.0
+        for motor_id in sorted(set(self.arm_motor_ids.values())):
+            self.send_private_disable_to(motor_id, True)
+            self.wait_private_status_for(motor_id, 0.20)
+        with self.lock:
+            self.last_private_fault = None
+            self.last_private_fault_at = 0.0
+        self.log("Arm clear-fault sent")
+
     def private_host_candidates(self) -> List[int]:
         out: List[int] = []
         for host in (self.host_id, *PRIVATE_HOST_CANDIDATES):
@@ -1022,6 +1280,7 @@ class DashboardController:
         self.commanded_speed = speed
         self.send_velocity_target(speed)
         self.position_configured = False
+        self.arm_position_configured = False
         self.log(f"{self.protocol} speed={speed:+.2f} rad/s sent")
         return True
 
@@ -1068,6 +1327,7 @@ class DashboardController:
         finally:
             self.velocity_configured = False
             self.position_configured = False
+            self.arm_position_configured = False
             self.commanded_speed = 0.0
             self.log("Stop/disable sent")
 
@@ -1178,6 +1438,12 @@ class DashboardController:
                     and not self.command_lock.locked()
                 ):
                     self.send_position_target()
+                if (
+                    self.arm_position_configured
+                    and now - self.last_arm_position_refresh_at >= ARM_POSITION_REFRESH_S
+                    and not self.command_lock.locked()
+                ):
+                    self.send_arm_position_targets()
             except Exception as exc:
                 self.log(f"motion update failed: {exc}")
             time.sleep(0.03)
@@ -1231,6 +1497,22 @@ class DashboardController:
                 "positionKp": self.position_kp,
                 "velocityConfigured": self.velocity_configured,
                 "positionConfigured": self.position_configured,
+                "arm": {
+                    "motorIds": dict(self.arm_motor_ids),
+                    "motorIdHex": {axis: fmt_id(self.arm_motor_ids[axis]) for axis in ARM_AXES},
+                    "offsets": dict(self.arm_offsets),
+                    "directions": dict(self.arm_directions),
+                    "link1": self.arm_link_1,
+                    "link2": self.arm_link_2,
+                    "target": dict(self.arm_target),
+                    "elbowUp": self.arm_elbow_up,
+                    "velocityLimit": self.arm_velocity_limit,
+                    "acceleration": self.arm_acceleration,
+                    "positionKp": self.arm_position_kp,
+                    "configured": self.arm_position_configured,
+                    "jointAngles": dict(self.arm_joint_angles),
+                    "motorTargets": dict(self.arm_motor_targets),
+                },
                 "activeReports": self.active_reports,
                 "oscillating": self.oscillating,
                 "jogActive": self.jog_active,

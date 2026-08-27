@@ -22,6 +22,26 @@ const positionControlIds = [
   "positionAccelerationInput",
   "positionKpInput",
 ];
+const armControlIds = [
+  "armBaseMotorIdInput",
+  "armShoulderMotorIdInput",
+  "armElbowMotorIdInput",
+  "armLink1Input",
+  "armLink2Input",
+  "armElbowUpToggle",
+  "armTargetXInput",
+  "armTargetYInput",
+  "armTargetZInput",
+  "armVelocityInput",
+  "armAccelerationInput",
+  "armKpInput",
+  "armBaseOffsetInput",
+  "armBaseDirectionInput",
+  "armShoulderOffsetInput",
+  "armShoulderDirectionInput",
+  "armElbowOffsetInput",
+  "armElbowDirectionInput",
+];
 const speedControlIds = ["speedSlider"];
 const dirtyControls = new Set();
 
@@ -42,6 +62,13 @@ function setControlValue(id, value) {
   }
 }
 
+function setControlChecked(id, checked) {
+  const el = $(id);
+  if (document.activeElement !== el && !dirtyControls.has(id)) {
+    el.checked = Boolean(checked);
+  }
+}
+
 function markDirty(id) {
   dirtyControls.add(id);
 }
@@ -53,6 +80,7 @@ function clearDirty(ids) {
 function clearCommandDirty(command, result) {
   if (result && result.ok === false) return;
   if (command === "move-position") clearDirty(positionControlIds);
+  if (command === "arm-move") clearDirty(armControlIds);
   if (command === "set-speed") clearDirty(speedControlIds);
 }
 
@@ -68,6 +96,28 @@ function commandPayload(command) {
       velocityLimit: numberInput("positionVelocityInput"),
       acceleration: numberInput("positionAccelerationInput"),
       positionKp: numberInput("positionKpInput"),
+    };
+  }
+  if (command === "arm-move") {
+    return {
+      armBaseMotorId: $("armBaseMotorIdInput").value.trim(),
+      armShoulderMotorId: $("armShoulderMotorIdInput").value.trim(),
+      armElbowMotorId: $("armElbowMotorIdInput").value.trim(),
+      armLink1: numberInput("armLink1Input"),
+      armLink2: numberInput("armLink2Input"),
+      armElbowUp: $("armElbowUpToggle").checked,
+      armTargetX: numberInput("armTargetXInput"),
+      armTargetY: numberInput("armTargetYInput"),
+      armTargetZ: numberInput("armTargetZInput"),
+      armVelocityLimit: numberInput("armVelocityInput"),
+      armAcceleration: numberInput("armAccelerationInput"),
+      armPositionKp: numberInput("armKpInput"),
+      armBaseOffset: numberInput("armBaseOffsetInput"),
+      armBaseDirection: $("armBaseDirectionInput").value,
+      armShoulderOffset: numberInput("armShoulderOffsetInput"),
+      armShoulderDirection: $("armShoulderDirectionInput").value,
+      armElbowOffset: numberInput("armElbowOffsetInput"),
+      armElbowDirection: $("armElbowDirectionInput").value,
     };
   }
   return {};
@@ -101,7 +151,7 @@ async function applyConfig() {
 }
 
 async function sendCommand(command, extra = {}) {
-  if (busy && !["stop", "zero-speed", "clear-fault"].includes(command)) return;
+  if (busy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault"].includes(command)) return;
   busy = true;
   renderBusy(true);
   try {
@@ -109,6 +159,8 @@ async function sendCommand(command, extra = {}) {
     const result = await post("/api/command", { command, ...extra });
     if (result && result.ok === false && result.message) {
       appendLocalLog(`Command failed: ${result.message}`);
+    } else if (result && result.message) {
+      appendLocalLog(result.message);
     }
     clearCommandDirty(command, result);
     await refresh();
@@ -123,7 +175,7 @@ async function sendCommand(command, extra = {}) {
 function renderBusy(isBusy) {
   commandButtons.forEach((button) => {
     const command = button.dataset.command;
-    button.disabled = isBusy && !["stop", "zero-speed", "clear-fault"].includes(command);
+    button.disabled = isBusy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault"].includes(command);
   });
   const updateRunning = Boolean(state && state.repo && state.repo.updateRunning);
   updateButtons.forEach((button) => {
@@ -198,6 +250,39 @@ function render(state) {
   setControlValue("positionVelocityInput", Number(state.positionVelocityLimit || 1).toFixed(2));
   setControlValue("positionAccelerationInput", Number(state.positionAcceleration || 10).toFixed(1));
   setControlValue("positionKpInput", Number(state.positionKp || 5).toFixed(1));
+  const arm = state.arm || {};
+  const armIds = arm.motorIdHex || {};
+  const armOffsets = arm.offsets || {};
+  const armDirections = arm.directions || {};
+  const armTarget = arm.target || {};
+  setControlValue("armBaseMotorIdInput", armIds.base || "0x7F");
+  setControlValue("armShoulderMotorIdInput", armIds.shoulder || "0x01");
+  setControlValue("armElbowMotorIdInput", armIds.elbow || "0x02");
+  setControlValue("armLink1Input", Number(arm.link1 || 0.25).toFixed(3));
+  setControlValue("armLink2Input", Number(arm.link2 || 0.25).toFixed(3));
+  setControlChecked("armElbowUpToggle", arm.elbowUp);
+  setControlValue("armTargetXInput", Number(armTarget.x || 0).toFixed(3));
+  setControlValue("armTargetYInput", Number(armTarget.y || 0).toFixed(3));
+  setControlValue("armTargetZInput", Number(armTarget.z || 0).toFixed(3));
+  setControlValue("armVelocityInput", Number(arm.velocityLimit || 1).toFixed(2));
+  setControlValue("armAccelerationInput", Number(arm.acceleration || 10).toFixed(1));
+  setControlValue("armKpInput", Number(arm.positionKp || 5).toFixed(1));
+  setControlValue("armBaseOffsetInput", Number(armOffsets.base || 0).toFixed(3));
+  setControlValue("armBaseDirectionInput", String(armDirections.base || 1));
+  setControlValue("armShoulderOffsetInput", Number(armOffsets.shoulder || 0).toFixed(3));
+  setControlValue("armShoulderDirectionInput", String(armDirections.shoulder || 1));
+  setControlValue("armElbowOffsetInput", Number(armOffsets.elbow || 0).toFixed(3));
+  setControlValue("armElbowDirectionInput", String(armDirections.elbow || 1));
+  $("armConfiguredState").textContent = arm.configured ? "Holding IK" : "Idle";
+  const armJoints = arm.jointAngles || {};
+  const armTargets = arm.motorTargets || {};
+  $("armSolution").textContent =
+    `joints rad  base=${Number(armJoints.base || 0).toFixed(3)} ` +
+    `shoulder=${Number(armJoints.shoulder || 0).toFixed(3)} ` +
+    `elbow=${Number(armJoints.elbow || 0).toFixed(3)}\n` +
+    `motors rad  base=${Number(armTargets.base || 0).toFixed(3)} ` +
+    `shoulder=${Number(armTargets.shoulder || 0).toFixed(3)} ` +
+    `elbow=${Number(armTargets.elbow || 0).toFixed(3)}`;
   $("activeReportsToggle").checked = state.activeReports;
 
   const feedback = state.lastFeedback;
@@ -307,6 +392,12 @@ configControlIds.forEach((id) => {
 });
 
 positionControlIds.forEach((id) => {
+  const el = $(id);
+  el.addEventListener("input", () => markDirty(id));
+  el.addEventListener("change", () => markDirty(id));
+});
+
+armControlIds.forEach((id) => {
   const el = $(id);
   el.addEventListener("input", () => markDirty(id));
   el.addEventListener("change", () => markDirty(id));

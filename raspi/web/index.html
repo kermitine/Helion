@@ -137,6 +137,121 @@
           </div>
         </div>
 
+        <div class="panel arm-panel">
+          <div class="panel-head">
+            <h2>Arm IK</h2>
+            <span id="armConfiguredState">Idle</span>
+          </div>
+
+          <h3>Motors</h3>
+          <div class="arm-grid">
+            <label>
+              <span>Base ID</span>
+              <input id="armBaseMotorIdInput" value="0x7F" autocomplete="off">
+            </label>
+            <label>
+              <span>Shoulder ID</span>
+              <input id="armShoulderMotorIdInput" value="0x01" autocomplete="off">
+            </label>
+            <label>
+              <span>Elbow ID</span>
+              <input id="armElbowMotorIdInput" value="0x02" autocomplete="off">
+            </label>
+          </div>
+
+          <h3>Geometry</h3>
+          <div class="arm-grid">
+            <label>
+              <span>Link 1</span>
+              <input id="armLink1Input" type="number" min="0.001" max="10" step="0.01" value="0.25" inputmode="decimal">
+            </label>
+            <label>
+              <span>Link 2</span>
+              <input id="armLink2Input" type="number" min="0.001" max="10" step="0.01" value="0.25" inputmode="decimal">
+            </label>
+            <label class="switch">
+              <input id="armElbowUpToggle" type="checkbox">
+              <span>Elbow Up</span>
+            </label>
+          </div>
+
+          <h3>Target</h3>
+          <div class="arm-grid">
+            <label>
+              <span>X</span>
+              <input id="armTargetXInput" type="number" step="0.01" value="0.25" inputmode="decimal">
+            </label>
+            <label>
+              <span>Y</span>
+              <input id="armTargetYInput" type="number" step="0.01" value="0.00" inputmode="decimal">
+            </label>
+            <label>
+              <span>Z</span>
+              <input id="armTargetZInput" type="number" step="0.01" value="0.10" inputmode="decimal">
+            </label>
+          </div>
+
+          <h3>Motion</h3>
+          <div class="arm-grid">
+            <label>
+              <span>Velocity Limit</span>
+              <input id="armVelocityInput" type="number" min="0.05" max="20" step="0.05" value="1.00" inputmode="decimal">
+            </label>
+            <label>
+              <span>Acceleration</span>
+              <input id="armAccelerationInput" type="number" min="0.1" max="200" step="0.5" value="10.0" inputmode="decimal">
+            </label>
+            <label>
+              <span>Position Kp</span>
+              <input id="armKpInput" type="number" min="0" max="200" step="0.5" value="5.0" inputmode="decimal">
+            </label>
+          </div>
+
+          <h3>Calibration</h3>
+          <div class="arm-grid arm-grid-wide">
+            <label>
+              <span>Base Offset</span>
+              <input id="armBaseOffsetInput" type="number" step="0.01" value="0.00" inputmode="decimal">
+            </label>
+            <label>
+              <span>Base Dir</span>
+              <select id="armBaseDirectionInput">
+                <option value="1">+1</option>
+                <option value="-1">-1</option>
+              </select>
+            </label>
+            <label>
+              <span>Shoulder Offset</span>
+              <input id="armShoulderOffsetInput" type="number" step="0.01" value="0.00" inputmode="decimal">
+            </label>
+            <label>
+              <span>Shoulder Dir</span>
+              <select id="armShoulderDirectionInput">
+                <option value="1">+1</option>
+                <option value="-1">-1</option>
+              </select>
+            </label>
+            <label>
+              <span>Elbow Offset</span>
+              <input id="armElbowOffsetInput" type="number" step="0.01" value="0.00" inputmode="decimal">
+            </label>
+            <label>
+              <span>Elbow Dir</span>
+              <select id="armElbowDirectionInput">
+                <option value="1">+1</option>
+                <option value="-1">-1</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="button-row arm-actions">
+            <button class="soft" data-command="arm-move">Move IK</button>
+            <button class="danger" data-command="arm-stop">Stop Arm</button>
+            <button class="danger" data-command="arm-clear-fault">Clear Arm Faults</button>
+          </div>
+          <pre id="armSolution">--</pre>
+        </div>
+
         <div class="panel telemetry-panel">
           <div class="panel-head">
             <h2>Telemetry</h2>
