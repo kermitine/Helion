@@ -741,6 +741,20 @@ class RobStrideSocketCanTool:
         self.wait_private_status(0.30)
         print("Private clear-error sent.")
 
+    def prepare_private_mode_switch(self, label: str) -> None:
+        # Some RobStride firmware ignores run_mode writes unless torque is
+        # explicitly disabled first. Clear-error alone can still leave the
+        # controller reporting the old run_mode.
+        self.send_private_disable(False)
+        status = self.wait_private_status(0.30)
+        print(f"  disable        {'ok' if status else 'sent, no status'}")
+        time.sleep(0.08)
+        self.send_private_disable(True)
+        status = self.wait_private_status(0.30)
+        print(f"  clear-error    {'ok' if status else 'sent, no status'}")
+        print(f"  {label}")
+        time.sleep(0.08)
+
     def clear_fault(self) -> None:
         self.oscillating = False
         self.jog_active = False
@@ -877,10 +891,7 @@ class RobStrideSocketCanTool:
         self.protocol = PROTOCOL_PRIVATE
 
         try:
-            self.send_private_disable(True)
-            status = self.wait_private_status(0.30)
-            print(f"  clear-error    {'ok' if status else 'sent, no status'}")
-            time.sleep(0.06)
+            self.prepare_private_mode_switch("mode-switch prep complete")
 
             verified = False
             original_host = self.host_id
@@ -995,10 +1006,7 @@ class RobStrideSocketCanTool:
         self.protocol = PROTOCOL_PRIVATE
 
         try:
-            self.send_private_disable(True)
-            status = self.wait_private_status(0.30)
-            print(f"  clear-error    {'ok' if status else 'sent, no status'}")
-            time.sleep(0.06)
+            self.prepare_private_mode_switch("mode-switch prep complete")
 
             verified = False
             original_host = self.host_id

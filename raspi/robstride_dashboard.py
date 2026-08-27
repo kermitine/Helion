@@ -678,8 +678,12 @@ class DashboardController:
         if command == "configure":
             return {"ok": self.configure_velocity()}
         if command == "forward":
+            self.oscillating = False
+            self.jog_active = False
             return {"ok": self.set_speed(abs(self.test_speed))}
         if command == "backward":
+            self.oscillating = False
+            self.jog_active = False
             return {"ok": self.set_speed(-abs(self.test_speed))}
         if command == "jog-left":
             return {"ok": self.start_jog(-1)}
@@ -691,6 +695,8 @@ class DashboardController:
             acceleration = positive_float(payload.get("acceleration"), self.position_acceleration, 200.0)
             return {"ok": self.move_position(position, velocity_limit, acceleration)}
         if command == "zero-speed":
+            self.oscillating = False
+            self.jog_active = False
             return {"ok": self.set_speed(0.0)}
         if command == "stop":
             self.stop_and_disable()
@@ -794,6 +800,21 @@ class DashboardController:
             self.last_private_fault_at = 0.0
         self.log(label)
 
+    def prepare_private_mode_switch(self, label: str) -> None:
+        # Some RobStride firmware ignores run_mode writes unless torque is
+        # explicitly disabled first. Clear-error alone can still leave the
+        # controller reporting the old run_mode.
+        self.send_private_disable(False)
+        self.wait_private_status(0.30)
+        time.sleep(0.08)
+        self.send_private_disable(True)
+        self.wait_private_status(0.30)
+        with self.lock:
+            self.last_private_fault = None
+            self.last_private_fault_at = 0.0
+        self.log(label)
+        time.sleep(0.08)
+
     def clear_fault(self) -> None:
         self.oscillating = False
         self.jog_active = False
@@ -815,8 +836,7 @@ class DashboardController:
             f"Configuring private velocity motor={fmt_id(self.motor_id)} "
             f"host={fmt_id(self.host_id)}"
         )
-        self.clear_private_fault("Private clear-error before velocity configure sent")
-        time.sleep(0.06)
+        self.prepare_private_mode_switch("Private disabled/clear-error before velocity configure")
 
         if not self.write_private_run_mode_verified(RUN_MODE_VELOCITY):
             self.log("Private velocity setup failed: run_mode did not verify")
@@ -899,8 +919,7 @@ class DashboardController:
             f"host={fmt_id(self.host_id)} pos={position:+.3f} rad vlim={velocity_limit:.2f} rad/s"
         )
 
-        self.clear_private_fault("Private clear-error before position configure sent")
-        time.sleep(0.06)
+        self.prepare_private_mode_switch("Private disabled/clear-error before position configure")
 
         if not self.write_private_run_mode_verified(RUN_MODE_POSITION):
             self.log("Private position setup failed: run_mode did not verify")
