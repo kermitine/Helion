@@ -24,6 +24,22 @@ function setControlValue(id, value) {
   }
 }
 
+function numberInput(id) {
+  const value = Number($(id).value);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function commandPayload(command) {
+  if (command === "move-position") {
+    return {
+      positionRad: numberInput("positionTargetInput"),
+      velocityLimit: numberInput("positionVelocityInput"),
+      acceleration: numberInput("positionAccelerationInput"),
+    };
+  }
+  return {};
+}
+
 async function post(path, payload) {
   const response = await fetch(path, {
     method: "POST",
@@ -127,14 +143,19 @@ function render(state) {
   status.textContent = state.connected ? "Online" : "Offline";
   status.className = `status-pill ${state.connected ? "online" : "offline"}`;
   $("subtitle").textContent = state.openError || state.transportLabel || `${state.interface} at 1 Mbps`;
-  $("configuredState").textContent = state.velocityConfigured
-    ? "Velocity configured"
-    : "Not configured";
+  $("configuredState").textContent = state.positionConfigured
+    ? "Position configured"
+    : state.velocityConfigured
+      ? "Velocity configured"
+      : "Not configured";
   $("busyState").textContent = state.busy ? "Busy" : "Idle";
   $("selectedMotor").textContent = state.motorIdHex;
 
   $("speedSlider").value = state.testSpeed;
   $("speedValue").textContent = `${Number(state.testSpeed).toFixed(2)} rad/s`;
+  setControlValue("positionTargetInput", Number(state.positionTarget || 0).toFixed(2));
+  setControlValue("positionVelocityInput", Number(state.positionVelocityLimit || 1).toFixed(2));
+  setControlValue("positionAccelerationInput", Number(state.positionAcceleration || 10).toFixed(1));
   $("activeReportsToggle").checked = state.activeReports;
 
   const feedback = state.lastFeedback;
@@ -210,7 +231,10 @@ document.querySelectorAll("[data-protocol]").forEach((button) => {
 });
 
 commandButtons.forEach((button) => {
-  button.addEventListener("click", () => sendCommand(button.dataset.command));
+  button.addEventListener("click", () => {
+    const command = button.dataset.command;
+    sendCommand(command, commandPayload(command));
+  });
 });
 
 $("speedSlider").addEventListener("input", () => {

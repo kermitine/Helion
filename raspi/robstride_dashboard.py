@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import mimetypes
 import os
 import subprocess
@@ -26,18 +27,26 @@ from robstride_socketcan import (
     DEFAULT_INTERFACE,
     DEFAULT_MODEL,
     DEFAULT_MOTOR_ID,
+    DEFAULT_POSITION_ACCEL_RAD_S2,
+    DEFAULT_POSITION_RAD,
+    DEFAULT_POSITION_VEL_RAD_S,
     DEFAULT_SERIAL_BAUD,
     DEFAULT_SERIAL_PORT,
     DEFAULT_SPEED_RAD_S,
+    MIT_TYPED_ID_POSITION,
     MIT_TYPED_ID_VELOCITY,
     PARAM_ACC_RAD,
+    PARAM_LOC_REF,
     PARAM_LIMIT_CUR,
+    PARAM_PP_ACC_SET,
+    PARAM_PP_VEL_MAX,
     PARAM_RUN_MODE,
     PARAM_SPD_REF,
     PRIVATE_HOST_CANDIDATES,
     PRIVATE_MODEL_LIMITS,
     PROTOCOL_MIT,
     PROTOCOL_PRIVATE,
+    RUN_MODE_POSITION,
     RUN_MODE_VELOCITY,
     SCAN_FIRST_MIT_ID,
     SCAN_FIRST_PRIVATE_ID,
@@ -54,6 +63,7 @@ from robstride_socketcan import (
     fmt_id,
     mit_active_report_payload,
     mit_fault_query_payload,
+    mit_position_payload,
     mit_set_mode_payload,
     mit_special,
     mit_typed_id,
@@ -98,6 +108,16 @@ def parse_float(value: Any, default: float) -> float:
     if value is None or value == "":
         return default
     return float(value)
+
+
+def positive_float(value: Any, default: float, maximum: float) -> float:
+    try:
+        parsed = parse_float(value, default)
+    except (TypeError, ValueError):
+        parsed = default
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        parsed = default
+    return min(abs(parsed), maximum)
 
 
 def can_stats(interface: str) -> Dict[str, str]:
@@ -170,7 +190,11 @@ class DashboardController:
         self.accept_any_feedback_id = True
         self.test_speed = DEFAULT_SPEED_RAD_S
         self.commanded_speed = 0.0
+        self.position_target = DEFAULT_POSITION_RAD
+        self.position_velocity_limit = DEFAULT_POSITION_VEL_RAD_S
+        self.position_acceleration = DEFAULT_POSITION_ACCEL_RAD_S2
         self.velocity_configured = False
+        self.position_configured = False
         self.active_reports = False
         self.oscillating = False
         self.jog_active = False
@@ -343,6 +367,7 @@ class DashboardController:
             self.oscillating = False
             self.jog_active = False
             self.velocity_configured = False
+            self.position_configured = False
             next_transport = transport or self.bus_transport()
             next_interface = interface or self.bus.interface
             next_serial_port = serial_port or getattr(self.bus, "serial_port", DEFAULT_SERIAL_PORT)
@@ -408,6 +433,13 @@ class DashboardController:
         self.send(
             mit_typed_id(MIT_TYPED_ID_VELOCITY, self.motor_id),
             mit_velocity_payload(speed, DEFAULT_CURRENT_LIMIT_A),
+            extended=False,
+        )
+
+    def send_mit_position(self, position: float, velocity_limit: float) -> None:
+        self.send(
+            mit_typed_id(MIT_TYPED_ID_POSITION, self.motor_id),
+            mit_position_payload(position, velocity_limit),
             extended=False,
         )
 
@@ -628,6 +660,11 @@ class DashboardController:
             return {"ok": self.start_jog(-1)}
         if command == "jog-right":
             return {"ok": self.start_jog(1)}
+        if command == "move-position":
+            position = parse_float(payload.get("positionRad"), self.position_target)
+            velocity_limit = positive_float(payload.get("velocityLimit"), self.position_velocity_limit, 20.0)
+            acceleration = positive_float(payload.get("acceleration"), self.position_acceleration, 200.0)
+            return {"ok": self.move_position(position, velocity_limit, acceleration)}
         if command == "zero-speed":
             return {"ok": self.set_speed(0.0)}
         if command == "stop":
@@ -672,6 +709,7 @@ class DashboardController:
                 self.feedback_id = parse_int(payload.get("feedbackId"), self.feedback_id) & CAN_SFF_MASK
                 self.model = str(payload.get("model") or self.model).lower()
                 self.velocity_configured = False
+                self.position_configured = False
                 self.oscillating = False
                 self.jog_active = False
                 bus_changed = (
@@ -701,6 +739,7 @@ class DashboardController:
 
     def configure_private_velocity(self) -> bool:
         self.velocity_configured = False
+        self.position_configured = False
         self.oscillating = False
         self.jog_active = False
         self.log(
@@ -711,26 +750,7 @@ class DashboardController:
         self.wait_private_status(0.25)
         time.sleep(0.06)
 
-        verified = False
-        original_host = self.host_id
-        for host in self.private_host_candidates():
-            self.host_id = host
-            for attempt in range(1, 4):
-                self.write_private_param_u8(PARAM_RUN_MODE, RUN_MODE_VELOCITY)
-                time.sleep(0.03)
-                raw = self.wait_private_param(PARAM_RUN_MODE, COMMAND_TIMEOUT_S)
-                if raw is None:
-                    self.log(f"host={fmt_id(host)} attempt={attempt} run_mode timeout")
-                    continue
-                self.log(f"host={fmt_id(host)} attempt={attempt} run_mode readback={raw[0]}")
-                if raw[0] == RUN_MODE_VELOCITY:
-                    verified = True
-                    break
-            if verified:
-                break
-
-        if not verified:
-            self.host_id = original_host
+        if not self.write_private_run_mode_verified(RUN_MODE_VELOCITY):
             self.log("Private velocity setup failed: run_mode did not verify")
             return False
 
@@ -741,11 +761,13 @@ class DashboardController:
         self.write_private_param_f32(PARAM_LIMIT_CUR, DEFAULT_CURRENT_LIMIT_A)
         self.write_private_param_f32(PARAM_ACC_RAD, DEFAULT_ACCEL_RAD_S2)
         self.velocity_configured = True
+        self.position_configured = False
         self.log("Private velocity mode configured")
         return True
 
     def configure_mit_velocity(self) -> bool:
         self.velocity_configured = False
+        self.position_configured = False
         self.oscillating = False
         self.jog_active = False
         self.log(
@@ -769,7 +791,95 @@ class DashboardController:
         self.send_mit_velocity(0.0)
         self.wait_mit_feedback(0.25, after_seq=start)
         self.velocity_configured = True
+        self.position_configured = False
         self.log("MIT velocity mode configured")
+        return True
+
+    def write_private_run_mode_verified(self, desired_mode: int) -> bool:
+        original_host = self.host_id
+        for host in self.private_host_candidates():
+            self.host_id = host
+            for attempt in range(1, 4):
+                self.write_private_param_u8(PARAM_RUN_MODE, desired_mode)
+                time.sleep(0.03)
+                raw = self.wait_private_param(PARAM_RUN_MODE, COMMAND_TIMEOUT_S)
+                if raw is None:
+                    self.log(f"host={fmt_id(host)} attempt={attempt} run_mode timeout")
+                    continue
+                self.log(f"host={fmt_id(host)} attempt={attempt} run_mode readback={raw[0]}")
+                if raw[0] == desired_mode:
+                    return True
+        self.host_id = original_host
+        return False
+
+    def move_position(self, position: float, velocity_limit: float, acceleration: float) -> bool:
+        self.position_target = position
+        self.position_velocity_limit = velocity_limit
+        self.position_acceleration = acceleration
+        if self.protocol == PROTOCOL_MIT:
+            return self.move_mit_position(position, velocity_limit)
+        return self.move_private_position(position, velocity_limit, acceleration)
+
+    def move_private_position(self, position: float, velocity_limit: float, acceleration: float) -> bool:
+        self.velocity_configured = False
+        self.position_configured = False
+        self.oscillating = False
+        self.jog_active = False
+        self.commanded_speed = 0.0
+        self.log(
+            f"Configuring private position motor={fmt_id(self.motor_id)} "
+            f"host={fmt_id(self.host_id)} pos={position:+.3f} rad vlim={velocity_limit:.2f} rad/s"
+        )
+
+        self.send_private_disable(False)
+        self.wait_private_status(0.25)
+        time.sleep(0.06)
+
+        if not self.write_private_run_mode_verified(RUN_MODE_POSITION):
+            self.log("Private position setup failed: run_mode did not verify")
+            return False
+
+        self.send_private_enable()
+        self.wait_private_status(0.30)
+        self.write_private_param_f32(PARAM_LIMIT_CUR, DEFAULT_CURRENT_LIMIT_A)
+        self.write_private_param_f32(PARAM_PP_VEL_MAX, velocity_limit)
+        self.write_private_param_f32(PARAM_PP_ACC_SET, acceleration)
+        self.write_private_param_f32(PARAM_LOC_REF, position)
+        self.position_configured = True
+        self.log(
+            f"private position target={position:+.3f} rad "
+            f"vlim={velocity_limit:.2f} rad/s acc={acceleration:.1f} rad/s^2 sent"
+        )
+        return True
+
+    def move_mit_position(self, position: float, velocity_limit: float) -> bool:
+        self.velocity_configured = False
+        self.position_configured = False
+        self.oscillating = False
+        self.jog_active = False
+        self.commanded_speed = 0.0
+        self.log(
+            f"Configuring MIT position motor={fmt_id(self.motor_id)} "
+            f"feedback={fmt_id(self.feedback_id, 3)} pos={position:+.3f} rad vlim={velocity_limit:.2f} rad/s"
+        )
+
+        start = self.current_seq()
+        self.send_mit_to_motor(mit_set_mode_payload(RUN_MODE_POSITION))
+        mode_fb = self.wait_mit_feedback(0.35, after_seq=start)
+        self.log("MIT mode=1 " + ("ok" if mode_fb else "sent, no feedback"))
+        time.sleep(0.06)
+
+        start = self.current_seq()
+        self.send_mit_to_motor(mit_special(0xFC))
+        enable_fb = self.wait_mit_feedback(0.35, after_seq=start)
+        self.log("MIT enable " + ("ok" if enable_fb else "sent, no feedback"))
+        time.sleep(0.06)
+
+        start = self.current_seq()
+        self.send_mit_position(position, velocity_limit)
+        self.wait_mit_feedback(0.35, after_seq=start)
+        self.position_configured = True
+        self.log(f"mit position target={position:+.3f} rad vlim={velocity_limit:.2f} rad/s sent")
         return True
 
     def private_host_candidates(self) -> List[int]:
@@ -788,6 +898,7 @@ class DashboardController:
             self.send_mit_velocity(speed)
         else:
             self.write_private_param_f32(PARAM_SPD_REF, speed)
+        self.position_configured = False
         self.log(f"{self.protocol} speed={speed:+.2f} rad/s sent")
         return True
 
@@ -833,6 +944,7 @@ class DashboardController:
                 self.send_private_disable(False)
         finally:
             self.velocity_configured = False
+            self.position_configured = False
             self.commanded_speed = 0.0
             self.log("Stop/disable sent")
 
@@ -854,7 +966,10 @@ class DashboardController:
         for index, label in (
             (PARAM_RUN_MODE, "run_mode"),
             (PARAM_SPD_REF, "spd_ref"),
+            (PARAM_LOC_REF, "loc_ref"),
             (PARAM_LIMIT_CUR, "limit_cur"),
+            (PARAM_PP_VEL_MAX, "vel_max"),
+            (PARAM_PP_ACC_SET, "acc_set"),
         ):
             raw = self.wait_private_param(index, COMMAND_TIMEOUT_S)
             if raw is None:
@@ -883,6 +998,7 @@ class DashboardController:
             self.motor_id = self.discovered_private[0]
             self.protocol = PROTOCOL_PRIVATE
             self.velocity_configured = False
+            self.position_configured = False
             self.log(f"Private scan found {len(self.discovered_private)} motor(s); selected {fmt_id(self.motor_id)}")
         else:
             self.log("Private scan found no motors")
@@ -907,6 +1023,7 @@ class DashboardController:
             self.motor_id = self.discovered_mit[0]
             self.protocol = PROTOCOL_MIT
             self.velocity_configured = False
+            self.position_configured = False
             self.log(f"MIT scan found {len(self.discovered_mit)} motor(s); selected {fmt_id(self.motor_id)}")
         else:
             self.log("MIT scan found no motors")
@@ -966,7 +1083,11 @@ class DashboardController:
                 "model": self.model,
                 "testSpeed": self.test_speed,
                 "commandedSpeed": self.commanded_speed,
+                "positionTarget": self.position_target,
+                "positionVelocityLimit": self.position_velocity_limit,
+                "positionAcceleration": self.position_acceleration,
                 "velocityConfigured": self.velocity_configured,
+                "positionConfigured": self.position_configured,
                 "activeReports": self.active_reports,
                 "oscillating": self.oscillating,
                 "jogActive": self.jog_active,

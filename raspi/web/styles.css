@@ -188,7 +188,9 @@ select {
 
 .button-row,
 .toggle-row,
-.motion-grid {
+.motion-grid,
+.jog-grid,
+.position-grid {
   display: grid;
   gap: 10px;
 }
@@ -234,6 +236,47 @@ input[type="range"] {
 
 .motion-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.jog-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+button.jog {
+  min-height: 74px;
+  border-width: 2px;
+  font-size: 1.1rem;
+  font-weight: 760;
+}
+
+button.jog-left {
+  background: #203351;
+  border-color: #5d9ef7;
+  color: #eaf3ff;
+}
+
+button.jog-right {
+  background: #14392e;
+  border-color: #56d6a8;
+  color: #eafff7;
+}
+
+.position-control {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.position-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.position-button {
+  width: 100%;
 }
 
 .toggle-row {
@@ -395,6 +438,8 @@ pre {
   .button-row,
   .toggle-row,
   .motion-grid,
+  .jog-grid,
+  .position-grid,
   .metric-grid,
   .speed-control {
     grid-template-columns: 1fr;

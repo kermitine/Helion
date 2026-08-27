@@ -62,11 +62,15 @@ COMM_SET_PROTOCOL = 0x19
 
 PARAM_RUN_MODE = 0x7005
 PARAM_SPD_REF = 0x700A
+PARAM_LOC_REF = 0x7016
+PARAM_LIMIT_SPD = 0x7017
 PARAM_LIMIT_CUR = 0x7018
 PARAM_MECH_POS = 0x7019
 PARAM_MECH_VEL = 0x701B
 PARAM_VBUS = 0x701C
 PARAM_ACC_RAD = 0x7022
+PARAM_PP_VEL_MAX = 0x7024
+PARAM_PP_ACC_SET = 0x7025
 
 RUN_MODE_MIT = 0
 RUN_MODE_POSITION = 1
@@ -82,6 +86,9 @@ PROTOCOL_MIT = "mit"
 
 DEFAULT_SPEED_RAD_S = 0.30
 MOTOR_STUDIO_JOG_SPEED_RAD_S = 1.0
+DEFAULT_POSITION_RAD = 0.0
+DEFAULT_POSITION_VEL_RAD_S = 1.0
+DEFAULT_POSITION_ACCEL_RAD_S2 = 10.0
 DEFAULT_CURRENT_LIMIT_A = 1.00
 DEFAULT_ACCEL_RAD_S2 = 5.0
 OSCILLATION_PERIOD_S = 2.5
@@ -271,6 +278,10 @@ def mit_fault_query_payload(clear_fault: bool = False) -> bytes:
 
 def mit_velocity_payload(velocity_rad_s: float, current_limit_a: float) -> bytes:
     return f32_le(velocity_rad_s) + f32_le(abs(current_limit_a))
+
+
+def mit_position_payload(position_rad: float, velocity_limit_rad_s: float) -> bytes:
+    return f32_le(position_rad) + f32_le(abs(velocity_limit_rad_s))
 
 
 def decode_mit_feedback(frame: CanFrame) -> Optional[MitFeedback]:
@@ -757,6 +768,13 @@ class RobStrideSocketCanTool:
             extended=False,
         )
 
+    def send_mit_position(self, position_rad: float, velocity_limit_rad_s: float) -> None:
+        self.bus.send(
+            mit_typed_id(MIT_TYPED_ID_POSITION, self.motor_id),
+            mit_position_payload(position_rad, velocity_limit_rad_s),
+            extended=False,
+        )
+
     def wait_mit_feedback_frame(self, timeout_s: float, motor_id: Optional[int] = None) -> Optional[CanFrame]:
         expected_motor_id = self.motor_id if motor_id is None else motor_id
 
@@ -877,6 +895,121 @@ class RobStrideSocketCanTool:
         if self.protocol == PROTOCOL_MIT:
             return self.configure_mit_velocity()
         return self.configure_private_velocity()
+
+    def move_position(
+        self,
+        position_rad: float,
+        velocity_limit_rad_s: float = DEFAULT_POSITION_VEL_RAD_S,
+        acceleration_rad_s2: float = DEFAULT_POSITION_ACCEL_RAD_S2,
+    ) -> bool:
+        if self.protocol == PROTOCOL_MIT:
+            return self.move_mit_position(position_rad, velocity_limit_rad_s)
+        return self.move_private_position(position_rad, velocity_limit_rad_s, acceleration_rad_s2)
+
+    def move_private_position(
+        self,
+        position_rad: float,
+        velocity_limit_rad_s: float,
+        acceleration_rad_s2: float,
+    ) -> bool:
+        velocity_limit = abs(velocity_limit_rad_s) or DEFAULT_POSITION_VEL_RAD_S
+        acceleration = abs(acceleration_rad_s2) or DEFAULT_POSITION_ACCEL_RAD_S2
+
+        print("Configuring private extended-ID position mode:")
+        print(
+            f"  motor={fmt_id(self.motor_id)} host={fmt_id(self.host_id)} "
+            f"pos={position_rad:+.3f} rad vlim={velocity_limit:.2f} rad/s acc={acceleration:.1f} rad/s^2"
+        )
+        self.oscillating = False
+        self.jog_active = False
+        self.velocity_mode_configured = False
+        self.protocol = PROTOCOL_PRIVATE
+
+        try:
+            self.send_private_disable(False)
+            status = self.wait_private_status(0.25)
+            print(f"  disable        {'ok' if status else 'sent, no status'}")
+            time.sleep(0.06)
+
+            verified = False
+            original_host = self.host_id
+            for host in self.private_host_candidates():
+                self.host_id = host
+                for attempt in range(1, 4):
+                    self.write_private_param_u8(PARAM_RUN_MODE, RUN_MODE_POSITION)
+                    time.sleep(0.03)
+                    raw = self.wait_private_param(PARAM_RUN_MODE, 0.50)
+                    if raw is None:
+                        print(f"    host={fmt_id(host)} attempt={attempt} run_mode readback timeout")
+                        continue
+                    actual = raw[0]
+                    print(f"    host={fmt_id(host)} attempt={attempt} run_mode readback={actual}")
+                    if actual == RUN_MODE_POSITION:
+                        verified = True
+                        break
+                if verified:
+                    break
+            if not verified:
+                self.host_id = original_host
+                print("  run_mode=1     FAILED")
+                return False
+
+            print("  run_mode=1     ok")
+            self.send_private_enable()
+            print(f"  enable         {'ok' if self.wait_private_status(0.30) else 'sent, no status'}")
+            time.sleep(0.08)
+            self.write_private_param_f32(PARAM_LIMIT_CUR, DEFAULT_CURRENT_LIMIT_A)
+            print("  limit_cur      sent")
+            time.sleep(0.04)
+            self.write_private_param_f32(PARAM_PP_VEL_MAX, velocity_limit)
+            print("  vel_max        sent")
+            time.sleep(0.04)
+            self.write_private_param_f32(PARAM_PP_ACC_SET, acceleration)
+            print("  acc_set        sent")
+            time.sleep(0.04)
+            self.write_private_param_f32(PARAM_LOC_REF, position_rad)
+            print("  loc_ref        sent")
+        except OSError as exc:
+            print(f"  CAN TX failed: {exc}")
+            return False
+
+        self.commanded_speed = 0.0
+        print("Private position target sent.")
+        return True
+
+    def move_mit_position(self, position_rad: float, velocity_limit_rad_s: float) -> bool:
+        velocity_limit = abs(velocity_limit_rad_s) or DEFAULT_POSITION_VEL_RAD_S
+        print("Configuring MotorBridge MIT-standard position mode:")
+        print(
+            f"  motor={fmt_id(self.motor_id)} feedback={fmt_id(self.feedback_id)} "
+            f"pos={position_rad:+.3f} rad vlim={velocity_limit:.2f} rad/s"
+        )
+        self.oscillating = False
+        self.jog_active = False
+        self.velocity_mode_configured = False
+        self.protocol = PROTOCOL_MIT
+
+        try:
+            self.send_mit_set_mode(RUN_MODE_POSITION)
+            mode_feedback = self.wait_mit_feedback(0.35)
+            print(f"  mit mode=1     {'ok' if mode_feedback else 'sent, no feedback'}")
+
+            time.sleep(0.06)
+            self.send_mit_enable()
+            enable_feedback = self.wait_mit_feedback(0.35)
+            print(f"  mit enable     {'ok' if enable_feedback else 'sent, no feedback'}")
+
+            time.sleep(0.06)
+            self.send_mit_position(position_rad, velocity_limit)
+            pos_feedback = self.wait_mit_feedback(0.35)
+            print(f"  mit pos        {'ok' if pos_feedback else 'sent'}")
+        except OSError as exc:
+            print(f"  CAN TX failed: {exc}")
+            return False
+
+        self.commanded_speed = 0.0
+        print("MotorBridge MIT position target sent.")
+        return True
 
     def send_speed_target(self, speed_rad_s: float) -> bool:
         try:
@@ -1372,6 +1505,8 @@ def run_for_duration(tool: RobStrideSocketCanTool, duration_s: float) -> None:
 def run_encoding_self_test(verbose: bool = False) -> bool:
     private_ping = build_private_ext_id(COMM_GET_ID, DEFAULT_HOST_ID, DEFAULT_MOTOR_ID)
     private_reply_parts = split_private_ext_id(0x00007FFE)
+    mit_pos_id = mit_typed_id(MIT_TYPED_ID_POSITION, DEFAULT_MOTOR_ID)
+    mit_pos = mit_position_payload(1.0, 0.5)
     mit_vel_id = mit_typed_id(MIT_TYPED_ID_VELOCITY, DEFAULT_MOTOR_ID)
     mit_vel = mit_velocity_payload(0.30, 1.0)
     official_private_write_id = build_private_ext_id(COMM_WRITE_PARAM, DEFAULT_HOST_ID, 0x01)
@@ -1386,6 +1521,8 @@ def run_encoding_self_test(verbose: bool = False) -> bool:
     passed = (
         private_ping == 0x0000FD7F
         and private_reply_parts == (0, 0x007F, 0xFE)
+        and mit_pos_id == 0x17F
+        and len(mit_pos) == 8
         and mit_vel_id == 0x27F
         and len(mit_vel) == 8
         and mit_special(0xFC) == bytes([0xFF] * 7 + [0xFC])
@@ -1396,6 +1533,7 @@ def run_encoding_self_test(verbose: bool = False) -> bool:
         print(f"encoding self-test {'PASSED' if passed else 'FAILED'}")
         print(f"  private Get-ID id={fmt_id(private_ping, 8)}")
         print(f"  private reply 0x00007FFE parts={private_reply_parts}")
+        print(f"  MIT position id={fmt_id(mit_pos_id, 3)} data={bytes_hex(mit_pos)}")
         print(f"  MIT velocity id={fmt_id(mit_vel_id, 3)} data={bytes_hex(mit_vel)}")
         print(f"  RobStride serial example={bytes_hex(official_serial)}")
     return passed
@@ -1431,6 +1569,7 @@ def parse_args() -> argparse.Namespace:
             "vel",
             "jog-left",
             "jog-right",
+            "position",
             "stop",
             "status",
             "raw",
@@ -1438,6 +1577,9 @@ def parse_args() -> argparse.Namespace:
         default="interactive",
     )
     parser.add_argument("--vel", type=float, default=DEFAULT_SPEED_RAD_S, help="velocity for --command vel")
+    parser.add_argument("--pos", type=float, default=DEFAULT_POSITION_RAD, help="target radian position for --command position")
+    parser.add_argument("--vlim", type=float, default=DEFAULT_POSITION_VEL_RAD_S, help="position velocity limit")
+    parser.add_argument("--acc", type=float, default=DEFAULT_POSITION_ACCEL_RAD_S2, help="private PP position acceleration")
     parser.add_argument("--duration", type=float, default=0.75, help="run duration for one-shot motion commands")
     parser.add_argument(
         "--scan-timeout-ms",
@@ -1515,6 +1657,10 @@ def main() -> int:
         elif args.command == "jog-right":
             tool.start_jog(1)
             run_for_duration(tool, MOTOR_STUDIO_JOG_S + 0.25)
+            tool.stop_and_disable()
+        elif args.command == "position":
+            tool.move_position(args.pos, args.vlim, args.acc)
+            run_for_duration(tool, args.duration)
             tool.stop_and_disable()
         elif args.command == "stop":
             tool.stop_and_disable()

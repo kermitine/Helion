@@ -90,15 +90,36 @@
             <output id="speedValue">0.30 rad/s</output>
           </div>
 
+          <div class="jog-grid">
+            <button class="jog jog-left" data-command="jog-left">&larr; Jog Left</button>
+            <button class="jog jog-right" data-command="jog-right">Jog Right &rarr;</button>
+          </div>
+
           <div class="motion-grid">
             <button class="soft" data-command="configure">Configure</button>
             <button class="danger" data-command="stop">Stop</button>
-            <button data-command="jog-left">Jog Left</button>
-            <button data-command="jog-right">Jog Right</button>
             <button data-command="backward">Reverse</button>
             <button data-command="forward">Forward</button>
             <button data-command="zero-speed">Zero Speed</button>
             <button data-command="toggle-oscillation">Oscillate</button>
+          </div>
+
+          <div class="position-control">
+            <div class="position-grid">
+              <label>
+                <span>Target Position</span>
+                <input id="positionTargetInput" type="number" step="0.05" value="0.00" inputmode="decimal">
+              </label>
+              <label>
+                <span>Velocity Limit</span>
+                <input id="positionVelocityInput" type="number" min="0.05" max="20" step="0.05" value="1.00" inputmode="decimal">
+              </label>
+              <label>
+                <span>Acceleration</span>
+                <input id="positionAccelerationInput" type="number" min="0.1" max="200" step="0.5" value="10.0" inputmode="decimal">
+              </label>
+            </div>
+            <button class="soft position-button" data-command="move-position">Move Position</button>
           </div>
 
           <div class="toggle-row">
