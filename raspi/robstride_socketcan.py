@@ -68,6 +68,7 @@ PARAM_LIMIT_CUR = 0x7018
 PARAM_MECH_POS = 0x7019
 PARAM_MECH_VEL = 0x701B
 PARAM_VBUS = 0x701C
+PARAM_LOC_KP = 0x701E
 PARAM_ACC_RAD = 0x7022
 PARAM_PP_VEL_MAX = 0x7024
 PARAM_PP_ACC_SET = 0x7025
@@ -89,11 +90,13 @@ MOTOR_STUDIO_JOG_SPEED_RAD_S = 1.0
 DEFAULT_POSITION_RAD = 0.0
 DEFAULT_POSITION_VEL_RAD_S = 1.0
 DEFAULT_POSITION_ACCEL_RAD_S2 = 10.0
+DEFAULT_POSITION_KP = 5.0
 DEFAULT_CURRENT_LIMIT_A = 1.00
 DEFAULT_ACCEL_RAD_S2 = 5.0
 OSCILLATION_PERIOD_S = 2.5
 MOTOR_STUDIO_JOG_S = 0.75
 VELOCITY_REFRESH_S = 0.10
+POSITION_REFRESH_S = 0.10
 RAW_TRACE_DURATION_S = 3.0
 RAW_TRACE_FRAME_LIMIT = 32
 STATUS_PRINT_PERIOD_S = 0.5
@@ -653,14 +656,20 @@ class RobStrideSocketCanTool:
         self.scan_per_id_timeout_s = scan_per_id_timeout_s
 
         self.velocity_mode_configured = False
+        self.position_mode_configured = False
         self.oscillating = False
         self.jog_active = False
         self.active_reports = False
         self.test_speed = DEFAULT_SPEED_RAD_S
         self.commanded_speed = 0.0
+        self.position_target = DEFAULT_POSITION_RAD
+        self.position_velocity_limit = DEFAULT_POSITION_VEL_RAD_S
+        self.position_acceleration = DEFAULT_POSITION_ACCEL_RAD_S2
+        self.position_kp = DEFAULT_POSITION_KP
         self.jog_stop_at = 0.0
         self.last_oscillation_at = time.monotonic()
         self.last_velocity_refresh_at = 0.0
+        self.last_position_refresh_at = 0.0
         self.last_feedback_at = 0.0
         self.last_status_print_at = 0.0
         self.raw_trace_until = 0.0
@@ -890,6 +899,7 @@ class RobStrideSocketCanTool:
         self.oscillating = False
         self.jog_active = False
         self.velocity_mode_configured = False
+        self.position_mode_configured = False
         self.protocol = PROTOCOL_PRIVATE
 
         try:
@@ -948,6 +958,7 @@ class RobStrideSocketCanTool:
         self.oscillating = False
         self.jog_active = False
         self.velocity_mode_configured = False
+        self.position_mode_configured = False
         self.protocol = PROTOCOL_MIT
 
         try:
@@ -983,28 +994,37 @@ class RobStrideSocketCanTool:
         position_rad: float,
         velocity_limit_rad_s: float = DEFAULT_POSITION_VEL_RAD_S,
         acceleration_rad_s2: float = DEFAULT_POSITION_ACCEL_RAD_S2,
+        position_kp: float = DEFAULT_POSITION_KP,
     ) -> bool:
+        self.position_target = position_rad
+        self.position_velocity_limit = abs(velocity_limit_rad_s) or DEFAULT_POSITION_VEL_RAD_S
+        self.position_acceleration = abs(acceleration_rad_s2) or DEFAULT_POSITION_ACCEL_RAD_S2
+        self.position_kp = position_kp
         if self.protocol == PROTOCOL_MIT:
             return self.move_mit_position(position_rad, velocity_limit_rad_s)
-        return self.move_private_position(position_rad, velocity_limit_rad_s, acceleration_rad_s2)
+        return self.move_private_position(position_rad, velocity_limit_rad_s, acceleration_rad_s2, position_kp)
 
     def move_private_position(
         self,
         position_rad: float,
         velocity_limit_rad_s: float,
         acceleration_rad_s2: float,
+        position_kp: float,
     ) -> bool:
         velocity_limit = abs(velocity_limit_rad_s) or DEFAULT_POSITION_VEL_RAD_S
         acceleration = abs(acceleration_rad_s2) or DEFAULT_POSITION_ACCEL_RAD_S2
+        kp = position_kp if position_kp >= 0.0 else DEFAULT_POSITION_KP
 
         print("Configuring private extended-ID position mode:")
         print(
             f"  motor={fmt_id(self.motor_id)} host={fmt_id(self.host_id)} "
-            f"pos={position_rad:+.3f} rad vlim={velocity_limit:.2f} rad/s acc={acceleration:.1f} rad/s^2"
+            f"pos={position_rad:+.3f} rad vlim={velocity_limit:.2f} rad/s "
+            f"acc={acceleration:.1f} rad/s^2 loc_kp={kp:.2f}"
         )
         self.oscillating = False
         self.jog_active = False
         self.velocity_mode_configured = False
+        self.position_mode_configured = False
         self.protocol = PROTOCOL_PRIVATE
 
         try:
@@ -1046,6 +1066,9 @@ class RobStrideSocketCanTool:
             self.write_private_param_f32(PARAM_PP_ACC_SET, acceleration)
             print("  acc_set        sent")
             time.sleep(0.04)
+            self.write_private_param_f32(PARAM_LOC_KP, kp)
+            print("  loc_kp         sent")
+            time.sleep(0.04)
             self.write_private_param_f32(PARAM_LOC_REF, position_rad)
             print("  loc_ref        sent")
         except OSError as exc:
@@ -1053,6 +1076,12 @@ class RobStrideSocketCanTool:
             return False
 
         self.commanded_speed = 0.0
+        self.position_target = position_rad
+        self.position_velocity_limit = velocity_limit
+        self.position_acceleration = acceleration
+        self.position_kp = kp
+        self.position_mode_configured = True
+        self.last_position_refresh_at = time.monotonic()
         print("Private position target sent.")
         return True
 
@@ -1066,6 +1095,7 @@ class RobStrideSocketCanTool:
         self.oscillating = False
         self.jog_active = False
         self.velocity_mode_configured = False
+        self.position_mode_configured = False
         self.protocol = PROTOCOL_MIT
 
         try:
@@ -1087,6 +1117,10 @@ class RobStrideSocketCanTool:
             return False
 
         self.commanded_speed = 0.0
+        self.position_target = position_rad
+        self.position_velocity_limit = velocity_limit
+        self.position_mode_configured = True
+        self.last_position_refresh_at = time.monotonic()
         print("MotorBridge MIT position target sent.")
         return True
 
@@ -1105,11 +1139,28 @@ class RobStrideSocketCanTool:
         self.last_velocity_refresh_at = time.monotonic()
         return True
 
+    def send_position_target(self, wait_feedback: bool = False) -> bool:
+        try:
+            if self.protocol == PROTOCOL_MIT:
+                self.send_mit_position(self.position_target, self.position_velocity_limit)
+                if wait_feedback:
+                    feedback = self.wait_mit_feedback(0.10)
+                    if feedback is not None:
+                        self.print_mit_feedback(feedback, prefix="  ")
+            else:
+                self.write_private_param_f32(PARAM_LOC_REF, self.position_target)
+        except OSError as exc:
+            print(f"CAN TX failed: {exc}")
+            return False
+        self.last_position_refresh_at = time.monotonic()
+        return True
+
     def set_speed(self, speed_rad_s: float) -> bool:
         if not self.velocity_mode_configured and not self.configure_velocity_mode():
             print("Velocity mode setup failed.")
             return False
         self.commanded_speed = speed_rad_s
+        self.position_mode_configured = False
         ok = self.send_speed_target(self.commanded_speed)
         print(f"{self.protocol} speed={self.commanded_speed:+.2f} rad/s {'sent' if ok else 'FAILED'}")
         return ok
@@ -1134,6 +1185,7 @@ class RobStrideSocketCanTool:
     def stop_and_disable(self) -> None:
         self.oscillating = False
         self.jog_active = False
+        self.position_mode_configured = False
         if self.velocity_mode_configured:
             self.send_speed_target(0.0)
             time.sleep(0.08)
@@ -1148,9 +1200,11 @@ class RobStrideSocketCanTool:
                 self.wait_private_status(0.25)
         except OSError as exc:
             print(f"CAN TX failed while stopping: {exc}")
-        self.velocity_mode_configured = False
-        self.commanded_speed = 0.0
-        print("Stop/disable sent.")
+        finally:
+            self.velocity_mode_configured = False
+            self.position_mode_configured = False
+            self.commanded_speed = 0.0
+            print("Stop/disable sent.")
 
     def set_active_report(self, enabled: bool) -> None:
         try:
@@ -1184,6 +1238,10 @@ class RobStrideSocketCanTool:
 
         reads = [
             (PARAM_RUN_MODE, "run_mode", "u8"),
+            (PARAM_LOC_REF, "loc_ref", "f32"),
+            (PARAM_LOC_KP, "loc_kp", "f32"),
+            (PARAM_PP_VEL_MAX, "vel_max", "f32"),
+            (PARAM_PP_ACC_SET, "acc_set", "f32"),
             (PARAM_MECH_VEL, "mechVel", "f32"),
             (PARAM_MECH_POS, "mechPos", "f32"),
             (PARAM_VBUS, "VBUS", "f32"),
@@ -1433,11 +1491,19 @@ class RobStrideSocketCanTool:
         if now - self.last_velocity_refresh_at >= VELOCITY_REFRESH_S:
             self.send_speed_target(self.commanded_speed, wait_feedback=False)
 
+    def update_position_refresh(self) -> None:
+        if not self.position_mode_configured:
+            return
+        now = time.monotonic()
+        if now - self.last_position_refresh_at >= POSITION_REFRESH_S:
+            self.send_position_target(wait_feedback=False)
+
     def update(self) -> None:
         self.update_raw_trace()
         self.update_jog()
         self.update_oscillation()
         self.update_velocity_refresh()
+        self.update_position_refresh()
 
     def print_interface_status(self) -> None:
         stats = self.bus.stats() if hasattr(self.bus, "stats") else {}
@@ -1675,6 +1741,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pos", type=float, default=DEFAULT_POSITION_RAD, help="target radian position for --command position")
     parser.add_argument("--vlim", type=float, default=DEFAULT_POSITION_VEL_RAD_S, help="position velocity limit")
     parser.add_argument("--acc", type=float, default=DEFAULT_POSITION_ACCEL_RAD_S2, help="private PP position acceleration")
+    parser.add_argument("--loc-kp", type=float, default=DEFAULT_POSITION_KP, help="private position gain")
     parser.add_argument("--duration", type=float, default=0.75, help="run duration for one-shot motion commands")
     parser.add_argument(
         "--scan-timeout-ms",
@@ -1754,7 +1821,7 @@ def main() -> int:
             run_for_duration(tool, MOTOR_STUDIO_JOG_S + 0.25)
             tool.stop_and_disable()
         elif args.command == "position":
-            tool.move_position(args.pos, args.vlim, args.acc)
+            tool.move_position(args.pos, args.vlim, args.acc, args.loc_kp)
             run_for_duration(tool, args.duration)
             tool.stop_and_disable()
         elif args.command == "clear-fault":

@@ -20,6 +20,7 @@ const positionControlIds = [
   "positionTargetInput",
   "positionVelocityInput",
   "positionAccelerationInput",
+  "positionKpInput",
 ];
 const speedControlIds = ["speedSlider"];
 const dirtyControls = new Set();
@@ -66,6 +67,7 @@ function commandPayload(command) {
       positionRad: numberInput("positionTargetInput"),
       velocityLimit: numberInput("positionVelocityInput"),
       acceleration: numberInput("positionAccelerationInput"),
+      positionKp: numberInput("positionKpInput"),
     };
   }
   return {};
@@ -195,6 +197,7 @@ function render(state) {
   setControlValue("positionTargetInput", Number(state.positionTarget || 0).toFixed(2));
   setControlValue("positionVelocityInput", Number(state.positionVelocityLimit || 1).toFixed(2));
   setControlValue("positionAccelerationInput", Number(state.positionAcceleration || 10).toFixed(1));
+  setControlValue("positionKpInput", Number(state.positionKp || 5).toFixed(1));
   $("activeReportsToggle").checked = state.activeReports;
 
   const feedback = state.lastFeedback;

@@ -28,6 +28,7 @@ from robstride_socketcan import (
     DEFAULT_MODEL,
     DEFAULT_MOTOR_ID,
     DEFAULT_POSITION_ACCEL_RAD_S2,
+    DEFAULT_POSITION_KP,
     DEFAULT_POSITION_RAD,
     DEFAULT_POSITION_VEL_RAD_S,
     DEFAULT_SERIAL_BAUD,
@@ -38,6 +39,7 @@ from robstride_socketcan import (
     PARAM_ACC_RAD,
     PARAM_LOC_REF,
     PARAM_LIMIT_CUR,
+    PARAM_LOC_KP,
     PARAM_PP_ACC_SET,
     PARAM_PP_VEL_MAX,
     PARAM_RUN_MODE,
@@ -89,6 +91,7 @@ MOTOR_STUDIO_JOG_SPEED_RAD_S = 1.0
 MOTOR_STUDIO_JOG_S = 0.75
 OSCILLATION_PERIOD_S = 2.5
 VELOCITY_REFRESH_S = 0.10
+POSITION_REFRESH_S = 0.10
 MAX_LOG_LINES = 240
 MAX_FRAME_HISTORY = 600
 COMMAND_TIMEOUT_S = 0.6
@@ -97,7 +100,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 REPO_DIR = ROOT_DIR.parent
 WEB_DIR = ROOT_DIR / "web"
 UPDATE_LOG_PATH = ROOT_DIR / "update.log"
-APP_VERSION = "2026.08.27.3"
+APP_VERSION = "2026.08.27.4"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -122,6 +125,16 @@ def positive_float(value: Any, default: float, maximum: float) -> float:
     if not math.isfinite(parsed) or parsed <= 0.0:
         parsed = default
     return min(abs(parsed), maximum)
+
+
+def nonnegative_float(value: Any, default: float, maximum: float) -> float:
+    try:
+        parsed = parse_float(value, default)
+    except (TypeError, ValueError):
+        parsed = default
+    if not math.isfinite(parsed) or parsed < 0.0:
+        parsed = default
+    return min(parsed, maximum)
 
 
 def can_stats(interface: str) -> Dict[str, str]:
@@ -197,6 +210,7 @@ class DashboardController:
         self.position_target = DEFAULT_POSITION_RAD
         self.position_velocity_limit = DEFAULT_POSITION_VEL_RAD_S
         self.position_acceleration = DEFAULT_POSITION_ACCEL_RAD_S2
+        self.position_kp = DEFAULT_POSITION_KP
         self.velocity_configured = False
         self.position_configured = False
         self.active_reports = False
@@ -205,6 +219,7 @@ class DashboardController:
         self.jog_stop_at = 0.0
         self.last_oscillation_at = time.monotonic()
         self.last_velocity_refresh_at = 0.0
+        self.last_position_refresh_at = 0.0
         self.last_feedback_at = 0.0
         self.last_private_fault_at = 0.0
         self.last_raw_frame: Optional[Dict[str, Any]] = None
@@ -696,7 +711,8 @@ class DashboardController:
             position = parse_float(payload.get("positionRad"), self.position_target)
             velocity_limit = positive_float(payload.get("velocityLimit"), self.position_velocity_limit, 20.0)
             acceleration = positive_float(payload.get("acceleration"), self.position_acceleration, 200.0)
-            return {"ok": self.move_position(position, velocity_limit, acceleration)}
+            position_kp = nonnegative_float(payload.get("positionKp"), self.position_kp, 200.0)
+            return {"ok": self.move_position(position, velocity_limit, acceleration, position_kp)}
         if command == "zero-speed":
             self.oscillating = False
             self.jog_active = False
@@ -903,23 +919,26 @@ class DashboardController:
         self.host_id = original_host
         return False
 
-    def move_position(self, position: float, velocity_limit: float, acceleration: float) -> bool:
+    def move_position(self, position: float, velocity_limit: float, acceleration: float, position_kp: float) -> bool:
         self.position_target = position
         self.position_velocity_limit = velocity_limit
         self.position_acceleration = acceleration
+        self.position_kp = position_kp
         if self.protocol == PROTOCOL_MIT:
             return self.move_mit_position(position, velocity_limit)
-        return self.move_private_position(position, velocity_limit, acceleration)
+        return self.move_private_position(position, velocity_limit, acceleration, position_kp)
 
-    def move_private_position(self, position: float, velocity_limit: float, acceleration: float) -> bool:
+    def move_private_position(self, position: float, velocity_limit: float, acceleration: float, position_kp: float) -> bool:
         self.velocity_configured = False
         self.position_configured = False
         self.oscillating = False
         self.jog_active = False
         self.commanded_speed = 0.0
+        kp = max(0.0, position_kp)
         self.log(
             f"Configuring private position motor={fmt_id(self.motor_id)} "
-            f"host={fmt_id(self.host_id)} pos={position:+.3f} rad vlim={velocity_limit:.2f} rad/s"
+            f"host={fmt_id(self.host_id)} pos={position:+.3f} rad "
+            f"vlim={velocity_limit:.2f} rad/s loc_kp={kp:.2f}"
         )
 
         self.prepare_private_mode_switch("Private disabled/clear-error before position configure")
@@ -933,11 +952,14 @@ class DashboardController:
         self.write_private_param_f32(PARAM_LIMIT_CUR, DEFAULT_CURRENT_LIMIT_A)
         self.write_private_param_f32(PARAM_PP_VEL_MAX, velocity_limit)
         self.write_private_param_f32(PARAM_PP_ACC_SET, acceleration)
+        self.write_private_param_f32(PARAM_LOC_KP, kp)
         self.write_private_param_f32(PARAM_LOC_REF, position)
+        self.position_kp = kp
         self.position_configured = True
+        self.last_position_refresh_at = time.monotonic()
         self.log(
             f"private position target={position:+.3f} rad "
-            f"vlim={velocity_limit:.2f} rad/s acc={acceleration:.1f} rad/s^2 sent"
+            f"vlim={velocity_limit:.2f} rad/s acc={acceleration:.1f} rad/s^2 loc_kp={kp:.2f} sent"
         )
         return True
 
@@ -968,6 +990,7 @@ class DashboardController:
         self.send_mit_position(position, velocity_limit)
         self.wait_mit_feedback(0.35, after_seq=start)
         self.position_configured = True
+        self.last_position_refresh_at = time.monotonic()
         self.log(f"mit position target={position:+.3f} rad vlim={velocity_limit:.2f} rad/s sent")
         return True
 
@@ -985,6 +1008,13 @@ class DashboardController:
         else:
             self.write_private_param_f32(PARAM_SPD_REF, speed)
         self.last_velocity_refresh_at = time.monotonic()
+
+    def send_position_target(self) -> None:
+        if self.protocol == PROTOCOL_MIT:
+            self.send_mit_position(self.position_target, self.position_velocity_limit)
+        else:
+            self.write_private_param_f32(PARAM_LOC_REF, self.position_target)
+        self.last_position_refresh_at = time.monotonic()
 
     def set_speed(self, speed: float) -> bool:
         if not self.velocity_configured and not self.configure_velocity():
@@ -1061,6 +1091,7 @@ class DashboardController:
             (PARAM_SPD_REF, "spd_ref"),
             (PARAM_LOC_REF, "loc_ref"),
             (PARAM_LIMIT_CUR, "limit_cur"),
+            (PARAM_LOC_KP, "loc_kp"),
             (PARAM_PP_VEL_MAX, "vel_max"),
             (PARAM_PP_ACC_SET, "acc_set"),
         ):
@@ -1141,6 +1172,12 @@ class DashboardController:
                     and not self.command_lock.locked()
                 ):
                     self.send_velocity_target(self.commanded_speed)
+                if (
+                    self.position_configured
+                    and now - self.last_position_refresh_at >= POSITION_REFRESH_S
+                    and not self.command_lock.locked()
+                ):
+                    self.send_position_target()
             except Exception as exc:
                 self.log(f"motion update failed: {exc}")
             time.sleep(0.03)
@@ -1191,6 +1228,7 @@ class DashboardController:
                 "positionTarget": self.position_target,
                 "positionVelocityLimit": self.position_velocity_limit,
                 "positionAcceleration": self.position_acceleration,
+                "positionKp": self.position_kp,
                 "velocityConfigured": self.velocity_configured,
                 "positionConfigured": self.position_configured,
                 "activeReports": self.active_reports,
