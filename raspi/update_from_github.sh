@@ -5,6 +5,8 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMOTE="${1:-origin}"
 BRANCH="${2:-}"
 GIT_LOCK_STALE_SECONDS="${GIT_LOCK_STALE_SECONDS:-60}"
+AUTO_STASH="${HELION_UPDATE_AUTO_STASH:-1}"
+STASH_REF=""
 
 if ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "Not a git checkout: $REPO_DIR" >&2
@@ -51,11 +53,35 @@ echo "[update] repo=$REPO_DIR remote=$REMOTE branch=$BRANCH"
 clear_stale_git_lock
 git -C "$REPO_DIR" fetch "$REMOTE"
 clear_stale_git_lock
+
+if [[ -n "$(git -C "$REPO_DIR" status --porcelain)" ]]; then
+  if [[ "$AUTO_STASH" != "1" ]]; then
+    echo "[update] Local changes found. Commit or stash them before updating:" >&2
+    git -C "$REPO_DIR" status --short >&2
+    exit 4
+  fi
+
+  echo "[update] Local changes found; saving them in a Git stash before pull."
+  git -C "$REPO_DIR" status --short
+  STASH_BEFORE="$(git -C "$REPO_DIR" rev-parse --verify -q refs/stash || true)"
+  git -C "$REPO_DIR" stash push -u -m "helion-update backup $(date -Is)"
+  STASH_AFTER="$(git -C "$REPO_DIR" rev-parse --verify -q refs/stash || true)"
+  if [[ -n "$STASH_AFTER" && "$STASH_AFTER" != "$STASH_BEFORE" ]]; then
+    STASH_REF="$STASH_AFTER"
+    echo "[update] Backup stash created: $STASH_REF"
+  fi
+fi
+
 git -C "$REPO_DIR" pull --ff-only "$REMOTE" "$BRANCH"
 
 python3 -m py_compile \
   "$REPO_DIR/raspi/robstride_usb.py" \
   "$REPO_DIR/raspi/robstride_dashboard.py"
+
+if [[ -n "$STASH_REF" ]]; then
+  echo "[update] Local changes were backed up and left stashed."
+  echo "[update] To inspect them later: git -C '$REPO_DIR' stash show --stat '$STASH_REF'"
+fi
 
 if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files robstride-dashboard.service >/dev/null 2>&1; then
   if [[ "${HELION_NO_RESTART:-0}" == "1" ]]; then

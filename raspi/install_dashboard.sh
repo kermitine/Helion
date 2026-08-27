@@ -108,5 +108,5 @@ fi
 echo "Dashboard installed."
 echo "Open: ${DASHBOARD_URL}"
 echo "Update later with: helion-update"
-echo "Web updates run as user: ${SERVICE_USER}"
+echo "Dashboard service runs as user: ${SERVICE_USER}"
 echo "RobStride USB adapter: ${SERIAL_PORT} at ${SERIAL_BAUD} baud"

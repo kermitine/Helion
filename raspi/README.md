@@ -76,6 +76,14 @@ helion-update
 `helion-update` pulls the current GitHub branch with `git pull --ff-only`,
 checks the Python files, and restarts the dashboard service.
 
+If the Pi has local edits, `helion-update` saves them in a Git stash before
+pulling so the update can continue without overwriting those changes. To disable
+that behavior for a one-off update:
+
+```bash
+HELION_UPDATE_AUTO_STASH=0 helion-update
+```
+
 Existing installs can use `helion-update` for the USB/private-only migration.
 After the update is running, rerun `bash raspi/install_dashboard.sh` when you
 want the installed systemd service and helper commands cleaned up to match the
