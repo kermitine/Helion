@@ -112,6 +112,11 @@ helion-update
 `helion-update` pulls the current GitHub branch with `git pull --ff-only`,
 checks the Python files, and restarts the dashboard service.
 
+Use SSH for the initial install and for service-level changes such as port,
+Linux permissions, or systemd edits. After that, normal dashboard/backend/UI code
+updates can be applied from the web UI with **Update From GitHub**, as long as
+the new code has already been committed and pushed to GitHub.
+
 Normal terminal update flow:
 
 ```bash
@@ -182,4 +187,4 @@ python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port 
 ```
 
 Interactive commands: `p`, `v`, `f`, `b`, `<`, `>`, `g`, `0`, `s`, `+`, `-`,
-`r`, `a`, `m`, `x`, `d`, `c`, `h`, `t`, `?`, and `q`.
+`e`, `r`, `a`, `m`, `x`, `d`, `c`, `h`, `t`, `?`, and `q`.

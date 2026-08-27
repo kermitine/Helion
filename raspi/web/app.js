@@ -6,6 +6,23 @@ let busy = false;
 
 const commandButtons = [...document.querySelectorAll("[data-command]")];
 const updateButtons = [$("updateRepoBtn"), $("showUpdateLogBtn")].filter(Boolean);
+const configControlIds = [
+  "transportInput",
+  "interfaceInput",
+  "serialPortInput",
+  "serialBaudInput",
+  "motorIdInput",
+  "hostIdInput",
+  "feedbackIdInput",
+  "modelInput",
+];
+const positionControlIds = [
+  "positionTargetInput",
+  "positionVelocityInput",
+  "positionAccelerationInput",
+];
+const speedControlIds = ["speedSlider"];
+const dirtyControls = new Set();
 
 function hex(value, width = 2) {
   if (typeof value !== "number") return "--";
@@ -19,9 +36,23 @@ function fixed(value, digits, suffix) {
 
 function setControlValue(id, value) {
   const el = $(id);
-  if (document.activeElement !== el) {
+  if (document.activeElement !== el && !dirtyControls.has(id)) {
     el.value = value;
   }
+}
+
+function markDirty(id) {
+  dirtyControls.add(id);
+}
+
+function clearDirty(ids) {
+  ids.forEach((id) => dirtyControls.delete(id));
+}
+
+function clearCommandDirty(command, result) {
+  if (result && result.ok === false) return;
+  if (command === "move-position") clearDirty(positionControlIds);
+  if (command === "set-speed") clearDirty(speedControlIds);
 }
 
 function numberInput(id) {
@@ -64,15 +95,20 @@ async function applyConfig() {
     model: $("modelInput").value,
     protocol: selectedProtocol,
   });
+  clearDirty([...configControlIds, "protocol"]);
 }
 
 async function sendCommand(command, extra = {}) {
-  if (busy && !["stop", "zero-speed"].includes(command)) return;
+  if (busy && !["stop", "zero-speed", "clear-fault"].includes(command)) return;
   busy = true;
   renderBusy(true);
   try {
     await applyConfig();
-    await post("/api/command", { command, ...extra });
+    const result = await post("/api/command", { command, ...extra });
+    if (result && result.ok === false && result.message) {
+      appendLocalLog(`Command failed: ${result.message}`);
+    }
+    clearCommandDirty(command, result);
     await refresh();
   } catch (error) {
     appendLocalLog(`UI error: ${error.message}`);
@@ -85,7 +121,7 @@ async function sendCommand(command, extra = {}) {
 function renderBusy(isBusy) {
   commandButtons.forEach((button) => {
     const command = button.dataset.command;
-    button.disabled = isBusy && !["stop", "zero-speed"].includes(command);
+    button.disabled = isBusy && !["stop", "zero-speed", "clear-fault"].includes(command);
   });
   const updateRunning = Boolean(state && state.repo && state.repo.updateRunning);
   updateButtons.forEach((button) => {
@@ -123,9 +159,11 @@ function renderChips(id, items) {
 }
 
 function renderProtocol(protocol) {
-  selectedProtocol = protocol;
-  $("privateProtocolBtn").classList.toggle("active", protocol === "private");
-  $("mitProtocolBtn").classList.toggle("active", protocol === "mit");
+  if (!dirtyControls.has("protocol")) {
+    selectedProtocol = protocol;
+  }
+  $("privateProtocolBtn").classList.toggle("active", selectedProtocol === "private");
+  $("mitProtocolBtn").classList.toggle("active", selectedProtocol === "mit");
 }
 
 function render(state) {
@@ -151,8 +189,8 @@ function render(state) {
   $("busyState").textContent = state.busy ? "Busy" : "Idle";
   $("selectedMotor").textContent = state.motorIdHex;
 
-  $("speedSlider").value = state.testSpeed;
-  $("speedValue").textContent = `${Number(state.testSpeed).toFixed(2)} rad/s`;
+  setControlValue("speedSlider", state.testSpeed);
+  $("speedValue").textContent = `${Number($("speedSlider").value).toFixed(2)} rad/s`;
   setControlValue("positionTargetInput", Number(state.positionTarget || 0).toFixed(2));
   setControlValue("positionVelocityInput", Number(state.positionVelocityLimit || 1).toFixed(2));
   setControlValue("positionAccelerationInput", Number(state.positionAcceleration || 10).toFixed(1));
@@ -244,6 +282,7 @@ async function refresh() {
 
 document.querySelectorAll("[data-protocol]").forEach((button) => {
   button.addEventListener("click", async () => {
+    markDirty("protocol");
     renderProtocol(button.dataset.protocol);
     await applyConfig();
     await refresh();
@@ -257,7 +296,20 @@ commandButtons.forEach((button) => {
   });
 });
 
+configControlIds.forEach((id) => {
+  const el = $(id);
+  el.addEventListener("input", () => markDirty(id));
+  el.addEventListener("change", () => markDirty(id));
+});
+
+positionControlIds.forEach((id) => {
+  const el = $(id);
+  el.addEventListener("input", () => markDirty(id));
+  el.addEventListener("change", () => markDirty(id));
+});
+
 $("speedSlider").addEventListener("input", () => {
+  markDirty("speedSlider");
   $("speedValue").textContent = `${Number($("speedSlider").value).toFixed(2)} rad/s`;
 });
 

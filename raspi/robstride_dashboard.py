@@ -630,10 +630,15 @@ class DashboardController:
 
     def run_command(self, command: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not self.command_lock.acquire(blocking=False):
-            if command == "stop":
+            if command in ("stop", "clear-fault"):
                 try:
-                    self.stop_and_disable()
-                    return {"ok": True, "message": "Stop sent while another command was running."}
+                    if command == "stop":
+                        self.stop_and_disable()
+                        message = "Stop sent while another command was running."
+                    else:
+                        self.clear_fault()
+                        message = "Clear fault sent while another command was running."
+                    return {"ok": True, "message": message}
                 except Exception as exc:
                     return {"ok": False, "message": str(exc)}
             return {"ok": False, "message": "Another command is already running."}
@@ -720,27 +725,47 @@ class DashboardController:
                 old_interface = self.bus.interface
                 old_serial_port = getattr(self.bus, "serial_port", DEFAULT_SERIAL_PORT)
                 old_serial_baud = getattr(self.bus, "serial_baud", DEFAULT_SERIAL_BAUD)
+                old_protocol = self.protocol
+                old_motor_id = self.motor_id
+                old_host_id = self.host_id
+                old_feedback_id = self.feedback_id
+                old_model = self.model
                 new_transport = str(payload.get("transport") or old_transport)
                 if new_transport not in TRANSPORT_CHOICES:
                     new_transport = old_transport
                 new_interface = str(payload.get("interface") or old_interface)
                 new_serial_port = str(payload.get("serialPort") or old_serial_port)
                 new_serial_baud = parse_int(payload.get("serialBaud"), old_serial_baud)
-                self.protocol = str(payload.get("protocol") or self.protocol)
-                self.motor_id = parse_int(payload.get("motorId"), self.motor_id) & 0xFF
-                self.host_id = parse_int(payload.get("hostId"), self.host_id) & 0xFF
-                self.feedback_id = parse_int(payload.get("feedbackId"), self.feedback_id) & CAN_SFF_MASK
-                self.model = str(payload.get("model") or self.model).lower()
-                self.velocity_configured = False
-                self.position_configured = False
-                self.oscillating = False
-                self.jog_active = False
+                new_protocol = str(payload.get("protocol") or old_protocol)
+                if new_protocol not in (PROTOCOL_PRIVATE, PROTOCOL_MIT):
+                    new_protocol = old_protocol
+                new_motor_id = parse_int(payload.get("motorId"), old_motor_id) & 0xFF
+                new_host_id = parse_int(payload.get("hostId"), old_host_id) & 0xFF
+                new_feedback_id = parse_int(payload.get("feedbackId"), old_feedback_id) & CAN_SFF_MASK
+                new_model = str(payload.get("model") or old_model).lower()
                 bus_changed = (
                     new_transport != old_transport
                     or new_interface != old_interface
                     or new_serial_port != old_serial_port
                     or new_serial_baud != old_serial_baud
                 )
+                control_changed = (
+                    new_protocol != old_protocol
+                    or new_motor_id != old_motor_id
+                    or new_host_id != old_host_id
+                    or new_feedback_id != old_feedback_id
+                    or new_model != old_model
+                )
+                if bus_changed or control_changed:
+                    self.protocol = new_protocol
+                    self.motor_id = new_motor_id
+                    self.host_id = new_host_id
+                    self.feedback_id = new_feedback_id
+                    self.model = new_model
+                    self.velocity_configured = False
+                    self.position_configured = False
+                    self.oscillating = False
+                    self.jog_active = False
             if bus_changed:
                 self.reopen_bus(
                     interface=new_interface,
@@ -748,11 +773,12 @@ class DashboardController:
                     serial_port=new_serial_port,
                     serial_baud=new_serial_baud,
                 )
-            self.log(
-                f"Config transport={self.bus_transport()} bus={self.bus_label()} "
-                f"interface={self.bus.interface} protocol={self.protocol} "
-                f"motor={fmt_id(self.motor_id)} host={fmt_id(self.host_id)} feedback={fmt_id(self.feedback_id, 3)}"
-            )
+            if bus_changed or control_changed:
+                self.log(
+                    f"Config transport={self.bus_transport()} bus={self.bus_label()} "
+                    f"interface={self.bus.interface} protocol={self.protocol} "
+                    f"motor={fmt_id(self.motor_id)} host={fmt_id(self.host_id)} feedback={fmt_id(self.feedback_id, 3)}"
+                )
         return {"ok": True}
 
     def configure_velocity(self) -> bool:

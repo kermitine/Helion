@@ -692,6 +692,7 @@ class RobStrideSocketCanTool:
         print("  g  toggle forward/back oscillation")
         print("  0  set speed to zero, keep enabled")
         print("  s  set speed zero and disable motor")
+        print("  e  clear latched motor fault")
         print("  +  increase test speed by 0.10 rad/s")
         print("  -  decrease test speed by 0.10 rad/s")
         print("  r  read private params or query MIT status")
@@ -1364,7 +1365,8 @@ class RobStrideSocketCanTool:
             return
 
         if comm_type == COMM_FAULT:
-            print(f"FAULT private motor={fmt_id(source_motor)} data={bytes_hex(frame.data)}")
+            report = decode_private_fault_payload(frame.data)
+            print(f"FAULT private motor={fmt_id(source_motor)} {private_fault_summary(report)}")
 
     def handle_standard_frame(self, frame: CanFrame) -> None:
         feedback = decode_mit_feedback(frame)
@@ -1495,6 +1497,8 @@ class RobStrideSocketCanTool:
             self.stop_speed_only()
         elif cmd == "s":
             self.stop_and_disable()
+        elif cmd == "e":
+            self.clear_fault()
         elif cmd == "+":
             self.test_speed = min(3.0, self.test_speed + 0.10)
             print(f"test speed={self.test_speed:.2f} rad/s")
@@ -1577,6 +1581,7 @@ def run_encoding_self_test(verbose: bool = False) -> bool:
     mit_pos = mit_position_payload(1.0, 0.5)
     mit_vel_id = mit_typed_id(MIT_TYPED_ID_VELOCITY, DEFAULT_MOTOR_ID)
     mit_vel = mit_velocity_payload(0.30, 1.0)
+    private_fault = decode_private_fault_payload(bytes([0x04, 0, 0, 0, 0, 0, 0, 0]))
     official_private_write_id = build_private_ext_id(COMM_WRITE_PARAM, DEFAULT_HOST_ID, 0x01)
     official_private_write_data = bytes([0x05, 0x70, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00])
     official_serial = robstride_serial_encode_frame(
@@ -1593,6 +1598,7 @@ def run_encoding_self_test(verbose: bool = False) -> bool:
         and len(mit_pos) == 8
         and mit_vel_id == 0x27F
         and len(mit_vel) == 8
+        and private_fault.fault_names == ["undervoltage"]
         and mit_special(0xFC) == bytes([0xFF] * 7 + [0xFC])
         and official_serial == expected_official_serial
         and parsed_official == CanFrame(official_private_write_id, official_private_write_data, True)
@@ -1603,6 +1609,7 @@ def run_encoding_self_test(verbose: bool = False) -> bool:
         print(f"  private reply 0x00007FFE parts={private_reply_parts}")
         print(f"  MIT position id={fmt_id(mit_pos_id, 3)} data={bytes_hex(mit_pos)}")
         print(f"  MIT velocity id={fmt_id(mit_vel_id, 3)} data={bytes_hex(mit_vel)}")
+        print(f"  private fault sample {private_fault_summary(private_fault)}")
         print(f"  RobStride serial example={bytes_hex(official_serial)}")
     return passed
 
@@ -1638,6 +1645,7 @@ def parse_args() -> argparse.Namespace:
             "jog-left",
             "jog-right",
             "position",
+            "clear-fault",
             "stop",
             "status",
             "raw",
@@ -1730,6 +1738,8 @@ def main() -> int:
             tool.move_position(args.pos, args.vlim, args.acc)
             run_for_duration(tool, args.duration)
             tool.stop_and_disable()
+        elif args.command == "clear-fault":
+            tool.clear_fault()
         elif args.command == "stop":
             tool.stop_and_disable()
         elif args.command == "status":
