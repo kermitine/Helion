@@ -54,7 +54,7 @@ clear_stale_git_lock
 git -C "$REPO_DIR" pull --ff-only "$REMOTE" "$BRANCH"
 
 python3 -m py_compile \
-  "$REPO_DIR/raspi/robstride_socketcan.py" \
+  "$REPO_DIR/raspi/robstride_usb.py" \
   "$REPO_DIR/raspi/robstride_dashboard.py"
 
 if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files robstride-dashboard.service >/dev/null 2>&1; then

@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""RobStride bench-control tool for Raspberry Pi CAN adapters.
-
-This is the Raspberry Pi rewrite of the ESP32 serial test sketch. It supports a
-Linux SocketCAN interface such as can0 and the official RobStride USB-CAN serial
-adapter that appears as a CH340 tty device.
-"""
+"""RobStride private-protocol control over the official USB-CAN adapter."""
 
 from __future__ import annotations
 
@@ -13,57 +8,45 @@ import contextlib
 import glob
 import os
 import select
-import socket
 import struct
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, List, Optional, Tuple
+from typing import Callable, Iterable, List, Optional, Tuple
 
 
-CAN_EFF_FLAG = 0x80000000
-CAN_RTR_FLAG = 0x40000000
-CAN_ERR_FLAG = 0x20000000
 CAN_SFF_MASK = 0x000007FF
 CAN_EFF_MASK = 0x1FFFFFFF
-CAN_FRAME = struct.Struct("=IB3x8s")
 
+TRANSPORT_ROBSTRIDE_USB = "robstride-usb"
+PROTOCOL_PRIVATE = "private"
 
-DEFAULT_INTERFACE = "can0"
-TRANSPORT_SOCKETCAN = "socketcan"
-TRANSPORT_ROBSTRIDE_SERIAL = "robstride-serial"
-TRANSPORT_CHOICES = (TRANSPORT_SOCKETCAN, TRANSPORT_ROBSTRIDE_SERIAL)
 DEFAULT_SERIAL_PORT = "auto"
 DEFAULT_SERIAL_BAUD = 921600
 ROBSTRIDE_SERIAL_HEADER = b"AT"
 ROBSTRIDE_SERIAL_TRAILER = b"\r\n"
 ROBSTRIDE_SERIAL_EXTENDED_FLAG = 0x04
+
 DEFAULT_MOTOR_ID = 0x7F
 DEFAULT_HOST_ID = 0xFD
-DEFAULT_FEEDBACK_ID = 0xFD
 DEFAULT_MODEL = "rs-05"
 
 SCAN_FIRST_PRIVATE_ID = 0x00
-SCAN_FIRST_MIT_ID = 0x01
 SCAN_LAST_ID = 0x7F
 SCAN_PER_ID_TIMEOUT_S = 0.040
 
 COMM_GET_ID = 0x00
-COMM_OPERATION_CONTROL = 0x01
 COMM_OPERATION_STATUS = 0x02
 COMM_ENABLE = 0x03
 COMM_DISABLE = 0x04
 COMM_READ_PARAM = 0x11
 COMM_WRITE_PARAM = 0x12
 COMM_FAULT = 0x15
-COMM_SAVE_PARAMS = 0x16
 COMM_PROACTIVE_REPORT = 0x18
-COMM_SET_PROTOCOL = 0x19
 
 PARAM_RUN_MODE = 0x7005
 PARAM_SPD_REF = 0x700A
 PARAM_LOC_REF = 0x7016
-PARAM_LIMIT_SPD = 0x7017
 PARAM_LIMIT_CUR = 0x7018
 PARAM_MECH_POS = 0x7019
 PARAM_MECH_VEL = 0x701B
@@ -73,17 +56,8 @@ PARAM_ACC_RAD = 0x7022
 PARAM_PP_VEL_MAX = 0x7024
 PARAM_PP_ACC_SET = 0x7025
 
-RUN_MODE_MIT = 0
 RUN_MODE_POSITION = 1
 RUN_MODE_VELOCITY = 2
-
-MIT_TYPED_ID_POSITION = 1
-MIT_TYPED_ID_VELOCITY = 2
-MIT_TYPED_ID_PARAM_READ = 3
-MIT_TYPED_ID_PARAM_WRITE = 4
-
-PROTOCOL_PRIVATE = "private"
-PROTOCOL_MIT = "mit"
 
 DEFAULT_SPEED_RAD_S = 0.30
 MOTOR_STUDIO_JOG_SPEED_RAD_S = 1.0
@@ -114,32 +88,12 @@ PRIVATE_MODEL_LIMITS = {
     "el-05": (4.0 * 3.141592653589793, 50.0, 6.0),
 }
 
-MIT_P_MIN = -12.57
-MIT_P_MAX = 12.57
-MIT_V_MIN = -33.0
-MIT_V_MAX = 33.0
-MIT_T_MIN = -14.0
-MIT_T_MAX = 14.0
-
 
 @dataclass
 class CanFrame:
     arbitration_id: int
     data: bytes
     extended: bool
-
-
-@dataclass
-class MitFeedback:
-    motor_id: int
-    position_rad: float
-    velocity_rad_s: float
-    torque_nm: float
-    mode_state: int
-    has_fault: bool
-    has_warning: bool
-    winding_temp_c: float
-    feedback_id: int
 
 
 @dataclass
@@ -287,34 +241,6 @@ def robstride_serial_try_parse(buffer: bytearray) -> Optional[CanFrame]:
     return None
 
 
-def mit_typed_id(mode_type: int, motor_id: int) -> int:
-    return ((mode_type & 0x07) << 8) | (motor_id & 0xFF)
-
-
-def mit_special(command_byte: int) -> bytes:
-    return bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, command_byte & 0xFF])
-
-
-def mit_set_mode_payload(mode: int) -> bytes:
-    return bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, mode & 0xFF, 0xFC])
-
-
-def mit_active_report_payload(enabled: bool) -> bytes:
-    return bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 1 if enabled else 0, 0xF9])
-
-
-def mit_fault_query_payload(clear_fault: bool = False) -> bytes:
-    return bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF if clear_fault else 0x00, 0xFB])
-
-
-def mit_velocity_payload(velocity_rad_s: float, current_limit_a: float) -> bytes:
-    return f32_le(velocity_rad_s) + f32_le(abs(current_limit_a))
-
-
-def mit_position_payload(position_rad: float, velocity_limit_rad_s: float) -> bytes:
-    return f32_le(position_rad) + f32_le(abs(velocity_limit_rad_s))
-
-
 def names_from_bits(raw: int, bits: Iterable[Tuple[int, str]]) -> List[str]:
     return [name for bit, name in bits if raw & (1 << bit)]
 
@@ -340,107 +266,11 @@ def private_fault_summary(report: PrivateFaultReport) -> str:
     )
 
 
-def decode_mit_feedback(frame: CanFrame) -> Optional[MitFeedback]:
-    if frame.extended or len(frame.data) < 8:
-        return None
-
-    data = frame.data
-    pos_u = (data[1] << 8) | data[2]
-    vel_u = (data[3] << 4) | (data[4] >> 4)
-    torque_u = ((data[4] & 0x0F) << 8) | data[5]
-    temp_u = ((data[6] & 0x0F) << 8) | data[7]
-    return MitFeedback(
-        motor_id=data[0],
-        position_rad=uint_to_float(pos_u, MIT_P_MIN, MIT_P_MAX, 16),
-        velocity_rad_s=uint_to_float(vel_u, MIT_V_MIN, MIT_V_MAX, 12),
-        torque_nm=uint_to_float(torque_u, MIT_T_MIN, MIT_T_MAX, 12),
-        mode_state=data[6] >> 6,
-        has_fault=(data[6] & 0x20) != 0,
-        has_warning=(data[6] & 0x10) != 0,
-        winding_temp_c=float(temp_u) / 10.0,
-        feedback_id=frame.arbitration_id,
-    )
-
-
-class SocketCanBus:
-    def __init__(self, interface: str):
-        self.interface = interface
-        self.transport = TRANSPORT_SOCKETCAN
-        self.serial_port = DEFAULT_SERIAL_PORT
-        self.serial_baud = DEFAULT_SERIAL_BAUD
-        self.sock: Optional[socket.socket] = None
-
-    def open(self) -> None:
-        try:
-            sock = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
-            sock.bind((self.interface,))
-        except AttributeError as exc:
-            raise RuntimeError("SocketCAN is only available on Linux") from exc
-        except OSError as exc:
-            raise RuntimeError(
-                f"could not open {self.interface}: {exc}. "
-                "Bring the interface up at 1 Mbps first."
-            ) from exc
-        self.sock = sock
-
-    def close(self) -> None:
-        if self.sock is not None:
-            self.sock.close()
-            self.sock = None
-
-    def reopen(self) -> None:
-        self.close()
-        time.sleep(0.05)
-        self.open()
-
-    def label(self) -> str:
-        return f"{self.interface} at 1 Mbps"
-
-    def stats(self) -> dict[str, str]:
-        base = f"/sys/class/net/{self.interface}"
-        stats_dir = os.path.join(base, "statistics")
-        out: dict[str, str] = {}
-        for name in ("operstate", "carrier"):
-            raw = read_text_file(os.path.join(base, name))
-            if raw:
-                out[name] = raw
-        for name in ("rx_packets", "tx_packets", "rx_errors", "tx_errors", "rx_dropped", "tx_dropped"):
-            raw = read_text_file(os.path.join(stats_dir, name))
-            if raw:
-                out[name] = raw
-        return out
-
-    def send(self, arbitration_id: int, data: bytes, extended: bool = False) -> None:
-        if self.sock is None:
-            raise RuntimeError("CAN socket is not open")
-        payload = bytes(data[:8]).ljust(8, b"\x00")
-        can_id = arbitration_id & (CAN_EFF_MASK if extended else CAN_SFF_MASK)
-        if extended:
-            can_id |= CAN_EFF_FLAG
-        packet = CAN_FRAME.pack(can_id, len(payload), payload)
-        self.sock.send(packet)
-
-    def recv(self, timeout_s: float) -> Optional[CanFrame]:
-        if self.sock is None:
-            raise RuntimeError("CAN socket is not open")
-        ready, _, _ = select.select([self.sock], [], [], max(0.0, timeout_s))
-        if not ready:
-            return None
-        packet = self.sock.recv(CAN_FRAME.size)
-        can_id, dlc, data = CAN_FRAME.unpack(packet)
-        if can_id & CAN_ERR_FLAG:
-            return None
-        extended = (can_id & CAN_EFF_FLAG) != 0
-        mask = CAN_EFF_MASK if extended else CAN_SFF_MASK
-        return CanFrame(can_id & mask, data[: min(dlc, 8)], extended)
-
-
-class RobStrideSerialBus:
+class RobStrideUsbBus:
     """Official RobStride USB-CAN adapter transport over its CH340 serial port."""
 
-    def __init__(self, serial_port: str, serial_baud: int, interface: str = DEFAULT_INTERFACE):
-        self.interface = interface
-        self.transport = TRANSPORT_ROBSTRIDE_SERIAL
+    def __init__(self, serial_port: str, serial_baud: int):
+        self.transport = TRANSPORT_ROBSTRIDE_USB
         self.serial_port = serial_port
         self.active_serial_port = ""
         self.serial_baud = int(serial_baud)
@@ -456,7 +286,7 @@ class RobStrideSerialBus:
 
     def open(self) -> None:
         if os.name != "posix":
-            raise RuntimeError("direct RobStride serial transport is only available on Linux")
+            raise RuntimeError("RobStride USB transport is only available on Linux")
         try:
             port = detect_serial_port() if self.serial_port in ("", "auto") else self.serial_port
         except RuntimeError as exc:
@@ -467,7 +297,7 @@ class RobStrideSerialBus:
         except OSError as exc:
             raise RuntimeError(
                 f"could not open {port}: {exc}. "
-                "Stop slcand if it is running, check the adapter path, and make sure the dashboard user is in the dialout group."
+                "Check the adapter path and make sure the dashboard user is in the dialout group."
             ) from exc
 
         try:
@@ -533,7 +363,7 @@ class RobStrideSerialBus:
 
     def _write_all(self, data: bytes) -> None:
         if self.fd is None:
-            raise RuntimeError("RobStride serial port is not open")
+            raise RuntimeError("RobStride USB serial port is not open")
 
         remaining = memoryview(data)
         deadline = time.monotonic() + 0.5
@@ -582,15 +412,16 @@ class RobStrideSerialBus:
         self._recent_tx = kept
         return matched
 
-    def send(self, arbitration_id: int, data: bytes, extended: bool = False) -> None:
+    def send(self, arbitration_id: int, data: bytes, extended: bool = True) -> None:
         payload = bytes(data[:8]).ljust(8, b"\x00")
         self._write_all(robstride_serial_encode_frame(arbitration_id, payload, extended))
         self.tx_packets += 1
-        self._remember_tx(arbitration_id & (CAN_EFF_MASK if extended else CAN_SFF_MASK), payload, extended)
+        mask = CAN_EFF_MASK if extended else CAN_SFF_MASK
+        self._remember_tx(arbitration_id & mask, payload, extended)
 
     def recv(self, timeout_s: float) -> Optional[CanFrame]:
         if self.fd is None:
-            raise RuntimeError("RobStride serial port is not open")
+            raise RuntimeError("RobStride USB serial port is not open")
 
         deadline = time.monotonic() + max(0.0, timeout_s)
         while True:
@@ -622,37 +453,25 @@ class RobStrideSerialBus:
 
 
 def create_bus(
-    transport: str,
-    interface: str = DEFAULT_INTERFACE,
     serial_port: str = DEFAULT_SERIAL_PORT,
     serial_baud: int = DEFAULT_SERIAL_BAUD,
-) -> Any:
-    if transport == TRANSPORT_ROBSTRIDE_SERIAL:
-        return RobStrideSerialBus(serial_port=serial_port, serial_baud=serial_baud, interface=interface)
-    if transport == TRANSPORT_SOCKETCAN:
-        return SocketCanBus(interface)
-    raise ValueError(f"unknown CAN transport: {transport}")
+) -> RobStrideUsbBus:
+    return RobStrideUsbBus(serial_port=serial_port, serial_baud=serial_baud)
 
 
-class RobStrideSocketCanTool:
+class RobStrideUsbTool:
     def __init__(
         self,
-        bus: Any,
-        protocol: str,
+        bus: RobStrideUsbBus,
         motor_id: int,
         host_id: int,
-        feedback_id: int,
         model: str,
-        accept_any_feedback_id: bool,
         scan_per_id_timeout_s: float,
     ):
         self.bus = bus
-        self.protocol = protocol
         self.motor_id = motor_id & 0xFF
         self.host_id = host_id & 0xFF
-        self.feedback_id = feedback_id & CAN_SFF_MASK
         self.model = model.lower()
-        self.accept_any_feedback_id = accept_any_feedback_id
         self.scan_per_id_timeout_s = scan_per_id_timeout_s
 
         self.velocity_mode_configured = False
@@ -680,21 +499,17 @@ class RobStrideSocketCanTool:
         print("RobStride Raspberry Pi bench test")
         print("Motor will not move until you command f/b/g/< />.")
         print(
-            "transport={transport} bus={bus} motor={motor} host={host} feedback={feedback} "
-            "protocol={protocol} speed={speed:.2f} rad/s".format(
-                transport=getattr(self.bus, "transport", TRANSPORT_SOCKETCAN),
-                bus=self.bus.label() if hasattr(self.bus, "label") else self.bus.interface,
+            "transport={transport} bus={bus} motor={motor} host={host} speed={speed:.2f} rad/s".format(
+                transport=self.bus.transport,
+                bus=self.bus.label(),
                 motor=fmt_id(self.motor_id),
                 host=fmt_id(self.host_id),
-                feedback=fmt_id(self.feedback_id),
-                protocol=self.protocol,
                 speed=self.test_speed,
             )
         )
         print()
         print("Commands:")
-        print("  p  scan current protocol for motors")
-        print("  P  scan both private and MIT-standard protocols")
+        print("  p  scan private IDs for motors")
         print("  v  configure velocity mode only")
         print("  f  forward at test speed")
         print("  b  backward at test speed")
@@ -706,12 +521,11 @@ class RobStrideSocketCanTool:
         print("  e  clear latched motor fault")
         print("  +  increase test speed by 0.10 rad/s")
         print("  -  decrease test speed by 0.10 rad/s")
-        print("  r  read private params or query MIT status")
+        print("  r  read private params")
         print("  a  toggle active motor status reports")
-        print("  m  toggle protocol: private / MotorBridge MIT-standard")
         print("  x  print raw CAN frames for 3 seconds")
         print("  d  print adapter counters")
-        print("  c  close and reopen CAN transport")
+        print("  c  close and reopen RobStride USB adapter")
         print("  h  cycle private host ID: FD, FF, FE, 00, AA")
         print("  t  run local frame-encoding self-test")
         print("  q  quit")
@@ -747,7 +561,11 @@ class RobStrideSocketCanTool:
         payload[0] = 1 if clear_error else 0
         self.send_private(COMM_DISABLE, self.host_id, self.motor_id, bytes(payload))
 
-    def clear_private_fault(self) -> None:
+    def clear_fault(self) -> None:
+        self.oscillating = False
+        self.jog_active = False
+        self.velocity_mode_configured = False
+        self.position_mode_configured = False
         self.send_private_disable(True)
         self.wait_private_status(0.30)
         print("Private clear-error sent.")
@@ -765,17 +583,6 @@ class RobStrideSocketCanTool:
         print(f"  clear-error    {'ok' if status else 'sent, no status'}")
         print(f"  {label}")
         time.sleep(0.08)
-
-    def clear_fault(self) -> None:
-        self.oscillating = False
-        self.jog_active = False
-        self.velocity_mode_configured = False
-        if self.protocol == PROTOCOL_MIT:
-            self.send_mit_fault_query(self.motor_id, clear_fault=True)
-            feedback = self.wait_mit_feedback(0.35)
-            print(f"MIT clear-fault {'ok' if feedback else 'sent, no feedback'}.")
-        else:
-            self.clear_private_fault()
 
     def send_private_enable(self) -> None:
         self.send_private(COMM_ENABLE, self.host_id, self.motor_id, bytes(8))
@@ -837,60 +644,25 @@ class RobStrideSocketCanTool:
         frame = self.wait_for_frame(matches, timeout_s)
         return None if frame is None else frame.data[4:8]
 
-    def send_mit_to_motor(self, payload: bytes) -> None:
-        self.bus.send(self.motor_id, payload, extended=False)
+    def write_private_run_mode_verified(self, desired_mode: int) -> bool:
+        original_host = self.host_id
+        for host in self.private_host_candidates():
+            self.host_id = host
+            for attempt in range(1, 4):
+                self.write_private_param_u8(PARAM_RUN_MODE, desired_mode)
+                time.sleep(0.03)
+                raw = self.wait_private_param(PARAM_RUN_MODE, 0.50)
+                if raw is None:
+                    print(f"    host={fmt_id(host)} attempt={attempt} run_mode readback timeout")
+                    continue
+                actual = raw[0]
+                print(f"    host={fmt_id(host)} attempt={attempt} run_mode readback={actual}")
+                if actual == desired_mode:
+                    return True
+        self.host_id = original_host
+        return False
 
-    def send_mit_set_mode(self, mode: int) -> None:
-        self.send_mit_to_motor(mit_set_mode_payload(mode))
-
-    def send_mit_enable(self) -> None:
-        self.send_mit_to_motor(mit_special(0xFC))
-
-    def send_mit_stop(self) -> None:
-        self.send_mit_to_motor(mit_special(0xFD))
-
-    def send_mit_active_report(self, enabled: bool) -> None:
-        self.send_mit_to_motor(mit_active_report_payload(enabled))
-
-    def send_mit_fault_query(self, target_id: int, clear_fault: bool = False) -> None:
-        self.bus.send(target_id, mit_fault_query_payload(clear_fault), extended=False)
-
-    def send_mit_velocity(self, velocity_rad_s: float, current_limit_a: float) -> None:
-        self.bus.send(
-            mit_typed_id(MIT_TYPED_ID_VELOCITY, self.motor_id),
-            mit_velocity_payload(velocity_rad_s, current_limit_a),
-            extended=False,
-        )
-
-    def send_mit_position(self, position_rad: float, velocity_limit_rad_s: float) -> None:
-        self.bus.send(
-            mit_typed_id(MIT_TYPED_ID_POSITION, self.motor_id),
-            mit_position_payload(position_rad, velocity_limit_rad_s),
-            extended=False,
-        )
-
-    def wait_mit_feedback_frame(self, timeout_s: float, motor_id: Optional[int] = None) -> Optional[CanFrame]:
-        expected_motor_id = self.motor_id if motor_id is None else motor_id
-
-        def matches(frame: CanFrame) -> bool:
-            if frame.extended or len(frame.data) < 8 or frame.data[0] != expected_motor_id:
-                return False
-            return self.accept_any_feedback_id or frame.arbitration_id == self.feedback_id
-
-        frame = self.wait_for_frame(matches, timeout_s)
-        if frame is not None and frame.arbitration_id != self.feedback_id:
-            print(f"Learned MIT feedback ID {fmt_id(frame.arbitration_id)}")
-            self.feedback_id = frame.arbitration_id
-        return frame
-
-    def wait_mit_feedback(self, timeout_s: float, motor_id: Optional[int] = None) -> Optional[MitFeedback]:
-        frame = self.wait_mit_feedback_frame(timeout_s, motor_id)
-        if frame is None:
-            return None
-        feedback = decode_mit_feedback(frame)
-        return feedback
-
-    def configure_private_velocity(self) -> bool:
+    def configure_velocity_mode(self) -> bool:
         print("Configuring private extended-ID velocity mode:")
         print(
             f"  motor={fmt_id(self.motor_id)} host={fmt_id(self.host_id)} "
@@ -900,31 +672,10 @@ class RobStrideSocketCanTool:
         self.jog_active = False
         self.velocity_mode_configured = False
         self.position_mode_configured = False
-        self.protocol = PROTOCOL_PRIVATE
 
         try:
             self.prepare_private_mode_switch("mode-switch prep complete")
-
-            verified = False
-            original_host = self.host_id
-            for host in self.private_host_candidates():
-                self.host_id = host
-                for attempt in range(1, 4):
-                    self.write_private_param_u8(PARAM_RUN_MODE, RUN_MODE_VELOCITY)
-                    time.sleep(0.03)
-                    raw = self.wait_private_param(PARAM_RUN_MODE, 0.50)
-                    if raw is None:
-                        print(f"    host={fmt_id(host)} attempt={attempt} run_mode readback timeout")
-                        continue
-                    actual = raw[0]
-                    print(f"    host={fmt_id(host)} attempt={attempt} run_mode readback={actual}")
-                    if actual == RUN_MODE_VELOCITY:
-                        verified = True
-                        break
-                if verified:
-                    break
-            if not verified:
-                self.host_id = original_host
+            if not self.write_private_run_mode_verified(RUN_MODE_VELOCITY):
                 print("  run_mode=2     FAILED")
                 return False
 
@@ -949,67 +700,12 @@ class RobStrideSocketCanTool:
         print("Private velocity mode configured.")
         return True
 
-    def configure_mit_velocity(self) -> bool:
-        print("Configuring MotorBridge MIT-standard velocity mode:")
-        print(
-            f"  motor={fmt_id(self.motor_id)} feedback={fmt_id(self.feedback_id)} "
-            f"limit_cur={DEFAULT_CURRENT_LIMIT_A:.2f}A"
-        )
-        self.oscillating = False
-        self.jog_active = False
-        self.velocity_mode_configured = False
-        self.position_mode_configured = False
-        self.protocol = PROTOCOL_MIT
-
-        try:
-            self.send_mit_set_mode(RUN_MODE_VELOCITY)
-            mode_feedback = self.wait_mit_feedback(0.35)
-            print(f"  mit mode=2     {'ok' if mode_feedback else 'sent, no feedback'}")
-
-            time.sleep(0.06)
-            self.send_mit_enable()
-            enable_feedback = self.wait_mit_feedback(0.35)
-            print(f"  mit enable     {'ok' if enable_feedback else 'sent, no feedback'}")
-
-            time.sleep(0.06)
-            self.commanded_speed = 0.0
-            self.send_mit_velocity(0.0, DEFAULT_CURRENT_LIMIT_A)
-            zero_feedback = self.wait_mit_feedback(0.25)
-            print(f"  mit vel=0      {'ok' if zero_feedback else 'sent'}")
-        except OSError as exc:
-            print(f"  CAN TX failed: {exc}")
-            return False
-
-        self.velocity_mode_configured = True
-        print("MotorBridge MIT velocity mode configured.")
-        return True
-
-    def configure_velocity_mode(self) -> bool:
-        if self.protocol == PROTOCOL_MIT:
-            return self.configure_mit_velocity()
-        return self.configure_private_velocity()
-
     def move_position(
         self,
         position_rad: float,
         velocity_limit_rad_s: float = DEFAULT_POSITION_VEL_RAD_S,
         acceleration_rad_s2: float = DEFAULT_POSITION_ACCEL_RAD_S2,
         position_kp: float = DEFAULT_POSITION_KP,
-    ) -> bool:
-        self.position_target = position_rad
-        self.position_velocity_limit = abs(velocity_limit_rad_s) or DEFAULT_POSITION_VEL_RAD_S
-        self.position_acceleration = abs(acceleration_rad_s2) or DEFAULT_POSITION_ACCEL_RAD_S2
-        self.position_kp = position_kp
-        if self.protocol == PROTOCOL_MIT:
-            return self.move_mit_position(position_rad, velocity_limit_rad_s)
-        return self.move_private_position(position_rad, velocity_limit_rad_s, acceleration_rad_s2, position_kp)
-
-    def move_private_position(
-        self,
-        position_rad: float,
-        velocity_limit_rad_s: float,
-        acceleration_rad_s2: float,
-        position_kp: float,
     ) -> bool:
         velocity_limit = abs(velocity_limit_rad_s) or DEFAULT_POSITION_VEL_RAD_S
         acceleration = abs(acceleration_rad_s2) or DEFAULT_POSITION_ACCEL_RAD_S2
@@ -1025,31 +721,10 @@ class RobStrideSocketCanTool:
         self.jog_active = False
         self.velocity_mode_configured = False
         self.position_mode_configured = False
-        self.protocol = PROTOCOL_PRIVATE
 
         try:
             self.prepare_private_mode_switch("mode-switch prep complete")
-
-            verified = False
-            original_host = self.host_id
-            for host in self.private_host_candidates():
-                self.host_id = host
-                for attempt in range(1, 4):
-                    self.write_private_param_u8(PARAM_RUN_MODE, RUN_MODE_POSITION)
-                    time.sleep(0.03)
-                    raw = self.wait_private_param(PARAM_RUN_MODE, 0.50)
-                    if raw is None:
-                        print(f"    host={fmt_id(host)} attempt={attempt} run_mode readback timeout")
-                        continue
-                    actual = raw[0]
-                    print(f"    host={fmt_id(host)} attempt={attempt} run_mode readback={actual}")
-                    if actual == RUN_MODE_POSITION:
-                        verified = True
-                        break
-                if verified:
-                    break
-            if not verified:
-                self.host_id = original_host
+            if not self.write_private_run_mode_verified(RUN_MODE_POSITION):
                 print("  run_mode=1     FAILED")
                 return False
 
@@ -1085,70 +760,18 @@ class RobStrideSocketCanTool:
         print("Private position target sent.")
         return True
 
-    def move_mit_position(self, position_rad: float, velocity_limit_rad_s: float) -> bool:
-        velocity_limit = abs(velocity_limit_rad_s) or DEFAULT_POSITION_VEL_RAD_S
-        print("Configuring MotorBridge MIT-standard position mode:")
-        print(
-            f"  motor={fmt_id(self.motor_id)} feedback={fmt_id(self.feedback_id)} "
-            f"pos={position_rad:+.3f} rad vlim={velocity_limit:.2f} rad/s"
-        )
-        self.oscillating = False
-        self.jog_active = False
-        self.velocity_mode_configured = False
-        self.position_mode_configured = False
-        self.protocol = PROTOCOL_MIT
-
+    def send_speed_target(self, speed_rad_s: float) -> bool:
         try:
-            self.send_mit_set_mode(RUN_MODE_POSITION)
-            mode_feedback = self.wait_mit_feedback(0.35)
-            print(f"  mit mode=1     {'ok' if mode_feedback else 'sent, no feedback'}")
-
-            time.sleep(0.06)
-            self.send_mit_enable()
-            enable_feedback = self.wait_mit_feedback(0.35)
-            print(f"  mit enable     {'ok' if enable_feedback else 'sent, no feedback'}")
-
-            time.sleep(0.06)
-            self.send_mit_position(position_rad, velocity_limit)
-            pos_feedback = self.wait_mit_feedback(0.35)
-            print(f"  mit pos        {'ok' if pos_feedback else 'sent'}")
-        except OSError as exc:
-            print(f"  CAN TX failed: {exc}")
-            return False
-
-        self.commanded_speed = 0.0
-        self.position_target = position_rad
-        self.position_velocity_limit = velocity_limit
-        self.position_mode_configured = True
-        self.last_position_refresh_at = time.monotonic()
-        print("MotorBridge MIT position target sent.")
-        return True
-
-    def send_speed_target(self, speed_rad_s: float, wait_feedback: bool = True) -> bool:
-        try:
-            if self.protocol == PROTOCOL_MIT:
-                self.send_mit_velocity(speed_rad_s, DEFAULT_CURRENT_LIMIT_A)
-                feedback = self.wait_mit_feedback(0.10) if wait_feedback else None
-                if feedback is not None:
-                    self.print_mit_feedback(feedback, prefix="  ")
-            else:
-                self.write_private_param_f32(PARAM_SPD_REF, speed_rad_s)
+            self.write_private_param_f32(PARAM_SPD_REF, speed_rad_s)
         except OSError as exc:
             print(f"CAN TX failed: {exc}")
             return False
         self.last_velocity_refresh_at = time.monotonic()
         return True
 
-    def send_position_target(self, wait_feedback: bool = False) -> bool:
+    def send_position_target(self) -> bool:
         try:
-            if self.protocol == PROTOCOL_MIT:
-                self.send_mit_position(self.position_target, self.position_velocity_limit)
-                if wait_feedback:
-                    feedback = self.wait_mit_feedback(0.10)
-                    if feedback is not None:
-                        self.print_mit_feedback(feedback, prefix="  ")
-            else:
-                self.write_private_param_f32(PARAM_LOC_REF, self.position_target)
+            self.write_private_param_f32(PARAM_LOC_REF, self.position_target)
         except OSError as exc:
             print(f"CAN TX failed: {exc}")
             return False
@@ -1162,7 +785,7 @@ class RobStrideSocketCanTool:
         self.commanded_speed = speed_rad_s
         self.position_mode_configured = False
         ok = self.send_speed_target(self.commanded_speed)
-        print(f"{self.protocol} speed={self.commanded_speed:+.2f} rad/s {'sent' if ok else 'FAILED'}")
+        print(f"private speed={self.commanded_speed:+.2f} rad/s {'sent' if ok else 'FAILED'}")
         return ok
 
     def start_jog(self, direction: int) -> None:
@@ -1190,14 +813,10 @@ class RobStrideSocketCanTool:
             self.send_speed_target(0.0)
             time.sleep(0.08)
         try:
-            if self.protocol == PROTOCOL_MIT:
-                self.send_mit_stop()
-                self.wait_mit_feedback(0.25)
-            else:
-                self.set_active_report(False)
-                time.sleep(0.03)
-                self.send_private_disable(False)
-                self.wait_private_status(0.25)
+            self.set_active_report(False)
+            time.sleep(0.03)
+            self.send_private_disable(False)
+            self.wait_private_status(0.25)
         except OSError as exc:
             print(f"CAN TX failed while stopping: {exc}")
         finally:
@@ -1208,34 +827,15 @@ class RobStrideSocketCanTool:
 
     def set_active_report(self, enabled: bool) -> None:
         try:
-            if self.protocol == PROTOCOL_MIT:
-                self.send_mit_active_report(enabled)
-                feedback = self.wait_mit_feedback(0.30)
-                print(f"MIT active reports {'on' if enabled else 'off'} {'ok' if feedback else 'sent'}")
-            else:
-                payload = bytes([1, 2, 3, 4, 5, 6, 1 if enabled else 0, 0])
-                self.send_private(COMM_PROACTIVE_REPORT, self.host_id, self.motor_id, payload)
-                print(f"Private active reports {'on' if enabled else 'off'} sent")
+            payload = bytes([1, 2, 3, 4, 5, 6, 1 if enabled else 0, 0])
+            self.send_private(COMM_PROACTIVE_REPORT, self.host_id, self.motor_id, payload)
+            print(f"Private active reports {'on' if enabled else 'off'} sent")
         except OSError as exc:
             print(f"active-report TX failed: {exc}")
             return
         self.active_reports = enabled
 
     def request_readback(self) -> None:
-        if self.protocol == PROTOCOL_MIT:
-            print("Querying MIT-standard fault/status...")
-            self.send_mit_fault_query(self.motor_id, clear_fault=False)
-            frame = self.wait_mit_feedback_frame(0.50)
-            if frame is None:
-                print("  no MIT feedback")
-            else:
-                fault_code = int.from_bytes(frame.data[1:5], "little", signed=False)
-                feedback = decode_mit_feedback(frame)
-                if feedback is not None:
-                    self.print_mit_feedback(feedback, prefix="  ")
-                print(f"  fault_raw=0x{fault_code:08X}")
-            return
-
         reads = [
             (PARAM_RUN_MODE, "run_mode", "u8"),
             (PARAM_LOC_REF, "loc_ref", "f32"),
@@ -1285,71 +885,11 @@ class RobStrideSocketCanTool:
                 self.handle_frame(frame)
         if hits:
             self.motor_id = hits[0]
-            self.protocol = PROTOCOL_PRIVATE
             self.velocity_mode_configured = False
             print(f"Private scan complete: {len(hits)} motor(s), selected {fmt_id(self.motor_id)}.")
         else:
             print("Private scan complete: no replies.")
         return hits
-
-    def scan_mit(self, start_id: int, end_id: int) -> List[int]:
-        hits: List[int] = []
-        self.drain_rx()
-        start_id = max(start_id, SCAN_FIRST_MIT_ID)
-        print(
-            f"Scanning MotorBridge MIT-standard IDs {fmt_id(start_id)}..{fmt_id(end_id)} "
-            f"for feedback frames"
-        )
-        for target_id in range(start_id, end_id + 1):
-            self.send_mit_fault_query(target_id, clear_fault=False)
-            deadline = time.monotonic() + self.scan_per_id_timeout_s
-            while time.monotonic() < deadline:
-                frame = self.bus.recv(deadline - time.monotonic())
-                if frame is None:
-                    break
-                if not frame.extended and len(frame.data) >= 8 and frame.data[0] == target_id:
-                    if target_id not in hits:
-                        hits.append(target_id)
-                        fault_raw = int.from_bytes(frame.data[1:5], "little", signed=False)
-                        print(
-                            f"Found MIT motor ID={fmt_id(target_id)} "
-                            f"feedback={fmt_id(frame.arbitration_id, 3)} fault_raw=0x{fault_raw:08X}"
-                        )
-                    continue
-                self.handle_frame(frame)
-        if hits:
-            self.motor_id = hits[0]
-            self.protocol = PROTOCOL_MIT
-            self.velocity_mode_configured = False
-            print(f"MIT scan complete: {len(hits)} motor(s), selected {fmt_id(self.motor_id)}.")
-        else:
-            print("MIT scan complete: no replies.")
-        return hits
-
-    def scan_current_protocol(self) -> None:
-        if self.protocol == PROTOCOL_MIT:
-            self.scan_mit(SCAN_FIRST_MIT_ID, SCAN_LAST_ID)
-        else:
-            self.scan_private(SCAN_FIRST_PRIVATE_ID, SCAN_LAST_ID)
-
-    def scan_both_protocols(self) -> None:
-        original_motor_id = self.motor_id
-        original_protocol = self.protocol
-        private_hits = self.scan_private(SCAN_FIRST_PRIVATE_ID, SCAN_LAST_ID)
-        mit_hits = self.scan_mit(SCAN_FIRST_MIT_ID, SCAN_LAST_ID)
-
-        if private_hits:
-            self.motor_id = private_hits[0]
-            self.protocol = PROTOCOL_PRIVATE
-        elif mit_hits:
-            self.motor_id = mit_hits[0]
-            self.protocol = PROTOCOL_MIT
-        else:
-            self.motor_id = original_motor_id
-            self.protocol = original_protocol
-
-        self.velocity_mode_configured = False
-        print(f"Selected motor={fmt_id(self.motor_id)} protocol={self.protocol}")
 
     def print_raw_frame(self, frame: CanFrame) -> None:
         frame_kind = "ext" if frame.extended else "std"
@@ -1371,7 +911,7 @@ class RobStrideSocketCanTool:
         if self.raw_trace_until and time.monotonic() > self.raw_trace_until:
             self.raw_trace_until = 0.0
             print("Raw CAN trace off: time limit reached.")
-            self.print_interface_status()
+            self.print_adapter_status()
 
     def handle_frame(self, frame: CanFrame) -> None:
         if self.raw_trace_until:
@@ -1380,12 +920,10 @@ class RobStrideSocketCanTool:
             if self.raw_trace_frames >= RAW_TRACE_FRAME_LIMIT:
                 self.raw_trace_until = 0.0
                 print("Raw CAN trace off: frame limit reached.")
-                self.print_interface_status()
+                self.print_adapter_status()
 
         if frame.extended:
             self.handle_private_frame(frame)
-        else:
-            self.handle_standard_frame(frame)
 
     def handle_private_frame(self, frame: CanFrame) -> None:
         if len(frame.data) < 8:
@@ -1437,28 +975,6 @@ class RobStrideSocketCanTool:
             report = decode_private_fault_payload(frame.data)
             print(f"FAULT private motor={fmt_id(source_motor)} {private_fault_summary(report)}")
 
-    def handle_standard_frame(self, frame: CanFrame) -> None:
-        feedback = decode_mit_feedback(frame)
-        if feedback is None or feedback.motor_id != self.motor_id:
-            return
-        if not self.accept_any_feedback_id and feedback.feedback_id != self.feedback_id:
-            return
-        self.last_feedback_at = time.monotonic()
-        if feedback.feedback_id != self.feedback_id:
-            self.feedback_id = feedback.feedback_id
-        if self.last_feedback_at - self.last_status_print_at >= STATUS_PRINT_PERIOD_S:
-            self.last_status_print_at = self.last_feedback_at
-            self.print_mit_feedback(feedback)
-
-    def print_mit_feedback(self, feedback: MitFeedback, prefix: str = "") -> None:
-        print(
-            f"{prefix}mit fb id={fmt_id(feedback.feedback_id, 3)} "
-            f"motor={fmt_id(feedback.motor_id)} mode={feedback.mode_state} "
-            f"fault={1 if feedback.has_fault else 0} warn={1 if feedback.has_warning else 0} "
-            f"pos={feedback.position_rad:+.3f} rad vel={feedback.velocity_rad_s:+.3f} rad/s "
-            f"tq={feedback.torque_nm:+.3f} Nm temp={feedback.winding_temp_c:.1f} C"
-        )
-
     def poll_can(self) -> None:
         while True:
             frame = self.bus.recv(0.0)
@@ -1489,14 +1005,14 @@ class RobStrideSocketCanTool:
             return
         now = time.monotonic()
         if now - self.last_velocity_refresh_at >= VELOCITY_REFRESH_S:
-            self.send_speed_target(self.commanded_speed, wait_feedback=False)
+            self.send_speed_target(self.commanded_speed)
 
     def update_position_refresh(self) -> None:
         if not self.position_mode_configured:
             return
         now = time.monotonic()
         if now - self.last_position_refresh_at >= POSITION_REFRESH_S:
-            self.send_position_target(wait_feedback=False)
+            self.send_position_target()
 
     def update(self) -> None:
         self.update_raw_trace()
@@ -1505,23 +1021,21 @@ class RobStrideSocketCanTool:
         self.update_velocity_refresh()
         self.update_position_refresh()
 
-    def print_interface_status(self) -> None:
-        stats = self.bus.stats() if hasattr(self.bus, "stats") else {}
+    def print_adapter_status(self) -> None:
+        stats = self.bus.stats()
         values = []
         for name in ("operstate", "rx_packets", "tx_packets", "rx_errors", "tx_errors", "rx_dropped", "tx_dropped"):
             raw = stats.get(name)
             if raw:
                 values.append(f"{name}={raw}")
-        label = self.bus.label() if hasattr(self.bus, "label") else self.bus.interface
-        print(f"{getattr(self.bus, 'transport', 'can')} {label}: " + (" ".join(values) if values else "status unavailable"))
+        print(f"{self.bus.transport} {self.bus.label()}: " + (" ".join(values) if values else "status unavailable"))
 
-    def reopen_socket(self) -> None:
+    def reopen_adapter(self) -> None:
         self.oscillating = False
         self.jog_active = False
         self.velocity_mode_configured = False
         self.bus.reopen()
-        label = self.bus.label() if hasattr(self.bus, "label") else self.bus.interface
-        print(f"Reopened {label}.")
+        print(f"Reopened {self.bus.label()}.")
 
     def cycle_host_id(self) -> None:
         hosts = list(PRIVATE_HOST_CANDIDATES)
@@ -1532,13 +1046,6 @@ class RobStrideSocketCanTool:
             self.host_id = hosts[0]
         self.velocity_mode_configured = False
         print(f"Private host ID now {fmt_id(self.host_id)}")
-
-    def toggle_protocol(self) -> None:
-        self.protocol = PROTOCOL_MIT if self.protocol == PROTOCOL_PRIVATE else PROTOCOL_PRIVATE
-        self.velocity_mode_configured = False
-        self.oscillating = False
-        self.jog_active = False
-        print(f"Control protocol now {self.protocol}. Velocity mode will be reconfigured.")
 
     def handle_command(self, raw: str) -> bool:
         if raw in ("\r", "\n", " ", "\t"):
@@ -1551,10 +1058,8 @@ class RobStrideSocketCanTool:
             return False
         if cmd == "?":
             self.print_help()
-        elif raw == "P":
-            self.scan_both_protocols()
         elif cmd == "p":
-            self.scan_current_protocol()
+            self.scan_private(SCAN_FIRST_PRIVATE_ID, SCAN_LAST_ID)
         elif cmd == "v":
             self.configure_velocity_mode()
         elif cmd == "f":
@@ -1594,14 +1099,12 @@ class RobStrideSocketCanTool:
             self.request_readback()
         elif cmd == "a":
             self.set_active_report(not self.active_reports)
-        elif cmd == "m":
-            self.toggle_protocol()
         elif cmd == "x":
             self.start_raw_trace()
         elif cmd == "d":
-            self.print_interface_status()
+            self.print_adapter_status()
         elif cmd == "c":
-            self.reopen_socket()
+            self.reopen_adapter()
         elif cmd == "h":
             self.cycle_host_id()
         elif cmd == "t":
@@ -1609,14 +1112,6 @@ class RobStrideSocketCanTool:
         else:
             print("Unknown command. Type '?' for help.")
         return True
-
-
-def read_text_file(path: str) -> str:
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            return handle.read().strip()
-    except OSError:
-        return ""
 
 
 @contextlib.contextmanager
@@ -1637,7 +1132,7 @@ def cbreak_stdin() -> Iterable[None]:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
-def interactive_loop(tool: RobStrideSocketCanTool) -> None:
+def interactive_loop(tool: RobStrideUsbTool) -> None:
     tool.print_help()
     print("Press a command key. Use q to stop and quit.")
     with cbreak_stdin():
@@ -1651,7 +1146,7 @@ def interactive_loop(tool: RobStrideSocketCanTool) -> None:
                 running = tool.handle_command(char)
 
 
-def run_for_duration(tool: RobStrideSocketCanTool, duration_s: float) -> None:
+def run_for_duration(tool: RobStrideUsbTool, duration_s: float) -> None:
     deadline = time.monotonic() + max(0.0, duration_s)
     while time.monotonic() < deadline:
         tool.poll_can()
@@ -1662,10 +1157,6 @@ def run_for_duration(tool: RobStrideSocketCanTool, duration_s: float) -> None:
 def run_encoding_self_test(verbose: bool = False) -> bool:
     private_ping = build_private_ext_id(COMM_GET_ID, DEFAULT_HOST_ID, DEFAULT_MOTOR_ID)
     private_reply_parts = split_private_ext_id(0x00007FFE)
-    mit_pos_id = mit_typed_id(MIT_TYPED_ID_POSITION, DEFAULT_MOTOR_ID)
-    mit_pos = mit_position_payload(1.0, 0.5)
-    mit_vel_id = mit_typed_id(MIT_TYPED_ID_VELOCITY, DEFAULT_MOTOR_ID)
-    mit_vel = mit_velocity_payload(0.30, 1.0)
     private_fault = decode_private_fault_payload(bytes([0x04, 0, 0, 0, 0, 0, 0, 0]))
     official_private_write_id = build_private_ext_id(COMM_WRITE_PARAM, DEFAULT_HOST_ID, 0x01)
     official_private_write_data = bytes([0x05, 0x70, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00])
@@ -1679,12 +1170,7 @@ def run_encoding_self_test(verbose: bool = False) -> bool:
     passed = (
         private_ping == 0x0000FD7F
         and private_reply_parts == (0, 0x007F, 0xFE)
-        and mit_pos_id == 0x17F
-        and len(mit_pos) == 8
-        and mit_vel_id == 0x27F
-        and len(mit_vel) == 8
         and private_fault.fault_names == ["undervoltage"]
-        and mit_special(0xFC) == bytes([0xFF] * 7 + [0xFC])
         and official_serial == expected_official_serial
         and parsed_official == CanFrame(official_private_write_id, official_private_write_data, True)
     )
@@ -1692,37 +1178,24 @@ def run_encoding_self_test(verbose: bool = False) -> bool:
         print(f"encoding self-test {'PASSED' if passed else 'FAILED'}")
         print(f"  private Get-ID id={fmt_id(private_ping, 8)}")
         print(f"  private reply 0x00007FFE parts={private_reply_parts}")
-        print(f"  MIT position id={fmt_id(mit_pos_id, 3)} data={bytes_hex(mit_pos)}")
-        print(f"  MIT velocity id={fmt_id(mit_vel_id, 3)} data={bytes_hex(mit_vel)}")
         print(f"  private fault sample {private_fault_summary(private_fault)}")
-        print(f"  RobStride serial example={bytes_hex(official_serial)}")
+        print(f"  RobStride USB serial example={bytes_hex(official_serial)}")
     return passed
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--transport", choices=TRANSPORT_CHOICES, default=TRANSPORT_ROBSTRIDE_SERIAL)
-    parser.add_argument("--interface", default=DEFAULT_INTERFACE, help="SocketCAN interface, usually can0")
-    parser.add_argument("--serial-port", default=DEFAULT_SERIAL_PORT, help="official RobStride adapter tty")
+    parser.add_argument("--serial-port", default=DEFAULT_SERIAL_PORT, help="RobStride USB adapter tty")
     parser.add_argument("--serial-baud", type=int, default=DEFAULT_SERIAL_BAUD)
     parser.add_argument("--motor-id", default=hex(DEFAULT_MOTOR_ID), help="RobStride motor/node ID")
     parser.add_argument("--host-id", default=hex(DEFAULT_HOST_ID), help="private-protocol host ID")
-    parser.add_argument("--feedback-id", default=hex(DEFAULT_FEEDBACK_ID), help="MIT feedback/host CAN ID")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="model for private telemetry scaling")
-    parser.add_argument("--protocol", choices=(PROTOCOL_PRIVATE, PROTOCOL_MIT), default=PROTOCOL_PRIVATE)
-    parser.add_argument(
-        "--strict-feedback-id",
-        action="store_true",
-        help="MIT mode: only accept feedback on --feedback-id",
-    )
     parser.add_argument(
         "--command",
         choices=(
             "interactive",
             "scan",
-            "scan-both",
             "scan-private",
-            "scan-mit",
             "configure",
             "forward",
             "backward",
@@ -1740,7 +1213,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vel", type=float, default=DEFAULT_SPEED_RAD_S, help="velocity for --command vel")
     parser.add_argument("--pos", type=float, default=DEFAULT_POSITION_RAD, help="target radian position for --command position")
     parser.add_argument("--vlim", type=float, default=DEFAULT_POSITION_VEL_RAD_S, help="position velocity limit")
-    parser.add_argument("--acc", type=float, default=DEFAULT_POSITION_ACCEL_RAD_S2, help="private PP position acceleration")
+    parser.add_argument("--acc", type=float, default=DEFAULT_POSITION_ACCEL_RAD_S2, help="position acceleration")
     parser.add_argument("--loc-kp", type=float, default=DEFAULT_POSITION_KP, help="private position gain")
     parser.add_argument("--duration", type=float, default=0.75, help="run duration for one-shot motion commands")
     parser.add_argument(
@@ -1749,7 +1222,7 @@ def parse_args() -> argparse.Namespace:
         default=SCAN_PER_ID_TIMEOUT_S * 1000.0,
         help="per-ID scan wait time",
     )
-    parser.add_argument("--self-test", action="store_true", help="test frame encoders without opening CAN")
+    parser.add_argument("--self-test", action="store_true", help="test frame encoders without opening the adapter")
     return parser.parse_args()
 
 
@@ -1759,8 +1232,6 @@ def main() -> int:
         return 0 if run_encoding_self_test(verbose=True) else 1
 
     bus = create_bus(
-        transport=args.transport,
-        interface=args.interface,
         serial_port=args.serial_port,
         serial_baud=args.serial_baud,
     )
@@ -1769,35 +1240,25 @@ def main() -> int:
     except RuntimeError as exc:
         print(exc, file=sys.stderr)
         print(
-            "SocketCAN setup: sudo bash raspi/can_up.sh can0\n"
-            "Official RobStride adapter: stop slcand, then use "
-            "--transport robstride-serial --serial-port auto",
+            "Plug in the RobStride USB-CAN adapter, then use "
+            "--serial-port auto or set --serial-port to the adapter path.",
             file=sys.stderr,
         )
         return 2
 
-    tool = RobStrideSocketCanTool(
+    tool = RobStrideUsbTool(
         bus=bus,
-        protocol=args.protocol,
         motor_id=parse_id(args.motor_id),
         host_id=parse_id(args.host_id),
-        feedback_id=parse_id(args.feedback_id),
         model=args.model,
-        accept_any_feedback_id=not args.strict_feedback_id,
         scan_per_id_timeout_s=max(0.001, args.scan_timeout_ms / 1000.0),
     )
 
     try:
         if args.command == "interactive":
             interactive_loop(tool)
-        elif args.command == "scan":
-            tool.scan_both_protocols()
-        elif args.command == "scan-both":
-            tool.scan_both_protocols()
-        elif args.command == "scan-private":
+        elif args.command in ("scan", "scan-private"):
             tool.scan_private(SCAN_FIRST_PRIVATE_ID, SCAN_LAST_ID)
-        elif args.command == "scan-mit":
-            tool.scan_mit(SCAN_FIRST_MIT_ID, SCAN_LAST_ID)
         elif args.command == "configure":
             tool.configure_velocity_mode()
         elif args.command == "forward":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local RobStride dashboard for Raspberry Pi CAN adapters."""
+"""Local RobStride dashboard for the RobStride USB-CAN adapter."""
 
 from __future__ import annotations
 
@@ -19,13 +19,10 @@ from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-from robstride_socketcan import (
-    CAN_SFF_MASK,
+from robstride_usb import (
     DEFAULT_ACCEL_RAD_S2,
     DEFAULT_CURRENT_LIMIT_A,
-    DEFAULT_FEEDBACK_ID,
     DEFAULT_HOST_ID,
-    DEFAULT_INTERFACE,
     DEFAULT_MODEL,
     DEFAULT_MOTOR_ID,
     DEFAULT_POSITION_ACCEL_RAD_S2,
@@ -35,8 +32,6 @@ from robstride_socketcan import (
     DEFAULT_SERIAL_BAUD,
     DEFAULT_SERIAL_PORT,
     DEFAULT_SPEED_RAD_S,
-    MIT_TYPED_ID_POSITION,
-    MIT_TYPED_ID_VELOCITY,
     PARAM_ACC_RAD,
     PARAM_LOC_REF,
     PARAM_LIMIT_CUR,
@@ -47,31 +42,19 @@ from robstride_socketcan import (
     PARAM_SPD_REF,
     PRIVATE_HOST_CANDIDATES,
     PRIVATE_MODEL_LIMITS,
-    PROTOCOL_MIT,
     PROTOCOL_PRIVATE,
     RUN_MODE_POSITION,
     RUN_MODE_VELOCITY,
-    SCAN_FIRST_MIT_ID,
     SCAN_FIRST_PRIVATE_ID,
     SCAN_LAST_ID,
     SCAN_PER_ID_TIMEOUT_S,
-    TRANSPORT_CHOICES,
-    TRANSPORT_ROBSTRIDE_SERIAL,
-    TRANSPORT_SOCKETCAN,
+    TRANSPORT_ROBSTRIDE_USB,
     build_private_ext_id,
     bytes_hex,
     create_bus,
-    decode_mit_feedback,
     decode_private_fault_payload,
     f32_le,
     fmt_id,
-    mit_active_report_payload,
-    mit_fault_query_payload,
-    mit_position_payload,
-    mit_set_mode_payload,
-    mit_special,
-    mit_typed_id,
-    mit_velocity_payload,
     private_fault_summary,
     read_f32_le,
     split_private_ext_id,
@@ -103,7 +86,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 REPO_DIR = ROOT_DIR.parent
 WEB_DIR = ROOT_DIR / "web"
 UPDATE_LOG_PATH = ROOT_DIR / "update.log"
-APP_VERSION = "2026.08.27.5"
+APP_VERSION = "2026.08.27.7"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -184,60 +167,20 @@ def solve_three_axis_arm_ik(
     return ArmIkSolution(base=base, shoulder=shoulder, elbow=elbow)
 
 
-def can_stats(interface: str) -> Dict[str, str]:
-    base = Path("/sys/class/net") / interface
-    out: Dict[str, str] = {}
-    for name in ("operstate", "carrier"):
-        with contextlib_read(base / name) as value:
-            if value is not None:
-                out[name] = value
-    stats = base / "statistics"
-    for name in ("rx_packets", "tx_packets", "rx_errors", "tx_errors", "rx_dropped", "tx_dropped"):
-        with contextlib_read(stats / name) as value:
-            if value is not None:
-                out[name] = value
-    return out
-
-
-class contextlib_read:
-    def __init__(self, path: Path):
-        self.path = path
-        self.value: Optional[str] = None
-
-    def __enter__(self) -> Optional[str]:
-        try:
-            self.value = self.path.read_text(encoding="utf-8").strip()
-        except OSError:
-            self.value = None
-        return self.value
-
-    def __exit__(self, *_args: object) -> None:
-        return None
-
-
 class DashboardController:
     def __init__(
         self,
-        transport: str,
-        interface: str,
         serial_port: str,
         serial_baud: int,
         motor_id: int,
         host_id: int,
-        feedback_id: int,
-        protocol: str,
         model: str,
         open_can: bool,
     ):
         self.lock = threading.RLock()
         self.frame_cv = threading.Condition(self.lock)
         self.command_lock = threading.Lock()
-        self.bus = create_bus(
-            transport=transport,
-            interface=interface,
-            serial_port=serial_port,
-            serial_baud=serial_baud,
-        )
+        self.bus = create_bus(serial_port=serial_port, serial_baud=serial_baud)
         self.connected = False
         self.open_error = ""
         self.running = True
@@ -248,10 +191,7 @@ class DashboardController:
 
         self.motor_id = motor_id & 0xFF
         self.host_id = host_id & 0xFF
-        self.feedback_id = feedback_id & CAN_SFF_MASK
-        self.protocol = protocol
         self.model = model.lower()
-        self.accept_any_feedback_id = True
         self.test_speed = DEFAULT_SPEED_RAD_S
         self.commanded_speed = 0.0
         self.position_target = DEFAULT_POSITION_RAD
@@ -291,7 +231,6 @@ class DashboardController:
         self.last_feedback: Optional[Dict[str, Any]] = None
         self.last_private_fault: Optional[Dict[str, Any]] = None
         self.discovered_private: List[int] = []
-        self.discovered_mit: List[int] = []
         self.busy = False
         self.update_lock = threading.Lock()
         self.update_process: Optional[subprocess.Popen[bytes]] = None
@@ -418,12 +357,10 @@ class DashboardController:
         self.log(f"GitHub update exited with code {exit_code}")
 
     def bus_label(self) -> str:
-        if hasattr(self.bus, "label"):
-            return self.bus.label()
-        return self.bus.interface
+        return self.bus.label()
 
     def bus_transport(self) -> str:
-        return getattr(self.bus, "transport", TRANSPORT_SOCKETCAN)
+        return getattr(self.bus, "transport", TRANSPORT_ROBSTRIDE_USB)
 
     def open_bus(self) -> bool:
         with self.lock:
@@ -435,7 +372,7 @@ class DashboardController:
             with self.lock:
                 self.connected = False
                 self.open_error = str(exc)
-            self.log(f"CAN open failed on {label}: {exc}")
+            self.log(f"USB adapter open failed on {label}: {exc}")
             return False
         with self.lock:
             self.connected = True
@@ -445,8 +382,6 @@ class DashboardController:
 
     def reopen_bus(
         self,
-        interface: Optional[str] = None,
-        transport: Optional[str] = None,
         serial_port: Optional[str] = None,
         serial_baud: Optional[int] = None,
     ) -> bool:
@@ -456,19 +391,12 @@ class DashboardController:
             self.velocity_configured = False
             self.position_configured = False
             self.arm_position_configured = False
-            next_transport = transport or self.bus_transport()
-            next_interface = interface or self.bus.interface
             next_serial_port = serial_port or getattr(self.bus, "serial_port", DEFAULT_SERIAL_PORT)
             next_serial_baud = serial_baud or getattr(self.bus, "serial_baud", DEFAULT_SERIAL_BAUD)
             self.connected = False
         with self.bus_lock:
             self.bus.close()
-            self.bus = create_bus(
-                transport=next_transport,
-                interface=next_interface,
-                serial_port=next_serial_port,
-                serial_baud=next_serial_baud,
-            )
+            self.bus = create_bus(serial_port=next_serial_port, serial_baud=next_serial_baud)
             time.sleep(0.05)
         return self.open_bus()
 
@@ -480,7 +408,7 @@ class DashboardController:
     def send(self, arbitration_id: int, data: bytes, extended: bool) -> None:
         with self.bus_lock:
             if not self.connected:
-                raise RuntimeError("CAN transport is not open")
+                raise RuntimeError("RobStride USB adapter is not open")
             self.bus.send(arbitration_id, data, extended=extended)
 
     def send_private(self, comm_type: int, extra_data: int, target_id: int, data: bytes) -> None:
@@ -529,23 +457,6 @@ class DashboardController:
     def read_private_param(self, index: int) -> None:
         self.read_private_param_from(self.motor_id, index)
 
-    def send_mit_to_motor(self, payload: bytes) -> None:
-        self.send(self.motor_id, payload, extended=False)
-
-    def send_mit_velocity(self, speed: float) -> None:
-        self.send(
-            mit_typed_id(MIT_TYPED_ID_VELOCITY, self.motor_id),
-            mit_velocity_payload(speed, DEFAULT_CURRENT_LIMIT_A),
-            extended=False,
-        )
-
-    def send_mit_position(self, position: float, velocity_limit: float) -> None:
-        self.send(
-            mit_typed_id(MIT_TYPED_ID_POSITION, self.motor_id),
-            mit_position_payload(position, velocity_limit),
-            extended=False,
-        )
-
     def rx_loop(self) -> None:
         while self.running:
             with self.bus_lock:
@@ -559,7 +470,7 @@ class DashboardController:
                 with self.lock:
                     self.connected = False
                     self.open_error = str(exc)
-                self.log(f"CAN receive failed: {exc}")
+                self.log(f"USB adapter receive failed: {exc}")
                 continue
             except RuntimeError:
                 time.sleep(0.10)
@@ -599,7 +510,7 @@ class DashboardController:
                 self.last_feedback_at = time.monotonic()
                 self.last_feedback = {
                     "protocol": PROTOCOL_PRIVATE,
-                    "feedbackId": host,
+                    "targetHost": host,
                     "motorId": source_motor,
                     "positionRad": uint_to_float(pos_raw, -p_max, p_max, 16),
                     "velocityRadS": uint_to_float(vel_raw, -v_max, v_max, 16),
@@ -636,31 +547,6 @@ class DashboardController:
                     f"{private_fault_summary(report)}"
                 )
             return
-
-        feedback = decode_mit_feedback(frame)
-        if feedback is None:
-            return
-        if feedback.motor_id != self.motor_id:
-            return
-        if self.accept_any_feedback_id and feedback.feedback_id != self.feedback_id:
-            self.feedback_id = feedback.feedback_id
-            self.log(f"Learned MIT feedback ID {fmt_id(feedback.feedback_id, 3)}")
-        elif feedback.feedback_id != self.feedback_id:
-            return
-        self.last_feedback_at = time.monotonic()
-        self.last_feedback = {
-            "protocol": PROTOCOL_MIT,
-            "feedbackId": feedback.feedback_id,
-            "motorId": feedback.motor_id,
-            "positionRad": feedback.position_rad,
-            "velocityRadS": feedback.velocity_rad_s,
-            "torqueNm": feedback.torque_nm,
-            "temperatureC": feedback.winding_temp_c,
-            "fault": feedback.has_fault,
-            "warning": feedback.has_warning,
-            "modeState": feedback.mode_state,
-            "ageMs": 0,
-        }
 
     def frame_json(self, frame: Any) -> Dict[str, Any]:
         return {
@@ -725,14 +611,6 @@ class DashboardController:
     def wait_private_param(self, index: int, timeout_s: float) -> Optional[bytes]:
         return self.wait_private_param_from(self.motor_id, index, timeout_s)
 
-    def wait_mit_feedback(self, timeout_s: float, motor_id: Optional[int] = None, after_seq: Optional[int] = None) -> Optional[Any]:
-        expected_motor_id = self.motor_id if motor_id is None else motor_id
-
-        def matches(frame: Any) -> bool:
-            return not frame.extended and len(frame.data) >= 8 and frame.data[0] == expected_motor_id
-
-        return self.wait_for_frame(matches, timeout_s, after_seq)
-
     def run_command(self, command: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not self.command_lock.acquire(blocking=False):
             if command in ("stop", "clear-fault", "arm-stop", "arm-clear-fault"):
@@ -769,7 +647,7 @@ class DashboardController:
     def _run_command(self, command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         self.log(f"Command {command}")
         if command == "reopen":
-            ok = self.reopen_bus(str(payload.get("interface") or self.bus.interface))
+            ok = self.reopen_bus()
             return {"ok": ok}
         if not self.connected:
             opened = self.open_bus()
@@ -778,13 +656,9 @@ class DashboardController:
 
         if command == "scan":
             self.scan_private()
-            self.scan_mit()
             return {"ok": True}
         if command == "scan-private":
             self.scan_private()
-            return {"ok": True}
-        if command == "scan-mit":
-            self.scan_mit()
             return {"ok": True}
         if command == "configure":
             return {"ok": self.configure_velocity()}
@@ -847,46 +721,28 @@ class DashboardController:
     def configure(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self.command_lock:
             with self.lock:
-                old_transport = self.bus_transport()
-                old_interface = self.bus.interface
                 old_serial_port = getattr(self.bus, "serial_port", DEFAULT_SERIAL_PORT)
                 old_serial_baud = getattr(self.bus, "serial_baud", DEFAULT_SERIAL_BAUD)
-                old_protocol = self.protocol
                 old_motor_id = self.motor_id
                 old_host_id = self.host_id
-                old_feedback_id = self.feedback_id
                 old_model = self.model
-                new_transport = str(payload.get("transport") or old_transport)
-                if new_transport not in TRANSPORT_CHOICES:
-                    new_transport = old_transport
-                new_interface = str(payload.get("interface") or old_interface)
                 new_serial_port = str(payload.get("serialPort") or old_serial_port)
                 new_serial_baud = parse_int(payload.get("serialBaud"), old_serial_baud)
-                new_protocol = str(payload.get("protocol") or old_protocol)
-                if new_protocol not in (PROTOCOL_PRIVATE, PROTOCOL_MIT):
-                    new_protocol = old_protocol
                 new_motor_id = parse_int(payload.get("motorId"), old_motor_id) & 0xFF
                 new_host_id = parse_int(payload.get("hostId"), old_host_id) & 0xFF
-                new_feedback_id = parse_int(payload.get("feedbackId"), old_feedback_id) & CAN_SFF_MASK
                 new_model = str(payload.get("model") or old_model).lower()
                 bus_changed = (
-                    new_transport != old_transport
-                    or new_interface != old_interface
-                    or new_serial_port != old_serial_port
+                    new_serial_port != old_serial_port
                     or new_serial_baud != old_serial_baud
                 )
                 control_changed = (
-                    new_protocol != old_protocol
-                    or new_motor_id != old_motor_id
+                    new_motor_id != old_motor_id
                     or new_host_id != old_host_id
-                    or new_feedback_id != old_feedback_id
                     or new_model != old_model
                 )
                 if bus_changed or control_changed:
-                    self.protocol = new_protocol
                     self.motor_id = new_motor_id
                     self.host_id = new_host_id
-                    self.feedback_id = new_feedback_id
                     self.model = new_model
                     self.velocity_configured = False
                     self.position_configured = False
@@ -895,22 +751,17 @@ class DashboardController:
                     self.jog_active = False
             if bus_changed:
                 self.reopen_bus(
-                    interface=new_interface,
-                    transport=new_transport,
                     serial_port=new_serial_port,
                     serial_baud=new_serial_baud,
                 )
             if bus_changed or control_changed:
                 self.log(
-                    f"Config transport={self.bus_transport()} bus={self.bus_label()} "
-                    f"interface={self.bus.interface} protocol={self.protocol} "
-                    f"motor={fmt_id(self.motor_id)} host={fmt_id(self.host_id)} feedback={fmt_id(self.feedback_id, 3)}"
+                    f"Config transport={self.bus_transport()} adapter={self.bus_label()} "
+                    f"motor={fmt_id(self.motor_id)} host={fmt_id(self.host_id)}"
                 )
         return {"ok": True}
 
     def configure_velocity(self) -> bool:
-        if self.protocol == PROTOCOL_MIT:
-            return self.configure_mit_velocity()
         return self.configure_private_velocity()
 
     def clear_private_fault(self, label: str = "Private clear-error sent") -> None:
@@ -945,11 +796,6 @@ class DashboardController:
         self.velocity_configured = False
         self.position_configured = False
         self.arm_position_configured = False
-        if self.protocol == PROTOCOL_MIT:
-            self.send_mit_to_motor(mit_fault_query_payload(True))
-            self.wait_mit_feedback(0.35)
-            self.log("MIT clear-fault sent")
-            return
         self.clear_private_fault()
 
     def configure_private_velocity(self) -> bool:
@@ -979,37 +825,6 @@ class DashboardController:
         self.log("Private velocity mode configured")
         return True
 
-    def configure_mit_velocity(self) -> bool:
-        self.velocity_configured = False
-        self.position_configured = False
-        self.arm_position_configured = False
-        self.oscillating = False
-        self.jog_active = False
-        self.log(
-            f"Configuring MIT velocity motor={fmt_id(self.motor_id)} "
-            f"feedback={fmt_id(self.feedback_id, 3)}"
-        )
-        start = self.current_seq()
-        self.send_mit_to_motor(mit_set_mode_payload(RUN_MODE_VELOCITY))
-        mode_fb = self.wait_mit_feedback(0.35, after_seq=start)
-        self.log("MIT mode=2 " + ("ok" if mode_fb else "sent, no feedback"))
-        time.sleep(0.06)
-
-        start = self.current_seq()
-        self.send_mit_to_motor(mit_special(0xFC))
-        enable_fb = self.wait_mit_feedback(0.35, after_seq=start)
-        self.log("MIT enable " + ("ok" if enable_fb else "sent, no feedback"))
-        time.sleep(0.06)
-
-        start = self.current_seq()
-        self.commanded_speed = 0.0
-        self.send_mit_velocity(0.0)
-        self.wait_mit_feedback(0.25, after_seq=start)
-        self.velocity_configured = True
-        self.position_configured = False
-        self.log("MIT velocity mode configured")
-        return True
-
     def write_private_run_mode_verified_for(self, target_id: int, desired_mode: int) -> bool:
         original_host = self.host_id
         for host in self.private_host_candidates():
@@ -1035,8 +850,6 @@ class DashboardController:
         self.position_velocity_limit = velocity_limit
         self.position_acceleration = acceleration
         self.position_kp = position_kp
-        if self.protocol == PROTOCOL_MIT:
-            return self.move_mit_position(position, velocity_limit)
         return self.move_private_position(position, velocity_limit, acceleration, position_kp)
 
     def move_private_position(self, position: float, velocity_limit: float, acceleration: float, position_kp: float) -> bool:
@@ -1072,37 +885,6 @@ class DashboardController:
             f"private position target={position:+.3f} rad "
             f"vlim={velocity_limit:.2f} rad/s acc={acceleration:.1f} rad/s^2 loc_kp={kp:.2f} sent"
         )
-        return True
-
-    def move_mit_position(self, position: float, velocity_limit: float) -> bool:
-        self.velocity_configured = False
-        self.position_configured = False
-        self.oscillating = False
-        self.jog_active = False
-        self.commanded_speed = 0.0
-        self.log(
-            f"Configuring MIT position motor={fmt_id(self.motor_id)} "
-            f"feedback={fmt_id(self.feedback_id, 3)} pos={position:+.3f} rad vlim={velocity_limit:.2f} rad/s"
-        )
-
-        start = self.current_seq()
-        self.send_mit_to_motor(mit_set_mode_payload(RUN_MODE_POSITION))
-        mode_fb = self.wait_mit_feedback(0.35, after_seq=start)
-        self.log("MIT mode=1 " + ("ok" if mode_fb else "sent, no feedback"))
-        time.sleep(0.06)
-
-        start = self.current_seq()
-        self.send_mit_to_motor(mit_special(0xFC))
-        enable_fb = self.wait_mit_feedback(0.35, after_seq=start)
-        self.log("MIT enable " + ("ok" if enable_fb else "sent, no feedback"))
-        time.sleep(0.06)
-
-        start = self.current_seq()
-        self.send_mit_position(position, velocity_limit)
-        self.wait_mit_feedback(0.35, after_seq=start)
-        self.position_configured = True
-        self.last_position_refresh_at = time.monotonic()
-        self.log(f"mit position target={position:+.3f} rad vlim={velocity_limit:.2f} rad/s sent")
         return True
 
     def configure_private_position_motor(
@@ -1163,9 +945,6 @@ class DashboardController:
         return self.arm_offsets[axis] + (self.arm_directions[axis] * joint_angle)
 
     def move_arm_ik(self, payload: Dict[str, Any]) -> bool:
-        if self.protocol != PROTOCOL_PRIVATE:
-            self.log("Arm IK uses private protocol; switch Protocol to Private first")
-            return False
         self.apply_arm_payload(payload)
         solution = solve_three_axis_arm_ik(
             self.arm_target["x"],
@@ -1261,17 +1040,11 @@ class DashboardController:
         return out
 
     def send_velocity_target(self, speed: float) -> None:
-        if self.protocol == PROTOCOL_MIT:
-            self.send_mit_velocity(speed)
-        else:
-            self.write_private_param_f32(PARAM_SPD_REF, speed)
+        self.write_private_param_f32(PARAM_SPD_REF, speed)
         self.last_velocity_refresh_at = time.monotonic()
 
     def send_position_target(self) -> None:
-        if self.protocol == PROTOCOL_MIT:
-            self.send_mit_position(self.position_target, self.position_velocity_limit)
-        else:
-            self.write_private_param_f32(PARAM_LOC_REF, self.position_target)
+        self.write_private_param_f32(PARAM_LOC_REF, self.position_target)
         self.last_position_refresh_at = time.monotonic()
 
     def set_speed(self, speed: float) -> bool:
@@ -1281,7 +1054,7 @@ class DashboardController:
         self.send_velocity_target(speed)
         self.position_configured = False
         self.arm_position_configured = False
-        self.log(f"{self.protocol} speed={speed:+.2f} rad/s sent")
+        self.log(f"private speed={speed:+.2f} rad/s sent")
         return True
 
     def start_jog(self, direction: int) -> bool:
@@ -1312,18 +1085,12 @@ class DashboardController:
         self.jog_active = False
         if self.velocity_configured:
             try:
-                if self.protocol == PROTOCOL_MIT:
-                    self.send_mit_velocity(0.0)
-                else:
-                    self.write_private_param_f32(PARAM_SPD_REF, 0.0)
+                self.write_private_param_f32(PARAM_SPD_REF, 0.0)
                 time.sleep(0.08)
             except Exception as exc:
                 self.log(f"zero-speed before stop failed: {exc}")
         try:
-            if self.protocol == PROTOCOL_MIT:
-                self.send_mit_to_motor(mit_special(0xFD))
-            else:
-                self.send_private_disable(False)
+            self.send_private_disable(False)
         finally:
             self.velocity_configured = False
             self.position_configured = False
@@ -1332,20 +1099,12 @@ class DashboardController:
             self.log("Stop/disable sent")
 
     def set_active_report(self, enabled: bool) -> None:
-        if self.protocol == PROTOCOL_MIT:
-            self.send_mit_to_motor(mit_active_report_payload(enabled))
-        else:
-            payload = bytes([1, 2, 3, 4, 5, 6, 1 if enabled else 0, 0])
-            self.send_private(COMM_PROACTIVE_REPORT, self.host_id, self.motor_id, payload)
+        payload = bytes([1, 2, 3, 4, 5, 6, 1 if enabled else 0, 0])
+        self.send_private(COMM_PROACTIVE_REPORT, self.host_id, self.motor_id, payload)
         self.active_reports = enabled
         self.log(f"Active reports {'on' if enabled else 'off'}")
 
     def request_status(self) -> None:
-        if self.protocol == PROTOCOL_MIT:
-            self.send_mit_to_motor(mit_fault_query_payload(False))
-            self.wait_mit_feedback(0.4)
-            self.log("MIT status queried")
-            return
         for index, label in (
             (PARAM_RUN_MODE, "run_mode"),
             (PARAM_SPD_REF, "spd_ref"),
@@ -1380,37 +1139,11 @@ class DashboardController:
             self.wait_for_frame(matches, SCAN_PER_ID_TIMEOUT_S, start)
         if self.discovered_private:
             self.motor_id = self.discovered_private[0]
-            self.protocol = PROTOCOL_PRIVATE
             self.velocity_configured = False
             self.position_configured = False
             self.log(f"Private scan found {len(self.discovered_private)} motor(s); selected {fmt_id(self.motor_id)}")
         else:
             self.log("Private scan found no motors")
-
-    def scan_mit(self) -> None:
-        with self.lock:
-            self.discovered_mit = []
-        self.log(f"Scanning MIT IDs {fmt_id(SCAN_FIRST_MIT_ID)}..{fmt_id(SCAN_LAST_ID)}")
-        for target_id in range(SCAN_FIRST_MIT_ID, SCAN_LAST_ID + 1):
-            start = self.current_seq()
-            self.send(target_id, mit_fault_query_payload(False), extended=False)
-
-            def matches(frame: Any, wanted: int = target_id) -> bool:
-                return not frame.extended and len(frame.data) >= 8 and frame.data[0] == wanted
-
-            frame = self.wait_for_frame(matches, SCAN_PER_ID_TIMEOUT_S, start)
-            if frame is not None and target_id not in self.discovered_mit:
-                self.discovered_mit.append(target_id)
-                self.feedback_id = frame.arbitration_id
-                self.log(f"MIT scan hit motor={fmt_id(target_id)} feedback={fmt_id(frame.arbitration_id, 3)}")
-        if self.discovered_mit:
-            self.motor_id = self.discovered_mit[0]
-            self.protocol = PROTOCOL_MIT
-            self.velocity_configured = False
-            self.position_configured = False
-            self.log(f"MIT scan found {len(self.discovered_mit)} motor(s); selected {fmt_id(self.motor_id)}")
-        else:
-            self.log("MIT scan found no motors")
 
     def update_loop(self) -> None:
         while self.running:
@@ -1458,6 +1191,38 @@ class DashboardController:
                 f"dlc={len(frame.data)} data={bytes_hex(frame.data)}"
             )
 
+    def arm_solution_snapshot(self) -> Dict[str, Any]:
+        try:
+            solution = solve_three_axis_arm_ik(
+                self.arm_target["x"],
+                self.arm_target["y"],
+                self.arm_target["z"],
+                self.arm_link_1,
+                self.arm_link_2,
+                self.arm_elbow_up,
+            )
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "message": str(exc),
+                "jointAngles": dict(self.arm_joint_angles),
+                "motorTargets": dict(self.arm_motor_targets),
+            }
+        joint_angles = {
+            "base": solution.base,
+            "shoulder": solution.shoulder,
+            "elbow": solution.elbow,
+        }
+        return {
+            "ok": True,
+            "message": "",
+            "jointAngles": joint_angles,
+            "motorTargets": {
+                axis: self.arm_motor_target(axis, joint_angles[axis])
+                for axis in ARM_AXES
+            },
+        }
+
     def snapshot(self) -> Dict[str, Any]:
         with self.lock:
             feedback = dict(self.last_feedback) if self.last_feedback else None
@@ -1466,28 +1231,23 @@ class DashboardController:
             private_fault = dict(self.last_private_fault) if self.last_private_fault else None
             if private_fault and self.last_private_fault_at:
                 private_fault["ageMs"] = int((time.monotonic() - self.last_private_fault_at) * 1000)
-            interface = self.bus.interface
             transport = self.bus_transport()
             serial_port = getattr(self.bus, "serial_port", DEFAULT_SERIAL_PORT)
             serial_baud = getattr(self.bus, "serial_baud", DEFAULT_SERIAL_BAUD)
             bus_label = self.bus_label()
-            bus_stats = self.bus.stats() if hasattr(self.bus, "stats") else can_stats(interface)
+            bus_stats = self.bus.stats()
             snapshot = {
                 "appVersion": APP_VERSION,
                 "connected": self.connected,
                 "openError": self.open_error,
                 "transport": transport,
                 "transportLabel": bus_label,
-                "interface": interface,
                 "serialPort": serial_port,
                 "serialBaud": serial_baud,
-                "protocol": self.protocol,
                 "motorId": self.motor_id,
                 "motorIdHex": fmt_id(self.motor_id),
                 "hostId": self.host_id,
                 "hostIdHex": fmt_id(self.host_id),
-                "feedbackId": self.feedback_id,
-                "feedbackIdHex": fmt_id(self.feedback_id, 3),
                 "model": self.model,
                 "testSpeed": self.test_speed,
                 "commandedSpeed": self.commanded_speed,
@@ -1512,6 +1272,7 @@ class DashboardController:
                     "configured": self.arm_position_configured,
                     "jointAngles": dict(self.arm_joint_angles),
                     "motorTargets": dict(self.arm_motor_targets),
+                    "solution": self.arm_solution_snapshot(),
                 },
                 "activeReports": self.active_reports,
                 "oscillating": self.oscillating,
@@ -1521,7 +1282,6 @@ class DashboardController:
                 "lastPrivateFault": private_fault,
                 "lastRawFrame": self.last_raw_frame,
                 "discoveredPrivate": [fmt_id(item) for item in self.discovered_private],
-                "discoveredMit": [fmt_id(item) for item in self.discovered_mit],
                 "logs": list(self.logs),
                 "canStats": bus_stats,
             }
@@ -1636,30 +1396,26 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--transport", choices=TRANSPORT_CHOICES, default=TRANSPORT_ROBSTRIDE_SERIAL)
-    parser.add_argument("--interface", default=DEFAULT_INTERFACE)
+    parser.add_argument("--transport", default=TRANSPORT_ROBSTRIDE_USB, help=argparse.SUPPRESS)
+    parser.add_argument("--interface", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--feedback-id", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--protocol", default=PROTOCOL_PRIVATE, help=argparse.SUPPRESS)
     parser.add_argument("--serial-port", default=DEFAULT_SERIAL_PORT)
     parser.add_argument("--serial-baud", type=int, default=DEFAULT_SERIAL_BAUD)
     parser.add_argument("--motor-id", default=hex(DEFAULT_MOTOR_ID))
     parser.add_argument("--host-id", default=hex(DEFAULT_HOST_ID))
-    parser.add_argument("--feedback-id", default=hex(DEFAULT_FEEDBACK_ID))
-    parser.add_argument("--protocol", choices=(PROTOCOL_PRIVATE, PROTOCOL_MIT), default=PROTOCOL_PRIVATE)
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--no-open", action="store_true", help="start dashboard without opening CAN")
+    parser.add_argument("--no-open", action="store_true", help="start dashboard without opening the USB adapter")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     controller = DashboardController(
-        transport=args.transport,
-        interface=args.interface,
         serial_port=args.serial_port,
         serial_baud=args.serial_baud,
         motor_id=parse_int(args.motor_id, DEFAULT_MOTOR_ID),
         host_id=parse_int(args.host_id, DEFAULT_HOST_ID),
-        feedback_id=parse_int(args.feedback_id, DEFAULT_FEEDBACK_ID),
-        protocol=args.protocol,
         model=args.model,
         open_can=not args.no_open,
     )

@@ -19,17 +19,6 @@
       <section class="control-band">
         <div class="field-grid">
           <label>
-            <span>Transport</span>
-            <select id="transportInput">
-              <option value="robstride-serial">RobStride USB</option>
-              <option value="socketcan">SocketCAN</option>
-            </select>
-          </label>
-          <label>
-            <span>Interface</span>
-            <input id="interfaceInput" value="can0" autocomplete="off">
-          </label>
-          <label>
             <span>Serial Port</span>
             <input id="serialPortInput" value="auto" autocomplete="off">
           </label>
@@ -46,10 +35,6 @@
             <input id="hostIdInput" value="0xFD" autocomplete="off">
           </label>
           <label>
-            <span>Feedback ID</span>
-            <input id="feedbackIdInput" value="0xFD" autocomplete="off">
-          </label>
-          <label>
             <span>Model</span>
             <select id="modelInput">
               <option value="rs-05">RS-05</option>
@@ -64,16 +49,9 @@
           </label>
         </div>
 
-        <div class="segmented" role="group" aria-label="Protocol">
-          <button id="privateProtocolBtn" data-protocol="private">Private</button>
-          <button id="mitProtocolBtn" data-protocol="mit">MIT Std</button>
-        </div>
-
         <div class="button-row">
           <button data-command="reopen">Reconnect</button>
-          <button data-command="scan">Scan Both</button>
-          <button data-command="scan-private">Scan Private</button>
-          <button data-command="scan-mit">Scan MIT</button>
+          <button data-command="scan">Scan Private</button>
         </div>
       </section>
 
@@ -143,113 +121,127 @@
             <span id="armConfiguredState">Idle</span>
           </div>
 
-          <h3>Motors</h3>
-          <div class="arm-grid">
-            <label>
-              <span>Base ID</span>
-              <input id="armBaseMotorIdInput" value="0x7F" autocomplete="off">
-            </label>
-            <label>
-              <span>Shoulder ID</span>
-              <input id="armShoulderMotorIdInput" value="0x01" autocomplete="off">
-            </label>
-            <label>
-              <span>Elbow ID</span>
-              <input id="armElbowMotorIdInput" value="0x02" autocomplete="off">
-            </label>
-          </div>
+          <div class="arm-layout">
+            <div class="arm-editor">
+              <h3>Motors</h3>
+              <div class="arm-grid">
+                <label>
+                  <span>Base ID</span>
+                  <input id="armBaseMotorIdInput" value="0x7F" autocomplete="off">
+                </label>
+                <label>
+                  <span>Shoulder ID</span>
+                  <input id="armShoulderMotorIdInput" value="0x01" autocomplete="off">
+                </label>
+                <label>
+                  <span>Elbow ID</span>
+                  <input id="armElbowMotorIdInput" value="0x02" autocomplete="off">
+                </label>
+              </div>
 
-          <h3>Geometry</h3>
-          <div class="arm-grid">
-            <label>
-              <span>Link 1</span>
-              <input id="armLink1Input" type="number" min="0.001" max="10" step="0.01" value="0.25" inputmode="decimal">
-            </label>
-            <label>
-              <span>Link 2</span>
-              <input id="armLink2Input" type="number" min="0.001" max="10" step="0.01" value="0.25" inputmode="decimal">
-            </label>
-            <label class="switch">
-              <input id="armElbowUpToggle" type="checkbox">
-              <span>Elbow Up</span>
-            </label>
-          </div>
+              <h3>Geometry</h3>
+              <div class="arm-grid">
+                <label>
+                  <span>Link 1</span>
+                  <input id="armLink1Input" type="number" min="0.001" max="10" step="0.01" value="0.25" inputmode="decimal">
+                </label>
+                <label>
+                  <span>Link 2</span>
+                  <input id="armLink2Input" type="number" min="0.001" max="10" step="0.01" value="0.25" inputmode="decimal">
+                </label>
+                <label class="switch">
+                  <input id="armElbowUpToggle" type="checkbox">
+                  <span>Elbow Up</span>
+                </label>
+              </div>
 
-          <h3>Target</h3>
-          <div class="arm-grid">
-            <label>
-              <span>X</span>
-              <input id="armTargetXInput" type="number" step="0.01" value="0.25" inputmode="decimal">
-            </label>
-            <label>
-              <span>Y</span>
-              <input id="armTargetYInput" type="number" step="0.01" value="0.00" inputmode="decimal">
-            </label>
-            <label>
-              <span>Z</span>
-              <input id="armTargetZInput" type="number" step="0.01" value="0.10" inputmode="decimal">
-            </label>
-          </div>
+              <h3>Target</h3>
+              <div class="arm-grid">
+                <label>
+                  <span>X</span>
+                  <input id="armTargetXInput" type="number" step="0.01" value="0.25" inputmode="decimal">
+                </label>
+                <label>
+                  <span>Y</span>
+                  <input id="armTargetYInput" type="number" step="0.01" value="0.00" inputmode="decimal">
+                </label>
+                <label>
+                  <span>Z</span>
+                  <input id="armTargetZInput" type="number" step="0.01" value="0.10" inputmode="decimal">
+                </label>
+              </div>
 
-          <h3>Motion</h3>
-          <div class="arm-grid">
-            <label>
-              <span>Velocity Limit</span>
-              <input id="armVelocityInput" type="number" min="0.05" max="20" step="0.05" value="1.00" inputmode="decimal">
-            </label>
-            <label>
-              <span>Acceleration</span>
-              <input id="armAccelerationInput" type="number" min="0.1" max="200" step="0.5" value="10.0" inputmode="decimal">
-            </label>
-            <label>
-              <span>Position Kp</span>
-              <input id="armKpInput" type="number" min="0" max="200" step="0.5" value="5.0" inputmode="decimal">
-            </label>
-          </div>
+              <h3>Motion</h3>
+              <div class="arm-grid">
+                <label>
+                  <span>Velocity Limit</span>
+                  <input id="armVelocityInput" type="number" min="0.05" max="20" step="0.05" value="1.00" inputmode="decimal">
+                </label>
+                <label>
+                  <span>Acceleration</span>
+                  <input id="armAccelerationInput" type="number" min="0.1" max="200" step="0.5" value="10.0" inputmode="decimal">
+                </label>
+                <label>
+                  <span>Position Kp</span>
+                  <input id="armKpInput" type="number" min="0" max="200" step="0.5" value="5.0" inputmode="decimal">
+                </label>
+              </div>
 
-          <h3>Calibration</h3>
-          <div class="arm-grid arm-grid-wide">
-            <label>
-              <span>Base Offset</span>
-              <input id="armBaseOffsetInput" type="number" step="0.01" value="0.00" inputmode="decimal">
-            </label>
-            <label>
-              <span>Base Dir</span>
-              <select id="armBaseDirectionInput">
-                <option value="1">+1</option>
-                <option value="-1">-1</option>
-              </select>
-            </label>
-            <label>
-              <span>Shoulder Offset</span>
-              <input id="armShoulderOffsetInput" type="number" step="0.01" value="0.00" inputmode="decimal">
-            </label>
-            <label>
-              <span>Shoulder Dir</span>
-              <select id="armShoulderDirectionInput">
-                <option value="1">+1</option>
-                <option value="-1">-1</option>
-              </select>
-            </label>
-            <label>
-              <span>Elbow Offset</span>
-              <input id="armElbowOffsetInput" type="number" step="0.01" value="0.00" inputmode="decimal">
-            </label>
-            <label>
-              <span>Elbow Dir</span>
-              <select id="armElbowDirectionInput">
-                <option value="1">+1</option>
-                <option value="-1">-1</option>
-              </select>
-            </label>
-          </div>
+              <h3>Calibration</h3>
+              <div class="arm-grid arm-grid-wide">
+                <label>
+                  <span>Base Offset</span>
+                  <input id="armBaseOffsetInput" type="number" step="0.01" value="0.00" inputmode="decimal">
+                </label>
+                <label>
+                  <span>Base Dir</span>
+                  <select id="armBaseDirectionInput">
+                    <option value="1">+1</option>
+                    <option value="-1">-1</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Shoulder Offset</span>
+                  <input id="armShoulderOffsetInput" type="number" step="0.01" value="0.00" inputmode="decimal">
+                </label>
+                <label>
+                  <span>Shoulder Dir</span>
+                  <select id="armShoulderDirectionInput">
+                    <option value="1">+1</option>
+                    <option value="-1">-1</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Elbow Offset</span>
+                  <input id="armElbowOffsetInput" type="number" step="0.01" value="0.00" inputmode="decimal">
+                </label>
+                <label>
+                  <span>Elbow Dir</span>
+                  <select id="armElbowDirectionInput">
+                    <option value="1">+1</option>
+                    <option value="-1">-1</option>
+                  </select>
+                </label>
+              </div>
 
-          <div class="button-row arm-actions">
-            <button class="soft" data-command="arm-move">Move IK</button>
-            <button class="danger" data-command="arm-stop">Stop Arm</button>
-            <button class="danger" data-command="arm-clear-fault">Clear Arm Faults</button>
+              <div class="button-row arm-actions">
+                <button class="soft" data-command="arm-move">Move IK</button>
+                <button class="danger" data-command="arm-stop">Stop Arm</button>
+                <button class="danger" data-command="arm-clear-fault">Clear Arm Faults</button>
+              </div>
+              <pre id="armSolution">--</pre>
+            </div>
+
+            <div class="ik-stage">
+              <canvas id="armIkCanvas" width="780" height="560"></canvas>
+              <div class="ik-readout">
+                <span>Reach <strong id="ikReachValue">--</strong></span>
+                <span>Base <strong id="ikBaseValue">--</strong></span>
+                <span>Shoulder <strong id="ikShoulderValue">--</strong></span>
+                <span>Elbow <strong id="ikElbowValue">--</strong></span>
+              </div>
+            </div>
           </div>
-          <pre id="armSolution">--</pre>
         </div>
 
         <div class="panel telemetry-panel">
@@ -284,7 +276,7 @@
 
         <div class="panel bus-panel">
           <div class="panel-head">
-            <h2>CAN Bus</h2>
+            <h2>USB Adapter</h2>
             <span id="busyState">Idle</span>
           </div>
           <div class="bus-grid">
@@ -302,16 +294,7 @@
             <h2>Discovered</h2>
             <span id="selectedMotor">0x7F</span>
           </div>
-          <div class="list-pair">
-            <div>
-              <h3>Private</h3>
-              <div id="privateList" class="chip-list"></div>
-            </div>
-            <div>
-              <h3>MIT Std</h3>
-              <div id="mitList" class="chip-list"></div>
-            </div>
-          </div>
+          <div id="privateList" class="chip-list"></div>
         </div>
 
         <div class="panel repo-panel">
