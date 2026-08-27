@@ -112,6 +112,11 @@ helion-update
 `helion-update` pulls the current GitHub branch with `git pull --ff-only`,
 checks the Python files, and restarts the dashboard service.
 
+The web UI shows the dashboard version in the header. When changing dashboard or
+Raspberry Pi backend code, increment `APP_VERSION` in
+`raspi/robstride_dashboard.py` before committing so the Pi page makes it obvious
+which update is running.
+
 Use SSH for the initial install and for service-level changes such as port,
 Linux permissions, or systemd edits. After that, normal dashboard/backend/UI code
 updates can be applied from the web UI with **Update From GitHub**, as long as

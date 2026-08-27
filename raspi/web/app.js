@@ -181,6 +181,7 @@ function render(state) {
   status.textContent = state.connected ? "Online" : "Offline";
   status.className = `status-pill ${state.connected ? "online" : "offline"}`;
   $("subtitle").textContent = state.openError || state.transportLabel || `${state.interface} at 1 Mbps`;
+  $("appVersion").textContent = state.appVersion ? `v${state.appVersion}` : "v--";
   $("configuredState").textContent = state.positionConfigured
     ? "Position configured"
     : state.velocityConfigured

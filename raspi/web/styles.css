@@ -107,6 +107,14 @@ h3 {
   color: var(--muted);
 }
 
+#appVersion {
+  display: inline-block;
+  margin-left: 8px;
+  color: var(--accent-2);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
 .status-pill,
 .panel-head span,
 .flag-row span {

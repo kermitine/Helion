@@ -96,6 +96,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 REPO_DIR = ROOT_DIR.parent
 WEB_DIR = ROOT_DIR / "web"
 UPDATE_LOG_PATH = ROOT_DIR / "update.log"
+APP_VERSION = "2026.08.27.1"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1155,6 +1156,7 @@ class DashboardController:
             bus_label = self.bus_label()
             bus_stats = self.bus.stats() if hasattr(self.bus, "stats") else can_stats(interface)
             snapshot = {
+                "appVersion": APP_VERSION,
                 "connected": self.connected,
                 "openError": self.open_error,
                 "transport": transport,
