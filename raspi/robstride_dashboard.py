@@ -491,6 +491,30 @@ class DashboardController:
     def wait_private_status(self, timeout_s: float, after_seq: Optional[int] = None) -> Optional[Any]:
         return self.wait_private_status_for(self.motor_id, timeout_s, after_seq)
 
+    def private_status_position_rad(self, frame: Any) -> float:
+        if frame is None or not frame.extended or len(frame.data) < 2:
+            raise ValueError("status frame did not include a motor position")
+        p_max, _v_max, _t_max = PRIVATE_MODEL_LIMITS.get(
+            self.model,
+            PRIVATE_MODEL_LIMITS[DEFAULT_MODEL],
+        )
+        pos_raw = (frame.data[0] << 8) | frame.data[1]
+        return uint_to_float(pos_raw, -p_max, p_max, 16)
+
+    def read_disabled_position_for(self, target_id: int, timeout_s: float) -> Optional[Tuple[float, int]]:
+        original_host = self.host_id
+        for host in self.private_host_candidates():
+            with self.lock:
+                self.host_id = host
+            start_seq = self.current_seq()
+            self.send_private_disable_to(target_id, False)
+            frame = self.wait_private_status_for(target_id, timeout_s, start_seq)
+            if frame is not None:
+                return self.private_status_position_rad(frame), host
+        with self.lock:
+            self.host_id = original_host
+        return None
+
     def wait_private_param_from(self, target_id: int, index: int, timeout_s: float) -> Optional[bytes]:
         start_seq = self.current_seq()
         self.read_private_param_from(target_id, index)
@@ -582,6 +606,8 @@ class DashboardController:
             return {"ok": self.move_position(position, velocity_limit, acceleration, position_kp)}
         if command == "arm-move":
             return {"ok": self.move_arm_ik(payload)}
+        if command == "arm-home-zero":
+            return self.home_arm_zero(payload)
         if command == "arm-stop":
             self.stop_arm()
             return {"ok": True}
@@ -1074,6 +1100,50 @@ class DashboardController:
 
     def arm_motor_target(self, axis: str, joint_angle: float) -> float:
         return self.arm_offsets[axis] + (self.arm_directions[axis] * joint_angle)
+
+    def home_arm_zero(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        self.apply_arm_payload(payload)
+        with self.lock:
+            self.oscillating = False
+            self.jog_active = False
+            self.velocity_configured = False
+            self.position_configured = False
+            self.arm_position_configured = False
+            self.commanded_speed = 0.0
+
+        offsets: Dict[str, float] = {}
+        hosts: Dict[str, int] = {}
+        for axis in ARM_AXES:
+            motor_id = self.arm_motor_ids[axis]
+            result = self.read_disabled_position_for(motor_id, COMMAND_TIMEOUT_S)
+            if result is None:
+                message = f"{axis} {fmt_id(motor_id)} position timeout during home zero"
+                self.log(message)
+                return {"ok": False, "message": message}
+            position, host = result
+            offsets[axis] = position
+            hosts[axis] = host
+            self.log(f"{axis} {fmt_id(motor_id)} home position={position:+.4f} rad host={fmt_id(host)}")
+
+        with self.lock:
+            self.arm_offsets = offsets
+            self.arm_target = {
+                "x": self.arm_link_1 + self.arm_link_2,
+                "y": 0.0,
+                "z": 0.0,
+            }
+            self.arm_joint_angles = {axis: 0.0 for axis in ARM_AXES}
+            self.arm_motor_targets = dict(offsets)
+
+        self.save_values()
+        self.log(f"Arm home zero saved to {VALUES_PATH}")
+        return {
+            "ok": True,
+            "message": "Arm home zero saved",
+            "offsets": dict(offsets),
+            "hosts": {axis: fmt_id(hosts[axis]) for axis in ARM_AXES},
+            "path": str(VALUES_PATH),
+        }
 
     def move_arm_ik(self, payload: Dict[str, Any]) -> bool:
         self.apply_arm_payload(payload)

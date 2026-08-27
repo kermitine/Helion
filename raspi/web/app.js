@@ -82,7 +82,7 @@ function clearDirty(ids) {
 function clearCommandDirty(command, result) {
   if (result && result.ok === false) return;
   if (command === "move-position") clearDirty(positionControlIds);
-  if (command === "arm-move") clearDirty(armControlIds);
+  if (command === "arm-move" || command === "arm-home-zero") clearDirty(armControlIds);
   if (command === "set-speed") clearDirty(speedControlIds);
 }
 
@@ -100,7 +100,7 @@ function commandPayload(command) {
       positionKp: numberInput("positionKpInput"),
     };
   }
-  if (command === "arm-move") {
+  if (command === "arm-move" || command === "arm-home-zero") {
     return {
       armBaseMotorId: $("armBaseMotorIdInput").value.trim(),
       armShoulderMotorId: $("armShoulderMotorIdInput").value.trim(),
@@ -357,6 +357,12 @@ async function applyConfig() {
 
 async function sendCommand(command, extra = {}) {
   if (busy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault"].includes(command)) return;
+  if (
+    command === "arm-home-zero" &&
+    !confirm("Place the arm at its home zero pose. This will disable the arm motors, read their current positions, and save those readings as IK offsets.")
+  ) {
+    return;
+  }
   busy = true;
   renderBusy(true);
   try {
@@ -368,6 +374,9 @@ async function sendCommand(command, extra = {}) {
       appendLocalLog(result.message);
     }
     clearCommandDirty(command, result);
+    if (command === "arm-home-zero" && result && result.ok !== false) {
+      setValuesState("Saved", result.path || "");
+    }
     await refresh();
   } catch (error) {
     appendLocalLog(`UI error: ${error.message}`);

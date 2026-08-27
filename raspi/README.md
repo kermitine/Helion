@@ -139,10 +139,17 @@ elbow-up setting, joint offsets, and motor directions that will be sent by
 **Move IK**.
 
 The setup wizard can split total reach into link lengths, nudge or preset the
-target point, flip joint directions, and set offsets from the currently solved
-pose with **Zero Here**. The **Files** step can save the current dashboard values
-on the Pi, download them as JSON, or upload a JSON values file. Saved values are
-loaded on dashboard startup from:
+target point, flip joint directions, set offsets from the currently solved pose
+with **Zero Here**, and home the arm with **Home Zero**.
+
+For homing, manually move the arm to its mechanical/kinematic zero pose, then
+press **Home Zero**. The dashboard disables the arm motors, reads each motor's
+current private-protocol position, stores those positions as the IK offsets, and
+saves them for the next dashboard start.
+
+The **Files** step can save the current dashboard values on the Pi, download
+them as JSON, or upload a JSON values file. Saved values are loaded on dashboard
+startup from:
 
 ```text
 ~/.config/helion/dashboard-values.json
