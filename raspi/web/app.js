@@ -17,6 +17,13 @@ function fixed(value, digits, suffix) {
   return `${value.toFixed(digits)} ${suffix}`;
 }
 
+function setControlValue(id, value) {
+  const el = $(id);
+  if (document.activeElement !== el) {
+    el.value = value;
+  }
+}
+
 async function post(path, payload) {
   const response = await fetch(path, {
     method: "POST",
@@ -31,7 +38,10 @@ async function applyConfig() {
   selectedProtocol =
     $("mitProtocolBtn").classList.contains("active") ? "mit" : "private";
   await post("/api/config", {
+    transport: $("transportInput").value,
     interface: $("interfaceInput").value.trim(),
+    serialPort: $("serialPortInput").value.trim(),
+    serialBaud: $("serialBaudInput").value.trim(),
     motorId: $("motorIdInput").value.trim(),
     hostId: $("hostIdInput").value.trim(),
     feedbackId: $("feedbackIdInput").value.trim(),
@@ -103,17 +113,20 @@ function renderProtocol(protocol) {
 }
 
 function render(state) {
-  $("interfaceInput").value = state.interface;
-  $("motorIdInput").value = state.motorIdHex;
-  $("hostIdInput").value = state.hostIdHex;
-  $("feedbackIdInput").value = state.feedbackIdHex;
-  $("modelInput").value = state.model;
+  setControlValue("transportInput", state.transport || "robstride-serial");
+  setControlValue("interfaceInput", state.interface);
+  setControlValue("serialPortInput", state.serialPort || "/dev/ttyUSB0");
+  setControlValue("serialBaudInput", state.serialBaud || 921600);
+  setControlValue("motorIdInput", state.motorIdHex);
+  setControlValue("hostIdInput", state.hostIdHex);
+  setControlValue("feedbackIdInput", state.feedbackIdHex);
+  setControlValue("modelInput", state.model);
   renderProtocol(state.protocol);
 
   const status = $("connectionStatus");
   status.textContent = state.connected ? "Online" : "Offline";
   status.className = `status-pill ${state.connected ? "online" : "offline"}`;
-  $("subtitle").textContent = state.openError || `${state.interface} at 1 Mbps`;
+  $("subtitle").textContent = state.openError || state.transportLabel || `${state.interface} at 1 Mbps`;
   $("configuredState").textContent = state.velocityConfigured
     ? "Velocity configured"
     : "Not configured";

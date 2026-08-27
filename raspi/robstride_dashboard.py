@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local RobStride dashboard for Raspberry Pi + SocketCAN."""
+"""Local RobStride dashboard for Raspberry Pi CAN adapters."""
 
 from __future__ import annotations
 
@@ -26,6 +26,8 @@ from robstride_socketcan import (
     DEFAULT_INTERFACE,
     DEFAULT_MODEL,
     DEFAULT_MOTOR_ID,
+    DEFAULT_SERIAL_BAUD,
+    DEFAULT_SERIAL_PORT,
     DEFAULT_SPEED_RAD_S,
     MIT_TYPED_ID_VELOCITY,
     PARAM_ACC_RAD,
@@ -41,9 +43,12 @@ from robstride_socketcan import (
     SCAN_FIRST_PRIVATE_ID,
     SCAN_LAST_ID,
     SCAN_PER_ID_TIMEOUT_S,
-    SocketCanBus,
+    TRANSPORT_CHOICES,
+    TRANSPORT_ROBSTRIDE_SERIAL,
+    TRANSPORT_SOCKETCAN,
     build_private_ext_id,
     bytes_hex,
+    create_bus,
     decode_mit_feedback,
     f32_le,
     fmt_id,
@@ -129,7 +134,10 @@ class contextlib_read:
 class DashboardController:
     def __init__(
         self,
+        transport: str,
         interface: str,
+        serial_port: str,
+        serial_baud: int,
         motor_id: int,
         host_id: int,
         feedback_id: int,
@@ -140,7 +148,12 @@ class DashboardController:
         self.lock = threading.RLock()
         self.frame_cv = threading.Condition(self.lock)
         self.command_lock = threading.Lock()
-        self.bus = SocketCanBus(interface)
+        self.bus = create_bus(
+            transport=transport,
+            interface=interface,
+            serial_port=serial_port,
+            serial_baud=serial_baud,
+        )
         self.connected = False
         self.open_error = ""
         self.running = True
@@ -293,33 +306,56 @@ class DashboardController:
                 self.update_last_exit = exit_code
         self.log(f"GitHub update exited with code {exit_code}")
 
+    def bus_label(self) -> str:
+        if hasattr(self.bus, "label"):
+            return self.bus.label()
+        return self.bus.interface
+
+    def bus_transport(self) -> str:
+        return getattr(self.bus, "transport", TRANSPORT_SOCKETCAN)
+
     def open_bus(self) -> bool:
         with self.lock:
-            interface = self.bus.interface
+            label = self.bus_label()
         try:
-            self.bus.open()
-        except RuntimeError as exc:
+            with self.bus_lock:
+                self.bus.open()
+        except (RuntimeError, OSError) as exc:
             with self.lock:
                 self.connected = False
                 self.open_error = str(exc)
-            self.log(f"CAN open failed on {interface}: {exc}")
+            self.log(f"CAN open failed on {label}: {exc}")
             return False
         with self.lock:
             self.connected = True
             self.open_error = ""
-        self.log(f"Opened {interface}")
+        self.log(f"Opened {label}")
         return True
 
-    def reopen_bus(self, interface: Optional[str] = None) -> bool:
+    def reopen_bus(
+        self,
+        interface: Optional[str] = None,
+        transport: Optional[str] = None,
+        serial_port: Optional[str] = None,
+        serial_baud: Optional[int] = None,
+    ) -> bool:
         with self.lock:
             self.oscillating = False
             self.jog_active = False
             self.velocity_configured = False
-            if interface:
-                self.bus.interface = interface
+            next_transport = transport or self.bus_transport()
+            next_interface = interface or self.bus.interface
+            next_serial_port = serial_port or getattr(self.bus, "serial_port", DEFAULT_SERIAL_PORT)
+            next_serial_baud = serial_baud or getattr(self.bus, "serial_baud", DEFAULT_SERIAL_BAUD)
             self.connected = False
         with self.bus_lock:
             self.bus.close()
+            self.bus = create_bus(
+                transport=next_transport,
+                interface=next_interface,
+                serial_port=next_serial_port,
+                serial_baud=next_serial_baud,
+            )
             time.sleep(0.05)
         return self.open_bus()
 
@@ -331,7 +367,7 @@ class DashboardController:
     def send(self, arbitration_id: int, data: bytes, extended: bool) -> None:
         with self.bus_lock:
             if not self.connected:
-                raise RuntimeError("CAN socket is not open")
+                raise RuntimeError("CAN transport is not open")
             self.bus.send(arbitration_id, data, extended=extended)
 
     def send_private(self, comm_type: int, extra_data: int, target_id: int, data: bytes) -> None:
@@ -620,8 +656,16 @@ class DashboardController:
     def configure(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self.command_lock:
             with self.lock:
+                old_transport = self.bus_transport()
                 old_interface = self.bus.interface
-                self.bus.interface = str(payload.get("interface") or self.bus.interface)
+                old_serial_port = getattr(self.bus, "serial_port", DEFAULT_SERIAL_PORT)
+                old_serial_baud = getattr(self.bus, "serial_baud", DEFAULT_SERIAL_BAUD)
+                new_transport = str(payload.get("transport") or old_transport)
+                if new_transport not in TRANSPORT_CHOICES:
+                    new_transport = old_transport
+                new_interface = str(payload.get("interface") or old_interface)
+                new_serial_port = str(payload.get("serialPort") or old_serial_port)
+                new_serial_baud = parse_int(payload.get("serialBaud"), old_serial_baud)
                 self.protocol = str(payload.get("protocol") or self.protocol)
                 self.motor_id = parse_int(payload.get("motorId"), self.motor_id) & 0xFF
                 self.host_id = parse_int(payload.get("hostId"), self.host_id) & 0xFF
@@ -630,10 +674,22 @@ class DashboardController:
                 self.velocity_configured = False
                 self.oscillating = False
                 self.jog_active = False
-            if self.bus.interface != old_interface:
-                self.reopen_bus(self.bus.interface)
+                bus_changed = (
+                    new_transport != old_transport
+                    or new_interface != old_interface
+                    or new_serial_port != old_serial_port
+                    or new_serial_baud != old_serial_baud
+                )
+            if bus_changed:
+                self.reopen_bus(
+                    interface=new_interface,
+                    transport=new_transport,
+                    serial_port=new_serial_port,
+                    serial_baud=new_serial_baud,
+                )
             self.log(
-                f"Config interface={self.bus.interface} protocol={self.protocol} "
+                f"Config transport={self.bus_transport()} bus={self.bus_label()} "
+                f"interface={self.bus.interface} protocol={self.protocol} "
                 f"motor={fmt_id(self.motor_id)} host={fmt_id(self.host_id)} feedback={fmt_id(self.feedback_id, 3)}"
             )
         return {"ok": True}
@@ -887,10 +943,19 @@ class DashboardController:
             if feedback and self.last_feedback_at:
                 feedback["ageMs"] = int((time.monotonic() - self.last_feedback_at) * 1000)
             interface = self.bus.interface
+            transport = self.bus_transport()
+            serial_port = getattr(self.bus, "serial_port", DEFAULT_SERIAL_PORT)
+            serial_baud = getattr(self.bus, "serial_baud", DEFAULT_SERIAL_BAUD)
+            bus_label = self.bus_label()
+            bus_stats = self.bus.stats() if hasattr(self.bus, "stats") else can_stats(interface)
             snapshot = {
                 "connected": self.connected,
                 "openError": self.open_error,
+                "transport": transport,
+                "transportLabel": bus_label,
                 "interface": interface,
+                "serialPort": serial_port,
+                "serialBaud": serial_baud,
                 "protocol": self.protocol,
                 "motorId": self.motor_id,
                 "motorIdHex": fmt_id(self.motor_id),
@@ -911,7 +976,7 @@ class DashboardController:
                 "discoveredPrivate": [fmt_id(item) for item in self.discovered_private],
                 "discoveredMit": [fmt_id(item) for item in self.discovered_mit],
                 "logs": list(self.logs),
-                "canStats": can_stats(interface),
+                "canStats": bus_stats,
             }
         snapshot["repo"] = self.repo_info()
         return snapshot
@@ -1024,7 +1089,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--transport", choices=TRANSPORT_CHOICES, default=TRANSPORT_ROBSTRIDE_SERIAL)
     parser.add_argument("--interface", default=DEFAULT_INTERFACE)
+    parser.add_argument("--serial-port", default=DEFAULT_SERIAL_PORT)
+    parser.add_argument("--serial-baud", type=int, default=DEFAULT_SERIAL_BAUD)
     parser.add_argument("--motor-id", default=hex(DEFAULT_MOTOR_ID))
     parser.add_argument("--host-id", default=hex(DEFAULT_HOST_ID))
     parser.add_argument("--feedback-id", default=hex(DEFAULT_FEEDBACK_ID))
@@ -1037,7 +1105,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     controller = DashboardController(
+        transport=args.transport,
         interface=args.interface,
+        serial_port=args.serial_port,
+        serial_baud=args.serial_baud,
         motor_id=parse_int(args.motor_id, DEFAULT_MOTOR_ID),
         host_id=parse_int(args.host_id, DEFAULT_HOST_ID),
         feedback_id=parse_int(args.feedback_id, DEFAULT_FEEDBACK_ID),

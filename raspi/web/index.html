@@ -11,7 +11,7 @@
       <header class="topbar">
         <div>
           <h1>RobStride Dashboard</h1>
-          <p id="subtitle">SocketCAN control surface</p>
+          <p id="subtitle">RobStride USB-CAN control surface</p>
         </div>
         <div class="status-pill" id="connectionStatus">Offline</div>
       </header>
@@ -19,8 +19,23 @@
       <section class="control-band">
         <div class="field-grid">
           <label>
+            <span>Transport</span>
+            <select id="transportInput">
+              <option value="robstride-serial">RobStride USB</option>
+              <option value="socketcan">SocketCAN</option>
+            </select>
+          </label>
+          <label>
             <span>Interface</span>
             <input id="interfaceInput" value="can0" autocomplete="off">
+          </label>
+          <label>
+            <span>Serial Port</span>
+            <input id="serialPortInput" value="/dev/ttyUSB0" autocomplete="off">
+          </label>
+          <label>
+            <span>Serial Baud</span>
+            <input id="serialBaudInput" value="921600" inputmode="numeric" autocomplete="off">
           </label>
           <label>
             <span>Motor ID</span>

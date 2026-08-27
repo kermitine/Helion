@@ -1,14 +1,43 @@
 # RobStride On Raspberry Pi
 
-This folder contains the Raspberry Pi SocketCAN command-line tool and
-Pi-local web dashboard:
+This folder contains the Raspberry Pi command-line tool and Pi-local web
+dashboard:
 
 ```bash
-python3 raspi/robstride_socketcan.py --interface can0
-python3 raspi/robstride_dashboard.py --interface can0 --host 0.0.0.0 --port 8080
+python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port /dev/ttyUSB0
+python3 raspi/robstride_dashboard.py --transport robstride-serial --serial-port /dev/ttyUSB0 --host 0.0.0.0 --port 8080
 ```
 
-It has no Python package dependencies. It uses Linux raw SocketCAN directly.
+It has no Python package dependencies. It can either talk directly to the
+official RobStride USB-CAN serial adapter or use Linux raw SocketCAN for native
+CAN interfaces.
+
+## Official RobStride USB-CAN Adapter
+
+If the adapter appears as a CH340 serial device (`/dev/ttyUSB0`), use the direct
+RobStride serial transport. Do not run `slcand` for this adapter.
+
+```bash
+sudo pkill -f slcand || true
+python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port /dev/ttyUSB0 --command scan
+```
+
+The dashboard installer now defaults to this direct serial path:
+
+```bash
+bash raspi/install_dashboard.sh
+```
+
+To be explicit:
+
+```bash
+HELION_TRANSPORT=robstride-serial SERIAL_PORT=/dev/ttyUSB0 SERIAL_BAUD=921600 bash raspi/install_dashboard.sh
+```
+
+The installer adds the dashboard service user to the `dialout` group so it can
+open `/dev/ttyUSB0`.
+
+## SocketCAN Adapters
 
 Bring up a SocketCAN-compatible adapter at 1 Mbps first:
 
@@ -16,11 +45,18 @@ Bring up a SocketCAN-compatible adapter at 1 Mbps first:
 sudo bash raspi/can_up.sh can0
 ```
 
-If the official RobStride adapter appears as a CH340 serial device
-(`/dev/ttyUSB0`) instead of a native `can0` adapter, run it through SLCAN:
+Then run the tools with `--transport socketcan`:
+
+```bash
+python3 raspi/robstride_socketcan.py --transport socketcan --interface can0 --command scan
+```
+
+Some third-party adapters use SLCAN. For those, and only those, you can still
+create `can0` with:
 
 ```bash
 sudo HELION_CAN_BACKEND=slcan SLCAN_PORT=/dev/ttyUSB0 bash raspi/can_up.sh can0
+python3 raspi/robstride_socketcan.py --transport socketcan --interface can0 --command scan
 ```
 
 `ip -details link show can0` may show `bitrate 0` for SLCAN adapters. That is
@@ -41,7 +77,13 @@ bash raspi/install_dashboard.sh
 For the official RobStride CH340 serial adapter, install the services with:
 
 ```bash
-HELION_CAN_BACKEND=slcan SLCAN_PORT=/dev/ttyUSB0 bash raspi/install_dashboard.sh
+HELION_TRANSPORT=robstride-serial SERIAL_PORT=/dev/ttyUSB0 bash raspi/install_dashboard.sh
+```
+
+For a native SocketCAN adapter instead:
+
+```bash
+HELION_TRANSPORT=socketcan CAN_INTERFACE=can0 bash raspi/install_dashboard.sh
 ```
 
 Open the dashboard from another machine on the same network:
@@ -55,7 +97,7 @@ The install creates these commands:
 ```bash
 helion-can-up can0
 helion-can-down can0
-helion-dashboard --interface can0 --host 0.0.0.0 --port 8080
+helion-dashboard --transport robstride-serial --serial-port /dev/ttyUSB0 --host 0.0.0.0 --port 8080
 helion-update
 ```
 
@@ -96,29 +138,29 @@ Useful service checks:
 ```bash
 systemctl status robstride-dashboard.service
 journalctl -u robstride-dashboard.service -f
-ip -details -statistics link show can0
+ls -l /dev/ttyUSB0
 ```
 
 Useful first tests:
 
 ```bash
 python3 raspi/robstride_socketcan.py --self-test
-python3 raspi/robstride_socketcan.py --interface can0 --command scan
-python3 raspi/robstride_socketcan.py --interface can0 --command configure
-python3 raspi/robstride_socketcan.py --interface can0 --command jog-right
+python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port /dev/ttyUSB0 --command scan
+python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port /dev/ttyUSB0 --command configure
+python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port /dev/ttyUSB0 --command jog-right
 ```
 
 The default protocol is RobStride private extended-ID mode with motor `0x7F`
 and host `0xFD`. To try the MotorBridge MIT-standard path instead:
 
 ```bash
-python3 raspi/robstride_socketcan.py --interface can0 --protocol mit
+python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port /dev/ttyUSB0 --protocol mit
 ```
 
 For a one-shot MIT-standard jog:
 
 ```bash
-python3 raspi/robstride_socketcan.py --interface can0 --protocol mit --command jog-right
+python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port /dev/ttyUSB0 --protocol mit --command jog-right
 ```
 
 Interactive commands: `p`, `v`, `f`, `b`, `<`, `>`, `g`, `0`, `s`, `+`, `-`,

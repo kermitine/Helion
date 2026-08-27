@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""RobStride bench-control tool for Raspberry Pi + SocketCAN.
+"""RobStride bench-control tool for Raspberry Pi CAN adapters.
 
-This is the Raspberry Pi rewrite of the ESP32 serial test sketch. It talks to a
-Linux SocketCAN interface such as can0, so it works with USB-CAN adapters that
-show up as a kernel CAN network device.
+This is the Raspberry Pi rewrite of the ESP32 serial test sketch. It supports a
+Linux SocketCAN interface such as can0 and the official RobStride USB-CAN serial
+adapter that appears as a CH340 tty device.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import struct
 import sys
 import time
 from dataclasses import dataclass
-from typing import Callable, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Iterable, List, Optional, Tuple
 
 
 CAN_EFF_FLAG = 0x80000000
@@ -29,6 +29,14 @@ CAN_FRAME = struct.Struct("=IB3x8s")
 
 
 DEFAULT_INTERFACE = "can0"
+TRANSPORT_SOCKETCAN = "socketcan"
+TRANSPORT_ROBSTRIDE_SERIAL = "robstride-serial"
+TRANSPORT_CHOICES = (TRANSPORT_SOCKETCAN, TRANSPORT_ROBSTRIDE_SERIAL)
+DEFAULT_SERIAL_PORT = "/dev/ttyUSB0"
+DEFAULT_SERIAL_BAUD = 921600
+ROBSTRIDE_SERIAL_HEADER = b"AT"
+ROBSTRIDE_SERIAL_TRAILER = b"\r\n"
+ROBSTRIDE_SERIAL_EXTENDED_FLAG = 0x04
 DEFAULT_MOTOR_ID = 0x7F
 DEFAULT_HOST_ID = 0xFD
 DEFAULT_FEEDBACK_ID = 0xFD
@@ -158,6 +166,64 @@ def split_private_ext_id(arbitration_id: int) -> Tuple[int, int, int]:
     )
 
 
+def robstride_serial_pack_id(arbitration_id: int, extended: bool) -> int:
+    mask = CAN_EFF_MASK if extended else CAN_SFF_MASK
+    packed = (arbitration_id & mask) << 3
+    if extended:
+        packed |= ROBSTRIDE_SERIAL_EXTENDED_FLAG
+    return packed & 0xFFFFFFFF
+
+
+def robstride_serial_encode_frame(arbitration_id: int, data: bytes, extended: bool) -> bytes:
+    payload = bytes(data[:8]).ljust(8, b"\x00")
+    packed_id = robstride_serial_pack_id(arbitration_id, extended)
+    return (
+        ROBSTRIDE_SERIAL_HEADER
+        + packed_id.to_bytes(4, "big")
+        + bytes([len(payload)])
+        + payload
+        + ROBSTRIDE_SERIAL_TRAILER
+    )
+
+
+def robstride_serial_try_parse(buffer: bytearray) -> Optional[CanFrame]:
+    while buffer:
+        start = buffer.find(ROBSTRIDE_SERIAL_HEADER)
+        if start < 0:
+            keep_last_a = len(buffer) > 0 and buffer[-1:] == ROBSTRIDE_SERIAL_HEADER[:1]
+            if keep_last_a:
+                del buffer[:-1]
+            else:
+                del buffer[:]
+            return None
+        if start:
+            del buffer[:start]
+        if len(buffer) < 7:
+            return None
+
+        dlc = buffer[6]
+        if dlc > 8:
+            del buffer[0]
+            continue
+
+        frame_len = 2 + 4 + 1 + dlc + 2
+        if len(buffer) < frame_len:
+            return None
+        if buffer[frame_len - 2 : frame_len] != ROBSTRIDE_SERIAL_TRAILER:
+            del buffer[0]
+            continue
+
+        packed_id = int.from_bytes(buffer[2:6], "big")
+        extended = (packed_id & ROBSTRIDE_SERIAL_EXTENDED_FLAG) != 0
+        mask = CAN_EFF_MASK if extended else CAN_SFF_MASK
+        arbitration_id = (packed_id >> 3) & mask
+        data = bytes(buffer[7 : 7 + dlc])
+        del buffer[:frame_len]
+        return CanFrame(arbitration_id, data, extended)
+
+    return None
+
+
 def mit_typed_id(mode_type: int, motor_id: int) -> int:
     return ((mode_type & 0x07) << 8) | (motor_id & 0xFF)
 
@@ -207,6 +273,9 @@ def decode_mit_feedback(frame: CanFrame) -> Optional[MitFeedback]:
 class SocketCanBus:
     def __init__(self, interface: str):
         self.interface = interface
+        self.transport = TRANSPORT_SOCKETCAN
+        self.serial_port = DEFAULT_SERIAL_PORT
+        self.serial_baud = DEFAULT_SERIAL_BAUD
         self.sock: Optional[socket.socket] = None
 
     def open(self) -> None:
@@ -231,6 +300,23 @@ class SocketCanBus:
         self.close()
         time.sleep(0.05)
         self.open()
+
+    def label(self) -> str:
+        return f"{self.interface} at 1 Mbps"
+
+    def stats(self) -> dict[str, str]:
+        base = f"/sys/class/net/{self.interface}"
+        stats_dir = os.path.join(base, "statistics")
+        out: dict[str, str] = {}
+        for name in ("operstate", "carrier"):
+            raw = read_text_file(os.path.join(base, name))
+            if raw:
+                out[name] = raw
+        for name in ("rx_packets", "tx_packets", "rx_errors", "tx_errors", "rx_dropped", "tx_dropped"):
+            raw = read_text_file(os.path.join(stats_dir, name))
+            if raw:
+                out[name] = raw
+        return out
 
     def send(self, arbitration_id: int, data: bytes, extended: bool = False) -> None:
         if self.sock is None:
@@ -257,10 +343,198 @@ class SocketCanBus:
         return CanFrame(can_id & mask, data[: min(dlc, 8)], extended)
 
 
+class RobStrideSerialBus:
+    """Official RobStride USB-CAN adapter transport over its CH340 serial port."""
+
+    def __init__(self, serial_port: str, serial_baud: int, interface: str = DEFAULT_INTERFACE):
+        self.interface = interface
+        self.transport = TRANSPORT_ROBSTRIDE_SERIAL
+        self.serial_port = serial_port
+        self.serial_baud = int(serial_baud)
+        self.fd: Optional[int] = None
+        self.rx_buffer = bytearray()
+        self.rx_packets = 0
+        self.tx_packets = 0
+        self.rx_errors = 0
+        self.tx_errors = 0
+        self.rx_dropped = 0
+        self.tx_dropped = 0
+        self._recent_tx: List[Tuple[float, int, bool, bytes]] = []
+
+    def open(self) -> None:
+        if os.name != "posix":
+            raise RuntimeError("direct RobStride serial transport is only available on Linux")
+        try:
+            fd = os.open(self.serial_port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not open {self.serial_port}: {exc}. "
+                "Stop slcand if it is running and make sure the dashboard user is in the dialout group."
+            ) from exc
+
+        try:
+            self._configure_serial(fd)
+        except Exception as exc:
+            os.close(fd)
+            raise RuntimeError(f"could not configure {self.serial_port} at {self.serial_baud} baud: {exc}") from exc
+
+        self.fd = fd
+        self.rx_buffer.clear()
+        self._recent_tx.clear()
+
+    def _configure_serial(self, fd: int) -> None:
+        import termios
+
+        baud_const = getattr(termios, f"B{self.serial_baud}", None)
+        if baud_const is None:
+            supported = "115200, 230400, 460800, 500000, 576000, 921600, 1000000, 1500000, 2000000"
+            raise RuntimeError(f"unsupported baud {self.serial_baud}; try one of: {supported}")
+
+        attrs = termios.tcgetattr(fd)
+        attrs[0] = getattr(termios, "IGNPAR", 0)
+        attrs[1] = 0
+        attrs[2] = termios.CLOCAL | termios.CREAD | termios.CS8
+        attrs[2] &= ~getattr(termios, "CRTSCTS", 0)
+        attrs[3] = 0
+        attrs[4] = baud_const
+        attrs[5] = baud_const
+        attrs[6][termios.VMIN] = 0
+        attrs[6][termios.VTIME] = 1
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        termios.tcflush(fd, termios.TCIOFLUSH)
+
+    def close(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def reopen(self) -> None:
+        self.close()
+        time.sleep(0.05)
+        self.open()
+
+    def label(self) -> str:
+        return f"{self.serial_port} at {self.serial_baud} baud"
+
+    def stats(self) -> dict[str, str]:
+        return {
+            "operstate": "up" if self.fd is not None else "down",
+            "carrier": "1" if self.fd is not None else "0",
+            "rx_packets": str(self.rx_packets),
+            "tx_packets": str(self.tx_packets),
+            "rx_errors": str(self.rx_errors),
+            "tx_errors": str(self.tx_errors),
+            "rx_dropped": str(self.rx_dropped),
+            "tx_dropped": str(self.tx_dropped),
+        }
+
+    def _write_all(self, data: bytes) -> None:
+        if self.fd is None:
+            raise RuntimeError("RobStride serial port is not open")
+
+        remaining = memoryview(data)
+        deadline = time.monotonic() + 0.5
+        while remaining:
+            try:
+                written = os.write(self.fd, remaining)
+            except BlockingIOError:
+                written = 0
+            except OSError:
+                self.tx_errors += 1
+                raise
+
+            if written:
+                remaining = remaining[written:]
+                continue
+
+            wait_s = deadline - time.monotonic()
+            if wait_s <= 0:
+                self.tx_errors += 1
+                raise OSError("serial write timeout")
+            select.select([], [self.fd], [], min(0.05, wait_s))
+
+    def _remember_tx(self, arbitration_id: int, data: bytes, extended: bool) -> None:
+        now = time.monotonic()
+        self._recent_tx = [item for item in self._recent_tx if now - item[0] < 0.5]
+        self._recent_tx.append((now, arbitration_id, extended, data))
+        del self._recent_tx[:-32]
+
+    def _is_echo(self, frame: CanFrame) -> bool:
+        now = time.monotonic()
+        kept: List[Tuple[float, int, bool, bytes]] = []
+        matched = False
+        for item in self._recent_tx:
+            stamp, arbitration_id, extended, data = item
+            if now - stamp >= 0.5:
+                continue
+            if (
+                not matched
+                and arbitration_id == frame.arbitration_id
+                and extended == frame.extended
+                and data[: len(frame.data)] == frame.data
+            ):
+                matched = True
+                continue
+            kept.append(item)
+        self._recent_tx = kept
+        return matched
+
+    def send(self, arbitration_id: int, data: bytes, extended: bool = False) -> None:
+        payload = bytes(data[:8]).ljust(8, b"\x00")
+        self._write_all(robstride_serial_encode_frame(arbitration_id, payload, extended))
+        self.tx_packets += 1
+        self._remember_tx(arbitration_id & (CAN_EFF_MASK if extended else CAN_SFF_MASK), payload, extended)
+
+    def recv(self, timeout_s: float) -> Optional[CanFrame]:
+        if self.fd is None:
+            raise RuntimeError("RobStride serial port is not open")
+
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
+            frame = robstride_serial_try_parse(self.rx_buffer)
+            if frame is not None:
+                if self._is_echo(frame):
+                    continue
+                self.rx_packets += 1
+                return frame
+
+            remaining = max(0.0, deadline - time.monotonic())
+            ready, _, _ = select.select([self.fd], [], [], remaining)
+            if not ready:
+                return None
+            try:
+                chunk = os.read(self.fd, 512)
+            except BlockingIOError:
+                continue
+            except OSError:
+                self.rx_errors += 1
+                raise
+            if not chunk:
+                continue
+
+            self.rx_buffer.extend(chunk)
+            if len(self.rx_buffer) > 4096:
+                del self.rx_buffer[:-512]
+                self.rx_dropped += 1
+
+
+def create_bus(
+    transport: str,
+    interface: str = DEFAULT_INTERFACE,
+    serial_port: str = DEFAULT_SERIAL_PORT,
+    serial_baud: int = DEFAULT_SERIAL_BAUD,
+) -> Any:
+    if transport == TRANSPORT_ROBSTRIDE_SERIAL:
+        return RobStrideSerialBus(serial_port=serial_port, serial_baud=serial_baud, interface=interface)
+    if transport == TRANSPORT_SOCKETCAN:
+        return SocketCanBus(interface)
+    raise ValueError(f"unknown CAN transport: {transport}")
+
+
 class RobStrideSocketCanTool:
     def __init__(
         self,
-        bus: SocketCanBus,
+        bus: Any,
         protocol: str,
         motor_id: int,
         host_id: int,
@@ -293,12 +567,13 @@ class RobStrideSocketCanTool:
 
     def print_help(self) -> None:
         print()
-        print("RobStride Raspberry Pi SocketCAN bench test")
+        print("RobStride Raspberry Pi bench test")
         print("Motor will not move until you command f/b/g/< />.")
         print(
-            "interface={iface} motor={motor} host={host} feedback={feedback} "
+            "transport={transport} bus={bus} motor={motor} host={host} feedback={feedback} "
             "protocol={protocol} speed={speed:.2f} rad/s".format(
-                iface=self.bus.interface,
+                transport=getattr(self.bus, "transport", TRANSPORT_SOCKETCAN),
+                bus=self.bus.label() if hasattr(self.bus, "label") else self.bus.interface,
                 motor=fmt_id(self.motor_id),
                 host=fmt_id(self.host_id),
                 feedback=fmt_id(self.feedback_id),
@@ -324,8 +599,8 @@ class RobStrideSocketCanTool:
         print("  a  toggle active motor status reports")
         print("  m  toggle protocol: private / MotorBridge MIT-standard")
         print("  x  print raw CAN frames for 3 seconds")
-        print("  d  print SocketCAN interface counters")
-        print("  c  close and reopen SocketCAN socket")
+        print("  d  print adapter counters")
+        print("  c  close and reopen CAN transport")
         print("  h  cycle private host ID: FD, FF, FE, 00, AA")
         print("  t  run local frame-encoding self-test")
         print("  q  quit")
@@ -907,24 +1182,22 @@ class RobStrideSocketCanTool:
         self.update_oscillation()
 
     def print_interface_status(self) -> None:
-        stats_dir = f"/sys/class/net/{self.bus.interface}/statistics"
-        operstate = read_text_file(f"/sys/class/net/{self.bus.interface}/operstate")
-        wanted = ["rx_packets", "tx_packets", "rx_errors", "tx_errors", "rx_dropped", "tx_dropped"]
+        stats = self.bus.stats() if hasattr(self.bus, "stats") else {}
         values = []
-        for name in wanted:
-            raw = read_text_file(os.path.join(stats_dir, name))
+        for name in ("operstate", "rx_packets", "tx_packets", "rx_errors", "tx_errors", "rx_dropped", "tx_dropped"):
+            raw = stats.get(name)
             if raw:
                 values.append(f"{name}={raw}")
-        if operstate:
-            values.insert(0, f"state={operstate}")
-        print("SocketCAN " + self.bus.interface + ": " + (" ".join(values) if values else "status unavailable"))
+        label = self.bus.label() if hasattr(self.bus, "label") else self.bus.interface
+        print(f"{getattr(self.bus, 'transport', 'can')} {label}: " + (" ".join(values) if values else "status unavailable"))
 
     def reopen_socket(self) -> None:
         self.oscillating = False
         self.jog_active = False
         self.velocity_mode_configured = False
         self.bus.reopen()
-        print(f"Reopened {self.bus.interface}.")
+        label = self.bus.label() if hasattr(self.bus, "label") else self.bus.interface
+        print(f"Reopened {label}.")
 
     def cycle_host_id(self) -> None:
         hosts = list(PRIVATE_HOST_CANDIDATES)
@@ -1065,24 +1338,39 @@ def run_encoding_self_test(verbose: bool = False) -> bool:
     private_reply_parts = split_private_ext_id(0x00007FFE)
     mit_vel_id = mit_typed_id(MIT_TYPED_ID_VELOCITY, DEFAULT_MOTOR_ID)
     mit_vel = mit_velocity_payload(0.30, 1.0)
+    official_private_write_id = build_private_ext_id(COMM_WRITE_PARAM, DEFAULT_HOST_ID, 0x01)
+    official_private_write_data = bytes([0x05, 0x70, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00])
+    official_serial = robstride_serial_encode_frame(
+        official_private_write_id,
+        official_private_write_data,
+        extended=True,
+    )
+    expected_official_serial = bytes.fromhex("41 54 90 07 e8 0c 08 05 70 00 00 01 00 00 00 0d 0a")
+    parsed_official = robstride_serial_try_parse(bytearray(expected_official_serial))
     passed = (
         private_ping == 0x0000FD7F
         and private_reply_parts == (0, 0x007F, 0xFE)
         and mit_vel_id == 0x27F
         and len(mit_vel) == 8
         and mit_special(0xFC) == bytes([0xFF] * 7 + [0xFC])
+        and official_serial == expected_official_serial
+        and parsed_official == CanFrame(official_private_write_id, official_private_write_data, True)
     )
     if verbose:
         print(f"encoding self-test {'PASSED' if passed else 'FAILED'}")
         print(f"  private Get-ID id={fmt_id(private_ping, 8)}")
         print(f"  private reply 0x00007FFE parts={private_reply_parts}")
         print(f"  MIT velocity id={fmt_id(mit_vel_id, 3)} data={bytes_hex(mit_vel)}")
+        print(f"  RobStride serial example={bytes_hex(official_serial)}")
     return passed
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--transport", choices=TRANSPORT_CHOICES, default=TRANSPORT_ROBSTRIDE_SERIAL)
     parser.add_argument("--interface", default=DEFAULT_INTERFACE, help="SocketCAN interface, usually can0")
+    parser.add_argument("--serial-port", default=DEFAULT_SERIAL_PORT, help="official RobStride adapter tty")
+    parser.add_argument("--serial-baud", type=int, default=DEFAULT_SERIAL_BAUD)
     parser.add_argument("--motor-id", default=hex(DEFAULT_MOTOR_ID), help="RobStride motor/node ID")
     parser.add_argument("--host-id", default=hex(DEFAULT_HOST_ID), help="private-protocol host ID")
     parser.add_argument("--feedback-id", default=hex(DEFAULT_FEEDBACK_ID), help="MIT feedback/host CAN ID")
@@ -1130,15 +1418,20 @@ def main() -> int:
     if args.self_test:
         return 0 if run_encoding_self_test(verbose=True) else 1
 
-    bus = SocketCanBus(args.interface)
+    bus = create_bus(
+        transport=args.transport,
+        interface=args.interface,
+        serial_port=args.serial_port,
+        serial_baud=args.serial_baud,
+    )
     try:
         bus.open()
     except RuntimeError as exc:
         print(exc, file=sys.stderr)
         print(
-            "Example setup: sudo ip link set can0 down 2>/dev/null || true; "
-            "sudo ip link set can0 type can bitrate 1000000 restart-ms 100; "
-            "sudo ip link set can0 up",
+            "SocketCAN setup: sudo bash raspi/can_up.sh can0\n"
+            "Official RobStride adapter: stop slcand, then use "
+            "--transport robstride-serial --serial-port /dev/ttyUSB0",
             file=sys.stderr,
         )
         return 2
