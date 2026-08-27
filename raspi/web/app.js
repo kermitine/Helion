@@ -115,7 +115,7 @@ function renderProtocol(protocol) {
 function render(state) {
   setControlValue("transportInput", state.transport || "robstride-serial");
   setControlValue("interfaceInput", state.interface);
-  setControlValue("serialPortInput", state.serialPort || "/dev/ttyUSB0");
+  setControlValue("serialPortInput", state.serialPort || "auto");
   setControlValue("serialBaudInput", state.serialBaud || 921600);
   setControlValue("motorIdInput", state.motorIdHex);
   setControlValue("hostIdInput", state.hostIdHex);

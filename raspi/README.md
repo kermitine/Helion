@@ -4,8 +4,8 @@ This folder contains the Raspberry Pi command-line tool and Pi-local web
 dashboard:
 
 ```bash
-python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port /dev/ttyUSB0
-python3 raspi/robstride_dashboard.py --transport robstride-serial --serial-port /dev/ttyUSB0 --host 0.0.0.0 --port 8080
+python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port auto
+python3 raspi/robstride_dashboard.py --transport robstride-serial --serial-port auto --host 0.0.0.0 --port 8080
 ```
 
 It has no Python package dependencies. It can either talk directly to the
@@ -19,7 +19,7 @@ RobStride serial transport. Do not run `slcand` for this adapter.
 
 ```bash
 sudo pkill -f slcand || true
-python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port /dev/ttyUSB0 --command scan
+python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port auto --command scan
 ```
 
 The dashboard installer now defaults to this direct serial path:
@@ -31,7 +31,7 @@ bash raspi/install_dashboard.sh
 To be explicit:
 
 ```bash
-HELION_TRANSPORT=robstride-serial SERIAL_PORT=/dev/ttyUSB0 SERIAL_BAUD=921600 bash raspi/install_dashboard.sh
+HELION_TRANSPORT=robstride-serial SERIAL_PORT=auto SERIAL_BAUD=921600 bash raspi/install_dashboard.sh
 ```
 
 The installer adds the dashboard service user to the `dialout` group so it can
@@ -77,7 +77,7 @@ bash raspi/install_dashboard.sh
 For the official RobStride CH340 serial adapter, install the services with:
 
 ```bash
-HELION_TRANSPORT=robstride-serial SERIAL_PORT=/dev/ttyUSB0 bash raspi/install_dashboard.sh
+HELION_TRANSPORT=robstride-serial SERIAL_PORT=auto bash raspi/install_dashboard.sh
 ```
 
 For a native SocketCAN adapter instead:
@@ -97,7 +97,7 @@ The install creates these commands:
 ```bash
 helion-can-up can0
 helion-can-down can0
-helion-dashboard --transport robstride-serial --serial-port /dev/ttyUSB0 --host 0.0.0.0 --port 8080
+helion-dashboard --transport robstride-serial --serial-port auto --host 0.0.0.0 --port 8080
 helion-update
 ```
 
@@ -138,29 +138,29 @@ Useful service checks:
 ```bash
 systemctl status robstride-dashboard.service
 journalctl -u robstride-dashboard.service -f
-ls -l /dev/ttyUSB0
+ls -l /dev/serial/by-id /dev/ttyUSB* /dev/ttyACM*
 ```
 
 Useful first tests:
 
 ```bash
 python3 raspi/robstride_socketcan.py --self-test
-python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port /dev/ttyUSB0 --command scan
-python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port /dev/ttyUSB0 --command configure
-python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port /dev/ttyUSB0 --command jog-right
+python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port auto --command scan
+python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port auto --command configure
+python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port auto --command jog-right
 ```
 
 The default protocol is RobStride private extended-ID mode with motor `0x7F`
 and host `0xFD`. To try the MotorBridge MIT-standard path instead:
 
 ```bash
-python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port /dev/ttyUSB0 --protocol mit
+python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port auto --protocol mit
 ```
 
 For a one-shot MIT-standard jog:
 
 ```bash
-python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port /dev/ttyUSB0 --protocol mit --command jog-right
+python3 raspi/robstride_socketcan.py --transport robstride-serial --serial-port auto --protocol mit --command jog-right
 ```
 
 Interactive commands: `p`, `v`, `f`, `b`, `<`, `>`, `g`, `0`, `s`, `+`, `-`,

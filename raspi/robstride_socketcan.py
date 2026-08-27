@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import glob
 import os
 import select
 import socket
@@ -32,7 +33,7 @@ DEFAULT_INTERFACE = "can0"
 TRANSPORT_SOCKETCAN = "socketcan"
 TRANSPORT_ROBSTRIDE_SERIAL = "robstride-serial"
 TRANSPORT_CHOICES = (TRANSPORT_SOCKETCAN, TRANSPORT_ROBSTRIDE_SERIAL)
-DEFAULT_SERIAL_PORT = "/dev/ttyUSB0"
+DEFAULT_SERIAL_PORT = "auto"
 DEFAULT_SERIAL_BAUD = 921600
 ROBSTRIDE_SERIAL_HEADER = b"AT"
 ROBSTRIDE_SERIAL_TRAILER = b"\r\n"
@@ -140,6 +141,30 @@ def fmt_id(value: int, width: int = 2) -> str:
 
 def bytes_hex(data: bytes) -> str:
     return " ".join(f"{byte:02X}" for byte in data)
+
+
+def detect_serial_port() -> str:
+    patterns = (
+        "/dev/serial/by-id/*",
+        "/dev/ttyUSB*",
+        "/dev/ttyACM*",
+    )
+    candidates: List[str] = []
+    for pattern in patterns:
+        candidates.extend(sorted(glob.glob(pattern)))
+
+    if not candidates:
+        raise RuntimeError(
+            "could not find a serial adapter. Plug in the RobStride USB-CAN adapter "
+            "or set Serial Port to its device path."
+        )
+
+    preferred_tokens = ("robstride", "usb-can", "ch340", "ch341", "qinheng", "1a86")
+    for candidate in candidates:
+        name = candidate.lower()
+        if any(token in name for token in preferred_tokens):
+            return candidate
+    return candidates[0]
 
 
 def f32_le(value: float) -> bytes:
@@ -350,6 +375,7 @@ class RobStrideSerialBus:
         self.interface = interface
         self.transport = TRANSPORT_ROBSTRIDE_SERIAL
         self.serial_port = serial_port
+        self.active_serial_port = ""
         self.serial_baud = int(serial_baud)
         self.fd: Optional[int] = None
         self.rx_buffer = bytearray()
@@ -365,20 +391,26 @@ class RobStrideSerialBus:
         if os.name != "posix":
             raise RuntimeError("direct RobStride serial transport is only available on Linux")
         try:
-            fd = os.open(self.serial_port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            port = detect_serial_port() if self.serial_port in ("", "auto") else self.serial_port
+        except RuntimeError as exc:
+            raise RuntimeError(f"{exc} Looked for /dev/serial/by-id/*, /dev/ttyUSB*, and /dev/ttyACM*.") from exc
+
+        try:
+            fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         except OSError as exc:
             raise RuntimeError(
-                f"could not open {self.serial_port}: {exc}. "
-                "Stop slcand if it is running and make sure the dashboard user is in the dialout group."
+                f"could not open {port}: {exc}. "
+                "Stop slcand if it is running, check the adapter path, and make sure the dashboard user is in the dialout group."
             ) from exc
 
         try:
             self._configure_serial(fd)
         except Exception as exc:
             os.close(fd)
-            raise RuntimeError(f"could not configure {self.serial_port} at {self.serial_baud} baud: {exc}") from exc
+            raise RuntimeError(f"could not configure {port} at {self.serial_baud} baud: {exc}") from exc
 
         self.fd = fd
+        self.active_serial_port = port
         self.rx_buffer.clear()
         self._recent_tx.clear()
 
@@ -414,12 +446,16 @@ class RobStrideSerialBus:
         self.open()
 
     def label(self) -> str:
+        if self.serial_port in ("", "auto"):
+            port = self.active_serial_port or "auto"
+            return f"{port} at {self.serial_baud} baud"
         return f"{self.serial_port} at {self.serial_baud} baud"
 
     def stats(self) -> dict[str, str]:
         return {
             "operstate": "up" if self.fd is not None else "down",
             "carrier": "1" if self.fd is not None else "0",
+            "device": self.active_serial_port or self.serial_port,
             "rx_packets": str(self.rx_packets),
             "tx_packets": str(self.tx_packets),
             "rx_errors": str(self.rx_errors),
@@ -1431,7 +1467,7 @@ def main() -> int:
         print(
             "SocketCAN setup: sudo bash raspi/can_up.sh can0\n"
             "Official RobStride adapter: stop slcand, then use "
-            "--transport robstride-serial --serial-port /dev/ttyUSB0",
+            "--transport robstride-serial --serial-port auto",
             file=sys.stderr,
         )
         return 2
