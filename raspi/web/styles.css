@@ -268,6 +268,59 @@ select {
   width: auto;
 }
 
+.target-pad {
+  display: grid;
+  gap: 8px;
+}
+
+.target-pad-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.target-pad-head h3 {
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.target-pad-modes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(44px, 1fr));
+  gap: 6px;
+  width: min(190px, 55%);
+}
+
+.target-pad-modes button {
+  width: auto;
+  min-height: 32px;
+  padding: 6px 8px;
+  font-size: 0.78rem;
+}
+
+.target-pad-modes button.active {
+  border-color: rgba(114, 183, 255, 0.65);
+  background: #17304a;
+  color: var(--text);
+}
+
+#targetControlCanvas {
+  display: block;
+  width: 100%;
+  height: 230px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #101819;
+  cursor: grab;
+  touch-action: none;
+}
+
+#targetControlCanvas.dragging {
+  cursor: grabbing;
+}
+
 .wizard-overlay {
   position: fixed;
   inset: 0;
@@ -413,70 +466,14 @@ select {
   height: 150px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background:
-    linear-gradient(#1f2d2c 1px, transparent 1px),
-    linear-gradient(90deg, #1f2d2c 1px, transparent 1px),
-    #0f1717;
-  background-size: 28px 28px;
+  background: #0f1717;
   overflow: hidden;
 }
 
-.home-base {
-  position: absolute;
-  left: 54px;
-  bottom: 34px;
-  width: 34px;
-  height: 18px;
-  border: 2px solid var(--accent-2);
-  border-radius: 8px 8px 4px 4px;
-  background: #112334;
-}
-
-.home-link,
-.home-joint {
-  position: absolute;
+.home-pose-svg {
   display: block;
-}
-
-.home-link {
-  height: 10px;
-  border-radius: 999px;
-  background: var(--accent);
-  box-shadow: 0 0 14px rgba(86, 214, 168, 0.22);
-}
-
-.home-link-a {
-  left: 80px;
-  bottom: 56px;
-  width: 118px;
-  transform: rotate(-10deg);
-  transform-origin: left center;
-}
-
-.home-link-b {
-  left: 192px;
-  bottom: 36px;
-  width: 118px;
-  transform: rotate(8deg);
-  transform-origin: left center;
-}
-
-.home-joint {
-  width: 22px;
-  height: 22px;
-  border: 3px solid var(--warn);
-  border-radius: 50%;
-  background: #221d12;
-}
-
-.home-joint-a {
-  left: 185px;
-  bottom: 48px;
-}
-
-.home-joint-b {
-  left: 300px;
-  bottom: 44px;
+  width: 100%;
+  height: 100%;
 }
 
 .home-button-row {
@@ -811,6 +808,19 @@ pre {
   .metric-grid,
   .speed-control {
     grid-template-columns: 1fr;
+  }
+
+  .target-pad-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .target-pad-modes {
+    width: 100%;
+  }
+
+  #targetControlCanvas {
+    height: 200px;
   }
 
   .wizard-overlay {

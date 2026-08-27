@@ -5,6 +5,8 @@ let busy = false;
 let ikViewYaw = -0.72;
 let ikViewPitch = 0.58;
 let ikDrag = null;
+let targetPadMode = "xy";
+let targetPadDrag = null;
 let wizardStepIndex = 0;
 
 const commandButtons = [...document.querySelectorAll("[data-command]")];
@@ -544,11 +546,11 @@ function renderArmSolution(preview) {
   $("ikElbowValue").textContent = `${joints.elbow.toFixed(3)} rad`;
 }
 
-function projected(point, scale, centerX, centerY) {
-  const yawCos = Math.cos(ikViewYaw);
-  const yawSin = Math.sin(ikViewYaw);
-  const pitchCos = Math.cos(ikViewPitch);
-  const pitchSin = Math.sin(ikViewPitch);
+function projectPoint(point, scale, centerX, centerY, yaw, pitch) {
+  const yawCos = Math.cos(yaw);
+  const yawSin = Math.sin(yaw);
+  const pitchCos = Math.cos(pitch);
+  const pitchSin = Math.sin(pitch);
   const xYaw = point.x * yawCos - point.y * yawSin;
   const depth = point.x * yawSin + point.y * yawCos;
   const yPitch = point.z * pitchCos - depth * pitchSin;
@@ -557,6 +559,10 @@ function projected(point, scale, centerX, centerY) {
     y: centerY - yPitch * scale,
     depth: depth * pitchCos + point.z * pitchSin,
   };
+}
+
+function projected(point, scale, centerX, centerY) {
+  return projectPoint(point, scale, centerX, centerY, ikViewYaw, ikViewPitch);
 }
 
 function drawGroundCircle(ctx, radius, project) {
@@ -571,8 +577,17 @@ function drawGroundCircle(ctx, radius, project) {
   ctx.stroke();
 }
 
+function drawProjectedPath(ctx, points, project) {
+  points.forEach((point, index) => {
+    const projectedPoint = project(point);
+    if (index === 0) ctx.moveTo(projectedPoint.x, projectedPoint.y);
+    else ctx.lineTo(projectedPoint.x, projectedPoint.y);
+  });
+}
+
 function drawIkCanvas(preview) {
   const canvas = $("armIkCanvas");
+  if (!canvas) return;
   const ctx = canvas.getContext("2d");
   const rect = canvas.getBoundingClientRect();
   const width = Math.max(320, rect.width || canvas.width);
@@ -696,11 +711,161 @@ function drawIkCanvas(preview) {
   }
 }
 
+function targetPlaneCorners(target, radius) {
+  const size = radius * 0.72;
+  if (targetPadMode === "xz") {
+    return [
+      { x: -size, y: target.y, z: -size },
+      { x: size, y: target.y, z: -size },
+      { x: size, y: target.y, z: size },
+      { x: -size, y: target.y, z: size },
+    ];
+  }
+  if (targetPadMode === "yz") {
+    return [
+      { x: target.x, y: -size, z: -size },
+      { x: target.x, y: size, z: -size },
+      { x: target.x, y: size, z: size },
+      { x: target.x, y: -size, z: size },
+    ];
+  }
+  return [
+    { x: -size, y: -size, z: target.z },
+    { x: size, y: -size, z: target.z },
+    { x: size, y: size, z: target.z },
+    { x: -size, y: size, z: target.z },
+  ];
+}
+
+function drawTargetPad(preview) {
+  const canvas = $("targetControlCanvas");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(320, rect.width || canvas.width);
+  const height = Math.max(190, rect.height || canvas.height);
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.floor(width * dpr);
+  canvas.height = Math.floor(height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const target = preview.arm.target;
+  const sceneRadius = Math.max(
+    preview.arm.link1 + preview.arm.link2,
+    Math.hypot(target.x, target.y, target.z),
+    0.2
+  );
+  const scale = Math.min(width / (sceneRadius * 2.85), height / (sceneRadius * 2.35));
+  const centerX = width * 0.5;
+  const centerY = height * 0.7;
+  const project = (point) => projectPoint(point, scale, centerX, centerY, -0.74, 0.62);
+
+  const gradient = ctx.createLinearGradient(0, 0, width, height);
+  gradient.addColorStop(0, "#0f1717");
+  gradient.addColorStop(1, "#142020");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = "#243635";
+  for (let i = -4; i <= 4; i += 1) {
+    const offset = (sceneRadius * i) / 4;
+    ctx.beginPath();
+    drawProjectedPath(ctx, [
+      { x: -sceneRadius, y: offset, z: 0 },
+      { x: sceneRadius, y: offset, z: 0 },
+    ], project);
+    drawProjectedPath(ctx, [
+      { x: offset, y: -sceneRadius, z: 0 },
+      { x: offset, y: sceneRadius, z: 0 },
+    ], project);
+    ctx.stroke();
+  }
+
+  const plane = targetPlaneCorners(target, sceneRadius);
+  ctx.beginPath();
+  drawProjectedPath(ctx, plane, project);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(114, 183, 255, 0.10)";
+  ctx.strokeStyle = "rgba(114, 183, 255, 0.55)";
+  ctx.lineWidth = 2;
+  ctx.fill();
+  ctx.stroke();
+
+  const origin = project({ x: 0, y: 0, z: 0 });
+  [
+    [{ x: sceneRadius * 0.55, y: 0, z: 0 }, "#ff7d73", "X"],
+    [{ x: 0, y: sceneRadius * 0.55, z: 0 }, "#72b7ff", "Y"],
+    [{ x: 0, y: 0, z: sceneRadius * 0.55 }, "#56d6a8", "Z"],
+  ].forEach(([axisPoint, color, label]) => {
+    const end = project(axisPoint);
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(origin.x, origin.y);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+    ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    ctx.fillText(label, end.x + 5, end.y - 5);
+  });
+
+  ctx.setLineDash([6, 5]);
+  ctx.strokeStyle = "#395453";
+  drawGroundCircle(ctx, preview.joints.maxReach || preview.arm.link1 + preview.arm.link2, project);
+  ctx.setLineDash([]);
+
+  const targetBase = project({ x: target.x, y: target.y, z: 0 });
+  const targetTop = project(target);
+  ctx.strokeStyle = preview.ok ? "#ffd166" : "#ff6b5f";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([5, 4]);
+  ctx.beginPath();
+  ctx.moveTo(targetBase.x, targetBase.y);
+  ctx.lineTo(targetTop.x, targetTop.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  if (preview.ok) {
+    const points = preview.points.map(project);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "#56d6a8";
+    ctx.lineWidth = 10;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    ctx.lineTo(points[1].x, points[1].y);
+    ctx.lineTo(points[2].x, points[2].y);
+    ctx.stroke();
+    ctx.strokeStyle = "#baf8e0";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    ctx.lineTo(points[1].x, points[1].y);
+    ctx.lineTo(points[2].x, points[2].y);
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = preview.ok ? "#ffd166" : "#ff6b5f";
+  ctx.beginPath();
+  ctx.arc(targetTop.x, targetTop.y, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#101819";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  ctx.fillStyle = "#cddbd7";
+  ctx.font = "13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  ctx.fillText(`${targetPadMode.toUpperCase()} drag plane`, 14, 22);
+}
+
 function renderIkPreview() {
   const preview = armPreview();
   $("armConfiguredState").classList.toggle("fault", !preview.ok);
   renderArmSolution(preview);
   drawIkCanvas(preview);
+  drawTargetPad(preview);
   updateWizardVisual(preview);
   const reachInput = $("wizardTotalReachInput");
   if (reachInput && document.activeElement !== reachInput) {
@@ -786,6 +951,40 @@ function nudgeTarget(axis, direction) {
   const id = `armTarget${axis.toUpperCase()}Input`;
   const step = Math.max(0.001, Math.abs(numberInput("wizardNudgeStepInput") || 0.01));
   setDirtyNumber(id, numberInput(id) + direction * step, 3);
+  renderIkPreview();
+}
+
+function setTargetPadMode(mode) {
+  targetPadMode = ["xy", "xz", "yz"].includes(mode) ? mode : "xy";
+  document.querySelectorAll("[data-target-pad-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.targetPadMode === targetPadMode);
+  });
+  renderIkPreview();
+}
+
+function setTargetFromPadDrag(event) {
+  if (!targetPadDrag || event.pointerId !== targetPadDrag.id) return;
+  const width = Math.max(1, targetPadDrag.width);
+  const height = Math.max(1, targetPadDrag.height);
+  const scale = (targetPadDrag.radius * 2.1) / Math.min(width, height);
+  const dx = (event.clientX - targetPadDrag.x) * scale;
+  const dy = (event.clientY - targetPadDrag.y) * scale;
+  const next = { ...targetPadDrag.target };
+
+  if (targetPadMode === "xz") {
+    next.x += dx;
+    next.z -= dy;
+  } else if (targetPadMode === "yz") {
+    next.y += dx;
+    next.z -= dy;
+  } else {
+    next.x += dx;
+    next.y -= dy;
+  }
+
+  setDirtyNumber("armTargetXInput", next.x, 3);
+  setDirtyNumber("armTargetYInput", next.y, 3);
+  setDirtyNumber("armTargetZInput", next.z, 3);
   renderIkPreview();
 }
 
@@ -1050,8 +1249,43 @@ document.querySelectorAll("[data-nudge-axis]").forEach((button) => {
   });
 });
 
+document.querySelectorAll("[data-target-pad-mode]").forEach((button) => {
+  button.addEventListener("click", () => setTargetPadMode(button.dataset.targetPadMode));
+});
+
 $("wizardSplitLinksBtn").addEventListener("click", splitLinks);
 $("wizardSyncReachBtn").addEventListener("click", syncReach);
+
+const targetCanvas = $("targetControlCanvas");
+targetCanvas.addEventListener("pointerdown", (event) => {
+  const preview = armPreview();
+  const rect = targetCanvas.getBoundingClientRect();
+  targetPadDrag = {
+    id: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    width: rect.width || targetCanvas.width,
+    height: rect.height || targetCanvas.height,
+    radius: Math.max(
+      preview.arm.link1 + preview.arm.link2,
+      Math.hypot(preview.arm.target.x, preview.arm.target.y, preview.arm.target.z),
+      0.2,
+    ),
+    target: { ...preview.arm.target },
+  };
+  targetCanvas.classList.add("dragging");
+  targetCanvas.setPointerCapture(event.pointerId);
+});
+
+targetCanvas.addEventListener("pointermove", setTargetFromPadDrag);
+
+function endTargetPadDrag() {
+  targetPadDrag = null;
+  targetCanvas.classList.remove("dragging");
+}
+
+targetCanvas.addEventListener("pointerup", endTargetPadDrag);
+targetCanvas.addEventListener("pointercancel", endTargetPadDrag);
 
 const ikCanvas = $("armIkCanvas");
 ikCanvas.addEventListener("pointerdown", (event) => {

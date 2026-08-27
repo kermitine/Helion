@@ -124,6 +124,17 @@
           <div class="arm-summary">
             <button id="setupIkBtn" type="button" class="soft">Setup IK</button>
             <div class="main-target-control">
+              <div class="target-pad">
+                <div class="target-pad-head">
+                  <h3>Target Position</h3>
+                  <div class="target-pad-modes" aria-label="Target drag plane">
+                    <button type="button" class="active" data-target-pad-mode="xy">XY</button>
+                    <button type="button" data-target-pad-mode="xz">XZ</button>
+                    <button type="button" data-target-pad-mode="yz">YZ</button>
+                  </div>
+                </div>
+                <canvas id="targetControlCanvas" width="720" height="280"></canvas>
+              </div>
               <div class="arm-grid">
                 <label>
                   <span>X</span>
@@ -242,11 +253,35 @@
                   <div class="wizard-panel" data-flow-panel="home">
                     <div class="home-guide">
                       <div class="home-pose-visual" aria-hidden="true">
-                        <span class="home-base"></span>
-                        <span class="home-link home-link-a"></span>
-                        <span class="home-joint home-joint-a"></span>
-                        <span class="home-link home-link-b"></span>
-                        <span class="home-joint home-joint-b"></span>
+                        <svg class="home-pose-svg" viewBox="0 0 420 180" role="img" aria-label="Arm home pose">
+                          <defs>
+                            <pattern id="homeGrid" width="28" height="28" patternUnits="userSpaceOnUse">
+                              <path d="M 28 0 L 0 0 0 28" fill="none" stroke="#20302f" stroke-width="1" />
+                            </pattern>
+                            <filter id="homeGlow" x="-20%" y="-80%" width="140%" height="260%">
+                              <feGaussianBlur stdDeviation="3" result="blur" />
+                              <feMerge>
+                                <feMergeNode in="blur" />
+                                <feMergeNode in="SourceGraphic" />
+                              </feMerge>
+                            </filter>
+                          </defs>
+                          <rect width="420" height="180" fill="#0f1717" />
+                          <rect width="420" height="180" fill="url(#homeGrid)" />
+                          <path d="M54 128 H366" stroke="#2d4442" stroke-width="2" />
+                          <path d="M76 120 L76 93" stroke="#72b7ff" stroke-width="5" stroke-linecap="round" />
+                          <path d="M56 126 H96 Q104 126 104 136 V142 H48 V136 Q48 126 56 126 Z" fill="#112334" stroke="#8cbaff" stroke-width="4" />
+                          <path d="M76 93 H214 H344" fill="none" stroke="#56d6a8" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" filter="url(#homeGlow)" />
+                          <path d="M76 93 H214 H344" fill="none" stroke="#baf8e0" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />
+                          <circle cx="76" cy="93" r="16" fill="#121a1a" stroke="#72b7ff" stroke-width="6" />
+                          <circle cx="214" cy="93" r="18" fill="#221d12" stroke="#ffd166" stroke-width="6" />
+                          <circle cx="344" cy="93" r="18" fill="#221d12" stroke="#ffd166" stroke-width="6" />
+                          <path d="M74 58 H214 H344" stroke="#395453" stroke-width="1.5" stroke-dasharray="6 6" />
+                          <path d="M76 80 V60 M214 80 V60 M344 80 V60" stroke="#395453" stroke-width="1.5" />
+                          <text x="44" y="48" fill="#8cbaff" font-size="13" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">base 0</text>
+                          <text x="178" y="48" fill="#ffd166" font-size="13" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">shoulder 0</text>
+                          <text x="318" y="48" fill="#ffd166" font-size="13" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">elbow 0</text>
+                        </svg>
                       </div>
                       <ol>
                         <li>Turn motor torque off or support the arm so it cannot fall.</li>
