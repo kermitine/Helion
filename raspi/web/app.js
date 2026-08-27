@@ -786,9 +786,9 @@ function drawTargetScene(preview, canvasId, options = {}) {
 
   const origin = project({ x: 0, y: 0, z: 0 });
   [
-    [{ x: sceneRadius * 0.55, y: 0, z: 0 }, "#d99a24", "X"],
-    [{ x: 0, y: sceneRadius * 0.55, z: 0 }, "#f6c445", "Y"],
-    [{ x: 0, y: 0, z: sceneRadius * 0.55 }, "#ffe7a3", "Z"],
+    [{ x: sceneRadius * 0.55, y: 0, z: 0 }, "#ff5d55", "X"],
+    [{ x: 0, y: sceneRadius * 0.55, z: 0 }, "#4ba3ff", "Y"],
+    [{ x: 0, y: 0, z: sceneRadius * 0.55 }, "#56d6a8", "Z"],
   ].forEach(([axisPoint, color, label]) => {
     const end = project(axisPoint);
     ctx.strokeStyle = color;
@@ -851,9 +851,9 @@ function drawTargetScene(preview, canvasId, options = {}) {
     const xEnd = project({ x: target.x + gizmoLength, y: target.y, z: target.z });
     const yEnd = project({ x: target.x, y: target.y + gizmoLength, z: target.z });
     const zEnd = project({ x: target.x, y: target.y, z: target.z + gizmoLength });
-    drawGizmoArrow(ctx, targetTop, xEnd, "#d99a24", "X");
-    drawGizmoArrow(ctx, targetTop, yEnd, "#f6c445", "Y");
-    drawGizmoArrow(ctx, targetTop, zEnd, "#ffe7a3", "Z");
+    drawGizmoArrow(ctx, targetTop, xEnd, "#ff5d55", "X");
+    drawGizmoArrow(ctx, targetTop, yEnd, "#4ba3ff", "Y");
+    drawGizmoArrow(ctx, targetTop, zEnd, "#56d6a8", "Z");
     targetGizmoHitZones = [
       { axis: "x", start: targetTop, end: xEnd, scale, length: gizmoLength },
       { axis: "y", start: targetTop, end: yEnd, scale, length: gizmoLength },
