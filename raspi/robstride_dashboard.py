@@ -96,7 +96,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 REPO_DIR = ROOT_DIR.parent
 WEB_DIR = ROOT_DIR / "web"
 UPDATE_LOG_PATH = ROOT_DIR / "update.log"
-APP_VERSION = "2026.08.27.1"
+APP_VERSION = "2026.08.27.2"
 
 
 def parse_int(value: Any, default: int) -> int:

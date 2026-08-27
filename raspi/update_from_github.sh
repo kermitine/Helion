@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMOTE="${1:-origin}"
 BRANCH="${2:-}"
+GIT_LOCK_STALE_SECONDS="${GIT_LOCK_STALE_SECONDS:-60}"
 
 if ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "Not a git checkout: $REPO_DIR" >&2
@@ -19,8 +20,37 @@ if [[ -z "$BRANCH" ]]; then
   exit 2
 fi
 
+clear_stale_git_lock() {
+  local lock_path="$REPO_DIR/.git/index.lock"
+  if [[ ! -e "$lock_path" ]]; then
+    return
+  fi
+
+  if command -v fuser >/dev/null 2>&1 && fuser "$lock_path" >/dev/null 2>&1; then
+    echo "[update] Git lock is currently held: $lock_path" >&2
+    echo "[update] Wait for the other Git process to finish, then run helion-update again." >&2
+    exit 3
+  fi
+
+  local now modified age
+  now="$(date +%s)"
+  modified="$(stat -c %Y "$lock_path" 2>/dev/null || echo "$now")"
+  age=$((now - modified))
+
+  if (( age < GIT_LOCK_STALE_SECONDS )); then
+    echo "[update] Git lock exists but is only ${age}s old: $lock_path" >&2
+    echo "[update] Refusing to remove a recent lock. Try again in a minute." >&2
+    exit 3
+  fi
+
+  echo "[update] Removing stale Git lock (${age}s old): $lock_path"
+  rm -f "$lock_path"
+}
+
 echo "[update] repo=$REPO_DIR remote=$REMOTE branch=$BRANCH"
+clear_stale_git_lock
 git -C "$REPO_DIR" fetch "$REMOTE"
+clear_stale_git_lock
 git -C "$REPO_DIR" pull --ff-only "$REMOTE" "$BRANCH"
 
 python3 -m py_compile \
