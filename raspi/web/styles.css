@@ -130,8 +130,8 @@ h3 {
 }
 
 .status-pill.online {
-  border-color: #8f6619;
-  color: var(--accent);
+  border-color: #2c745d;
+  color: #56d6a8;
 }
 
 .status-pill.offline {
