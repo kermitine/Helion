@@ -59,6 +59,7 @@ from robstride_socketcan import (
     bytes_hex,
     create_bus,
     decode_mit_feedback,
+    decode_private_fault_payload,
     f32_le,
     fmt_id,
     mit_active_report_payload,
@@ -68,6 +69,7 @@ from robstride_socketcan import (
     mit_special,
     mit_typed_id,
     mit_velocity_payload,
+    private_fault_summary,
     read_f32_le,
     split_private_ext_id,
     uint_to_float,
@@ -201,8 +203,10 @@ class DashboardController:
         self.jog_stop_at = 0.0
         self.last_oscillation_at = time.monotonic()
         self.last_feedback_at = 0.0
+        self.last_private_fault_at = 0.0
         self.last_raw_frame: Optional[Dict[str, Any]] = None
         self.last_feedback: Optional[Dict[str, Any]] = None
+        self.last_private_fault: Optional[Dict[str, Any]] = None
         self.discovered_private: List[int] = []
         self.discovered_mit: List[int] = []
         self.busy = False
@@ -515,7 +519,23 @@ class DashboardController:
                     self.log(f"param run_mode={raw[0]}")
                 return
             if comm_type == COMM_FAULT:
-                self.log(f"Private fault frame motor={fmt_id(source_motor)} data={bytes_hex(frame.data)}")
+                report = decode_private_fault_payload(frame.data)
+                self.last_private_fault_at = time.monotonic()
+                self.last_private_fault = {
+                    "motorId": source_motor,
+                    "motorIdHex": fmt_id(source_motor),
+                    "faultRaw": report.fault_raw,
+                    "faultRawHex": f"0x{report.fault_raw:08X}",
+                    "warningRaw": report.warning_raw,
+                    "warningRawHex": f"0x{report.warning_raw:08X}",
+                    "faults": report.fault_names,
+                    "warnings": report.warning_names,
+                    "ageMs": 0,
+                }
+                self.log(
+                    f"Private fault frame motor={fmt_id(source_motor)} "
+                    f"{private_fault_summary(report)}"
+                )
             return
 
         feedback = decode_mit_feedback(frame)
@@ -670,6 +690,9 @@ class DashboardController:
         if command == "stop":
             self.stop_and_disable()
             return {"ok": True}
+        if command == "clear-fault":
+            self.clear_fault()
+            return {"ok": True}
         if command == "toggle-oscillation":
             return {"ok": self.toggle_oscillation()}
         if command == "active-report":
@@ -737,6 +760,26 @@ class DashboardController:
             return self.configure_mit_velocity()
         return self.configure_private_velocity()
 
+    def clear_private_fault(self, label: str = "Private clear-error sent") -> None:
+        self.send_private_disable(True)
+        self.wait_private_status(0.30)
+        with self.lock:
+            self.last_private_fault = None
+            self.last_private_fault_at = 0.0
+        self.log(label)
+
+    def clear_fault(self) -> None:
+        self.oscillating = False
+        self.jog_active = False
+        self.velocity_configured = False
+        self.position_configured = False
+        if self.protocol == PROTOCOL_MIT:
+            self.send_mit_to_motor(mit_fault_query_payload(True))
+            self.wait_mit_feedback(0.35)
+            self.log("MIT clear-fault sent")
+            return
+        self.clear_private_fault()
+
     def configure_private_velocity(self) -> bool:
         self.velocity_configured = False
         self.position_configured = False
@@ -746,8 +789,7 @@ class DashboardController:
             f"Configuring private velocity motor={fmt_id(self.motor_id)} "
             f"host={fmt_id(self.host_id)}"
         )
-        self.send_private_disable(False)
-        self.wait_private_status(0.25)
+        self.clear_private_fault("Private clear-error before velocity configure sent")
         time.sleep(0.06)
 
         if not self.write_private_run_mode_verified(RUN_MODE_VELOCITY):
@@ -831,8 +873,7 @@ class DashboardController:
             f"host={fmt_id(self.host_id)} pos={position:+.3f} rad vlim={velocity_limit:.2f} rad/s"
         )
 
-        self.send_private_disable(False)
-        self.wait_private_status(0.25)
+        self.clear_private_fault("Private clear-error before position configure sent")
         time.sleep(0.06)
 
         if not self.write_private_run_mode_verified(RUN_MODE_POSITION):
@@ -1059,6 +1100,9 @@ class DashboardController:
             feedback = dict(self.last_feedback) if self.last_feedback else None
             if feedback and self.last_feedback_at:
                 feedback["ageMs"] = int((time.monotonic() - self.last_feedback_at) * 1000)
+            private_fault = dict(self.last_private_fault) if self.last_private_fault else None
+            if private_fault and self.last_private_fault_at:
+                private_fault["ageMs"] = int((time.monotonic() - self.last_private_fault_at) * 1000)
             interface = self.bus.interface
             transport = self.bus_transport()
             serial_port = getattr(self.bus, "serial_port", DEFAULT_SERIAL_PORT)
@@ -1093,6 +1137,7 @@ class DashboardController:
                 "jogActive": self.jog_active,
                 "busy": self.busy,
                 "lastFeedback": feedback,
+                "lastPrivateFault": private_fault,
                 "lastRawFrame": self.last_raw_frame,
                 "discoveredPrivate": [fmt_id(item) for item in self.discovered_private],
                 "discoveredMit": [fmt_id(item) for item in self.discovered_mit],

@@ -169,10 +169,30 @@ function render(state) {
   $("torqueMetric").textContent = feedback ? fixed(feedback.torqueNm, 3, "Nm") : "--";
   $("tempMetric").textContent = feedback ? fixed(feedback.temperatureC, 1, "C") : "--";
   $("modeState").textContent = feedback && feedback.modeState !== null ? `mode ${feedback.modeState}` : "mode --";
-  $("faultState").textContent = feedback ? `fault ${feedback.fault ? 1 : 0}` : "fault --";
-  $("faultState").classList.toggle("fault", Boolean(feedback && feedback.fault));
-  $("warningState").textContent = feedback ? `warn ${feedback.warning ? 1 : 0}` : "warn --";
-  $("warningState").classList.toggle("warn", Boolean(feedback && feedback.warning));
+
+  const privateFault = state.lastPrivateFault;
+  const privateFaultNames = privateFault && privateFault.faults && privateFault.faults.length
+    ? privateFault.faults.join(", ")
+    : "";
+  const privateWarningNames = privateFault && privateFault.warnings && privateFault.warnings.length
+    ? privateFault.warnings.join(", ")
+    : "";
+  const hasPrivateFault = Boolean(privateFault && privateFault.faultRaw);
+  const hasPrivateWarning = Boolean(privateFault && privateFault.warningRaw);
+  $("faultState").textContent = privateFault
+    ? `fault ${privateFaultNames || privateFault.faultRawHex}`
+    : feedback
+      ? `fault ${feedback.fault ? 1 : 0}`
+      : "fault --";
+  $("faultState").title = privateFault ? privateFault.faultRawHex : "";
+  $("faultState").classList.toggle("fault", hasPrivateFault || Boolean(feedback && feedback.fault));
+  $("warningState").textContent = privateFault
+    ? `warn ${privateWarningNames || privateFault.warningRawHex}`
+    : feedback
+      ? `warn ${feedback.warning ? 1 : 0}`
+      : "warn --";
+  $("warningState").title = privateFault ? privateFault.warningRawHex : "";
+  $("warningState").classList.toggle("warn", hasPrivateWarning || Boolean(feedback && feedback.warning));
 
   const stats = state.canStats || {};
   $("rxPackets").textContent = stats.rx_packets || "--";

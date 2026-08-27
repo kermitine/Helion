@@ -138,6 +138,33 @@ class MitFeedback:
     feedback_id: int
 
 
+@dataclass
+class PrivateFaultReport:
+    fault_raw: int
+    warning_raw: int
+    fault_names: List[str]
+    warning_names: List[str]
+
+
+PRIVATE_FAULT_BITS = (
+    (0, "overtemperature"),
+    (1, "driver_fault"),
+    (2, "undervoltage"),
+    (3, "overvoltage"),
+    (4, "phase_b_overcurrent"),
+    (5, "phase_c_overcurrent"),
+    (7, "encoder_uncalibrated"),
+    (8, "hardware_id_fault"),
+    (9, "position_init_fault"),
+    (14, "stall_overload"),
+    (16, "phase_a_overcurrent"),
+)
+
+PRIVATE_WARNING_BITS = (
+    (0, "overtemperature_warning"),
+)
+
+
 def parse_id(raw: str) -> int:
     return int(raw, 0)
 
@@ -282,6 +309,31 @@ def mit_velocity_payload(velocity_rad_s: float, current_limit_a: float) -> bytes
 
 def mit_position_payload(position_rad: float, velocity_limit_rad_s: float) -> bytes:
     return f32_le(position_rad) + f32_le(abs(velocity_limit_rad_s))
+
+
+def names_from_bits(raw: int, bits: Iterable[Tuple[int, str]]) -> List[str]:
+    return [name for bit, name in bits if raw & (1 << bit)]
+
+
+def decode_private_fault_payload(data: bytes) -> PrivateFaultReport:
+    payload = bytes(data[:8]).ljust(8, b"\x00")
+    fault_raw = int.from_bytes(payload[0:4], "little", signed=False)
+    warning_raw = int.from_bytes(payload[4:8], "little", signed=False)
+    return PrivateFaultReport(
+        fault_raw=fault_raw,
+        warning_raw=warning_raw,
+        fault_names=names_from_bits(fault_raw, PRIVATE_FAULT_BITS),
+        warning_names=names_from_bits(warning_raw, PRIVATE_WARNING_BITS),
+    )
+
+
+def private_fault_summary(report: PrivateFaultReport) -> str:
+    faults = ",".join(report.fault_names) if report.fault_names else "none"
+    warnings = ",".join(report.warning_names) if report.warning_names else "none"
+    return (
+        f"fault_raw=0x{report.fault_raw:08X} [{faults}] "
+        f"warning_raw=0x{report.warning_raw:08X} [{warnings}]"
+    )
 
 
 def decode_mit_feedback(frame: CanFrame) -> Optional[MitFeedback]:
@@ -683,6 +735,22 @@ class RobStrideSocketCanTool:
         payload[0] = 1 if clear_error else 0
         self.send_private(COMM_DISABLE, self.host_id, self.motor_id, bytes(payload))
 
+    def clear_private_fault(self) -> None:
+        self.send_private_disable(True)
+        self.wait_private_status(0.30)
+        print("Private clear-error sent.")
+
+    def clear_fault(self) -> None:
+        self.oscillating = False
+        self.jog_active = False
+        self.velocity_mode_configured = False
+        if self.protocol == PROTOCOL_MIT:
+            self.send_mit_fault_query(self.motor_id, clear_fault=True)
+            feedback = self.wait_mit_feedback(0.35)
+            print(f"MIT clear-fault {'ok' if feedback else 'sent, no feedback'}.")
+        else:
+            self.clear_private_fault()
+
     def send_private_enable(self) -> None:
         self.send_private(COMM_ENABLE, self.host_id, self.motor_id, bytes(8))
 
@@ -808,9 +876,9 @@ class RobStrideSocketCanTool:
         self.protocol = PROTOCOL_PRIVATE
 
         try:
-            self.send_private_disable(False)
-            status = self.wait_private_status(0.25)
-            print(f"  disable        {'ok' if status else 'sent, no status'}")
+            self.send_private_disable(True)
+            status = self.wait_private_status(0.30)
+            print(f"  clear-error    {'ok' if status else 'sent, no status'}")
             time.sleep(0.06)
 
             verified = False
@@ -926,9 +994,9 @@ class RobStrideSocketCanTool:
         self.protocol = PROTOCOL_PRIVATE
 
         try:
-            self.send_private_disable(False)
-            status = self.wait_private_status(0.25)
-            print(f"  disable        {'ok' if status else 'sent, no status'}")
+            self.send_private_disable(True)
+            status = self.wait_private_status(0.30)
+            print(f"  clear-error    {'ok' if status else 'sent, no status'}")
             time.sleep(0.06)
 
             verified = False
