@@ -702,21 +702,45 @@ function renderIkPreview() {
   $("armConfiguredState").classList.toggle("fault", !preview.ok);
   renderArmSolution(preview);
   drawIkCanvas(preview);
+  updateWizardVisual(preview);
   const reachInput = $("wizardTotalReachInput");
   if (reachInput && document.activeElement !== reachInput) {
     reachInput.value = (preview.arm.link1 + preview.arm.link2).toFixed(3);
   }
 }
 
+function updateWizardVisual(preview) {
+  const step = wizardSteps[wizardStepIndex];
+  const el = $("wizardVisualText");
+  if (!step || !el) return;
+  const arm = preview ? preview.arm : armInputState();
+  if (step.key === "joints") {
+    el.textContent =
+      `3 joints: base ${$("armBaseMotorIdInput").value}, ` +
+      `shoulder ${$("armShoulderMotorIdInput").value}, elbow ${$("armElbowMotorIdInput").value}`;
+  } else if (step.key === "lengths") {
+    el.textContent = `Reach ${(arm.link1 + arm.link2).toFixed(3)} m from links ${arm.link1.toFixed(3)} + ${arm.link2.toFixed(3)} m`;
+  } else if (step.key === "home") {
+    el.textContent =
+      `Offsets base ${arm.offsets.base.toFixed(3)}, shoulder ${arm.offsets.shoulder.toFixed(3)}, elbow ${arm.offsets.elbow.toFixed(3)} rad`;
+  } else if (step.key === "target") {
+    el.textContent =
+      `Target x ${arm.target.x.toFixed(3)}, y ${arm.target.y.toFixed(3)}, z ${arm.target.z.toFixed(3)} m`;
+  } else {
+    el.textContent = state && state.valuesPath ? `Values path ${state.valuesPath}` : step.visual;
+  }
+}
+
 function openWizard() {
-  $("wizardLaunch").hidden = true;
   $("ikWizardFlow").hidden = false;
+  document.body.classList.add("modal-open");
   setWizardStep(wizardStepIndex);
+  requestAnimationFrame(renderIkPreview);
 }
 
 function closeWizard() {
   $("ikWizardFlow").hidden = true;
-  $("wizardLaunch").hidden = false;
+  document.body.classList.remove("modal-open");
 }
 
 function setWizardStep(index) {
@@ -724,12 +748,12 @@ function setWizardStep(index) {
   const step = wizardSteps[wizardStepIndex];
   $("wizardStepCount").textContent = `${wizardStepIndex + 1} / ${wizardSteps.length}`;
   $("wizardStepTitle").textContent = step.title;
-  $("wizardVisualText").textContent = step.visual;
   $("wizardBackBtn").disabled = wizardStepIndex === 0;
   $("wizardNextBtn").textContent = wizardStepIndex === wizardSteps.length - 1 ? "Done" : "Next";
   document.querySelectorAll("[data-flow-panel]").forEach((panel) => {
     panel.classList.toggle("active", panel.dataset.flowPanel === step.key);
   });
+  updateWizardVisual();
 }
 
 function stepWizard(direction) {
@@ -1012,6 +1036,13 @@ $("setupIkBtn").addEventListener("click", openWizard);
 $("wizardCloseBtn").addEventListener("click", closeWizard);
 $("wizardBackBtn").addEventListener("click", () => stepWizard(-1));
 $("wizardNextBtn").addEventListener("click", () => stepWizard(1));
+$("ikWizardFlow").addEventListener("click", (event) => {
+  if (event.target === $("ikWizardFlow")) closeWizard();
+});
+
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("ikWizardFlow").hidden) closeWizard();
+});
 
 document.querySelectorAll("[data-focus-id]").forEach((button) => {
   button.addEventListener("click", () => {
