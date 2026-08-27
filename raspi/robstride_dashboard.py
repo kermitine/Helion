@@ -134,6 +134,11 @@ def signed_direction(value: Any, default: int = 1) -> int:
     return -1 if parsed < 0 else 1
 
 
+def model_name(value: Any, default: str = DEFAULT_MODEL) -> str:
+    parsed = str(value or default).lower()
+    return parsed if parsed in PRIVATE_MODEL_LIMITS else default
+
+
 @dataclass
 class ArmIkSolution:
     base: float
@@ -208,6 +213,7 @@ class DashboardController:
             "shoulder": 0x01,
             "elbow": 0x02,
         }
+        self.arm_motor_models = {axis: self.model for axis in ARM_AXES}
         self.arm_offsets = {axis: 0.0 for axis in ARM_AXES}
         self.arm_directions = {axis: 1 for axis in ARM_AXES}
         self.arm_link_1 = 0.25
@@ -314,6 +320,13 @@ class DashboardController:
     def send_private(self, comm_type: int, extra_data: int, target_id: int, data: bytes) -> None:
         self.send(build_private_ext_id(comm_type, extra_data, target_id), data, extended=True)
 
+    def model_for_motor(self, motor_id: int) -> str:
+        motor_id &= 0xFF
+        for axis in ARM_AXES:
+            if self.arm_motor_ids.get(axis) == motor_id:
+                return self.arm_motor_models.get(axis, self.model)
+        return self.model
+
     def send_private_get_id(self, target_id: int) -> None:
         self.send_private(COMM_GET_ID, self.host_id, target_id, bytes(8))
 
@@ -399,8 +412,9 @@ class DashboardController:
                 )
                 return
             if comm_type == COMM_OPERATION_STATUS:
+                model = self.model_for_motor(source_motor)
                 p_max, v_max, t_max = PRIVATE_MODEL_LIMITS.get(
-                    self.model,
+                    model,
                     PRIVATE_MODEL_LIMITS[DEFAULT_MODEL],
                 )
                 pos_raw = (frame.data[0] << 8) | frame.data[1]
@@ -419,6 +433,7 @@ class DashboardController:
                     "fault": False,
                     "warning": False,
                     "modeState": None,
+                    "model": model,
                     "ageMs": 0,
                 }
                 return
@@ -491,11 +506,15 @@ class DashboardController:
     def wait_private_status(self, timeout_s: float, after_seq: Optional[int] = None) -> Optional[Any]:
         return self.wait_private_status_for(self.motor_id, timeout_s, after_seq)
 
-    def private_status_position_rad(self, frame: Any) -> float:
+    def private_status_position_rad(self, frame: Any, target_id: Optional[int] = None) -> float:
         if frame is None or not frame.extended or len(frame.data) < 2:
             raise ValueError("status frame did not include a motor position")
+        if target_id is None:
+            _comm_type, extra, _host = split_private_ext_id(frame.arbitration_id)
+            target_id = extra & 0xFF
+        model = self.model_for_motor(target_id)
         p_max, _v_max, _t_max = PRIVATE_MODEL_LIMITS.get(
-            self.model,
+            model,
             PRIVATE_MODEL_LIMITS[DEFAULT_MODEL],
         )
         pos_raw = (frame.data[0] << 8) | frame.data[1]
@@ -510,7 +529,7 @@ class DashboardController:
             self.send_private_disable_to(target_id, False)
             frame = self.wait_private_status_for(target_id, timeout_s, start_seq)
             if frame is not None:
-                return self.private_status_position_rad(frame), host
+                return self.private_status_position_rad(frame, target_id), host
         with self.lock:
             self.host_id = original_host
         return None
@@ -712,6 +731,7 @@ class DashboardController:
                         axis: fmt_id(self.arm_motor_ids[axis])
                         for axis in ARM_AXES
                     },
+                    "models": dict(self.arm_motor_models),
                     "link1": self.arm_link_1,
                     "link2": self.arm_link_2,
                     "elbowUp": self.arm_elbow_up,
@@ -743,6 +763,9 @@ class DashboardController:
             motor_ids = arm.get("motorIdHex")
         if not isinstance(motor_ids, dict):
             motor_ids = {}
+        models = arm.get("models")
+        if not isinstance(models, dict):
+            models = {}
         offsets = arm.get("offsets")
         if not isinstance(offsets, dict):
             offsets = {}
@@ -764,6 +787,18 @@ class DashboardController:
             "armElbowMotorId": payload.get(
                 "armElbowMotorId",
                 motor_ids.get("elbow", self.arm_motor_ids["elbow"]),
+            ),
+            "armBaseModel": payload.get(
+                "armBaseModel",
+                models.get("base", self.arm_motor_models["base"]),
+            ),
+            "armShoulderModel": payload.get(
+                "armShoulderModel",
+                models.get("shoulder", self.arm_motor_models["shoulder"]),
+            ),
+            "armElbowModel": payload.get(
+                "armElbowModel",
+                models.get("elbow", self.arm_motor_models["elbow"]),
             ),
             "armLink1": payload.get("armLink1", arm.get("link1", self.arm_link_1)),
             "armLink2": payload.get("armLink2", arm.get("link2", self.arm_link_2)),
@@ -821,6 +856,7 @@ class DashboardController:
             old_motor_id = self.motor_id
             old_host_id = self.host_id
             old_model = self.model
+            old_arm_motor_models = dict(self.arm_motor_models)
             new_serial_port = str(payload.get("serialPort") or old_serial_port)
             new_serial_baud = parse_int(payload.get("serialBaud"), old_serial_baud)
             new_motor_id = parse_int(payload.get("motorId"), old_motor_id) & 0xFF
@@ -861,6 +897,7 @@ class DashboardController:
                 new_motor_id != old_motor_id
                 or new_host_id != old_host_id
                 or new_model != old_model
+                or self.arm_motor_models != old_arm_motor_models
             )
             if bus_changed or control_changed:
                 self.velocity_configured = False
@@ -1076,6 +1113,11 @@ class DashboardController:
             "base": parse_int(payload.get("armBaseMotorId"), self.arm_motor_ids["base"]) & 0xFF,
             "shoulder": parse_int(payload.get("armShoulderMotorId"), self.arm_motor_ids["shoulder"]) & 0xFF,
             "elbow": parse_int(payload.get("armElbowMotorId"), self.arm_motor_ids["elbow"]) & 0xFF,
+        }
+        self.arm_motor_models = {
+            "base": model_name(payload.get("armBaseModel"), self.arm_motor_models["base"]),
+            "shoulder": model_name(payload.get("armShoulderModel"), self.arm_motor_models["shoulder"]),
+            "elbow": model_name(payload.get("armElbowModel"), self.arm_motor_models["elbow"]),
         }
         self.arm_offsets = {
             "base": parse_float(payload.get("armBaseOffset"), self.arm_offsets["base"]),
@@ -1463,6 +1505,7 @@ class DashboardController:
                 "arm": {
                     "motorIds": dict(self.arm_motor_ids),
                     "motorIdHex": {axis: fmt_id(self.arm_motor_ids[axis]) for axis in ARM_AXES},
+                    "models": dict(self.arm_motor_models),
                     "offsets": dict(self.arm_offsets),
                     "directions": dict(self.arm_directions),
                     "link1": self.arm_link_1,

@@ -29,6 +29,9 @@ const armControlIds = [
   "armBaseMotorIdInput",
   "armShoulderMotorIdInput",
   "armElbowMotorIdInput",
+  "armBaseModelInput",
+  "armShoulderModelInput",
+  "armElbowModelInput",
   "armLink1Input",
   "armLink2Input",
   "armElbowUpToggle",
@@ -103,6 +106,24 @@ function numberInput(id) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function selectedMotorValue(id, fallback = "") {
+  const el = $(id);
+  const value = el && typeof el.value === "string" ? el.value.trim() : "";
+  return value || fallback || "";
+}
+
+function currentArmMotorValue(axis, fallback = "") {
+  const arm = state && state.arm ? state.arm : {};
+  const ids = arm.motorIdHex || {};
+  return ids[axis] || fallback;
+}
+
+function currentArmModelValue(axis, fallback = "") {
+  const arm = state && state.arm ? state.arm : {};
+  const models = arm.models || {};
+  return models[axis] || fallback || (state ? state.model : "");
+}
+
 function commandPayload(command) {
   if (command === "move-position") {
     return {
@@ -114,9 +135,12 @@ function commandPayload(command) {
   }
   if (command === "arm-move" || command === "arm-home-zero") {
     return {
-      armBaseMotorId: $("armBaseMotorIdInput").value.trim(),
-      armShoulderMotorId: $("armShoulderMotorIdInput").value.trim(),
-      armElbowMotorId: $("armElbowMotorIdInput").value.trim(),
+      armBaseMotorId: selectedMotorValue("armBaseMotorIdInput", currentArmMotorValue("base")),
+      armShoulderMotorId: selectedMotorValue("armShoulderMotorIdInput", currentArmMotorValue("shoulder")),
+      armElbowMotorId: selectedMotorValue("armElbowMotorIdInput", currentArmMotorValue("elbow")),
+      armBaseModel: $("armBaseModelInput").value,
+      armShoulderModel: $("armShoulderModelInput").value,
+      armElbowModel: $("armElbowModelInput").value,
       armLink1: numberInput("armLink1Input"),
       armLink2: numberInput("armLink2Input"),
       armElbowUp: $("armElbowUpToggle").checked,
@@ -209,7 +233,7 @@ function collectValues() {
     exportedAt: new Date().toISOString(),
     serialPort: $("serialPortInput").value.trim(),
     serialBaud: $("serialBaudInput").value.trim(),
-    motorId: $("motorIdInput").value.trim(),
+    motorId: selectedMotorValue("motorIdInput", state ? state.motorIdHex : ""),
     hostId: $("hostIdInput").value.trim(),
     model: $("modelInput").value,
     testSpeed: numberInput("speedSlider"),
@@ -221,9 +245,14 @@ function collectValues() {
     },
     arm: {
       motorIds: {
-        base: $("armBaseMotorIdInput").value.trim(),
-        shoulder: $("armShoulderMotorIdInput").value.trim(),
-        elbow: $("armElbowMotorIdInput").value.trim(),
+        base: selectedMotorValue("armBaseMotorIdInput", currentArmMotorValue("base")),
+        shoulder: selectedMotorValue("armShoulderMotorIdInput", currentArmMotorValue("shoulder")),
+        elbow: selectedMotorValue("armElbowMotorIdInput", currentArmMotorValue("elbow")),
+      },
+      models: {
+        base: $("armBaseModelInput").value,
+        shoulder: $("armShoulderModelInput").value,
+        elbow: $("armElbowModelInput").value,
       },
       jointCount: numberInput("wizardJointCountInput") || 3,
       link1: numberInput("armLink1Input"),
@@ -255,6 +284,7 @@ function applyValuePayload(payload) {
   const position = objectValue(payload.position);
   const arm = objectValue(payload.arm);
   const motorIds = objectValue(arm.motorIds || arm.motorIdHex);
+  const models = objectValue(arm.models);
   const target = objectValue(arm.target);
   const offsets = objectValue(arm.offsets);
   const directions = objectValue(arm.directions);
@@ -298,6 +328,9 @@ function applyValuePayload(payload) {
       ? idText(firstValue(motorIds.elbow, payload.armElbowMotorId), "")
       : undefined,
   );
+  setDirtyValue("armBaseModelInput", firstValue(models.base, payload.armBaseModel));
+  setDirtyValue("armShoulderModelInput", firstValue(models.shoulder, payload.armShoulderModel));
+  setDirtyValue("armElbowModelInput", firstValue(models.elbow, payload.armElbowModel));
   setDirtyNumber("armLink1Input", firstValue(arm.link1, payload.armLink1), 3);
   setDirtyNumber("armLink2Input", firstValue(arm.link2, payload.armLink2), 3);
   if (Number(firstValue(arm.jointCount, payload.armJointCount)) === 3) {
@@ -364,7 +397,7 @@ async function applyConfig() {
   await post("/api/config", {
     serialPort: $("serialPortInput").value.trim(),
     serialBaud: $("serialBaudInput").value.trim(),
-    motorId: $("motorIdInput").value.trim(),
+    motorId: selectedMotorValue("motorIdInput", state ? state.motorIdHex : ""),
     hostId: $("hostIdInput").value.trim(),
     model: $("modelInput").value,
   });
@@ -439,6 +472,50 @@ function renderChips(id, items) {
     });
     el.appendChild(chip);
   });
+}
+
+function normalizedMotorList(items) {
+  return [...new Set((items || []).map((item) => idText(item, "")).filter(Boolean))];
+}
+
+function setMotorSelectOptions(id, motors, preferred, fallback = "") {
+  const el = $(id);
+  if (!el) return "";
+  const current = document.activeElement === el || dirtyControls.has(id) ? el.value : "";
+  const wanted = current || idText(preferred, "");
+  const selected = motors.includes(wanted) ? wanted : fallback;
+  el.innerHTML = "";
+
+  if (!motors.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "Scan motors first";
+    el.appendChild(option);
+    el.disabled = true;
+    return "";
+  }
+
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Pick detected motor";
+  el.appendChild(placeholder);
+  motors.forEach((motor) => {
+    const option = document.createElement("option");
+    option.value = motor;
+    option.textContent = motor;
+    el.appendChild(option);
+  });
+  el.disabled = false;
+  el.value = motors.includes(selected) ? selected : "";
+  return el.value;
+}
+
+function chooseDetectedMotor(motors, preferred, used) {
+  const normalized = idText(preferred, "");
+  const uniquePreferred = motors.includes(normalized) && !used.has(normalized) ? normalized : "";
+  const selected = uniquePreferred || motors.find((motor) => !used.has(motor)) || motors[0] || "";
+  if (selected) used.add(selected);
+  return selected;
 }
 
 function armInputState() {
@@ -642,9 +719,9 @@ function drawIkCanvas(preview) {
 
   const origin = project({ x: 0, y: 0, z: 0 });
   const axes = [
-    [{ x: sceneRadius * 0.45, y: 0, z: 0 }, "#d99a24", "X"],
-    [{ x: 0, y: sceneRadius * 0.45, z: 0 }, "#f6c445", "Y"],
-    [{ x: 0, y: 0, z: sceneRadius * 0.45 }, "#ffe7a3", "Z"],
+    [{ x: sceneRadius * 0.45, y: 0, z: 0 }, "#ff5d55", "X"],
+    [{ x: 0, y: sceneRadius * 0.45, z: 0 }, "#4ba3ff", "Y"],
+    [{ x: 0, y: 0, z: sceneRadius * 0.45 }, "#56d6a8", "Z"],
   ];
   axes.forEach(([axisPoint, color, label]) => {
     const end = project(axisPoint);
@@ -897,8 +974,9 @@ function updateWizardVisual(preview) {
   const arm = preview ? preview.arm : armInputState();
   if (step.key === "joints") {
     el.textContent =
-      `3 joints: base ${$("armBaseMotorIdInput").value}, ` +
-      `shoulder ${$("armShoulderMotorIdInput").value}, elbow ${$("armElbowMotorIdInput").value}`;
+      `3 joints: base ${$("armBaseMotorIdInput").value || "--"} (${$("armBaseModelInput").value}), ` +
+      `shoulder ${$("armShoulderMotorIdInput").value || "--"} (${$("armShoulderModelInput").value}), ` +
+      `elbow ${$("armElbowMotorIdInput").value || "--"} (${$("armElbowModelInput").value})`;
   } else if (step.key === "lengths") {
     el.textContent = `Reach ${(arm.link1 + arm.link2).toFixed(3)} m from links ${arm.link1.toFixed(3)} + ${arm.link2.toFixed(3)} m`;
   } else if (step.key === "home") {
@@ -1101,11 +1179,12 @@ function syncReach() {
 }
 
 function render(state) {
+  const detectedMotors = normalizedMotorList(state.discoveredPrivate);
   setControlValue("serialPortInput", state.serialPort || "auto");
   setControlValue("serialBaudInput", state.serialBaud || 921600);
-  setControlValue("motorIdInput", state.motorIdHex);
   setControlValue("hostIdInput", state.hostIdHex);
   setControlValue("modelInput", state.model);
+  setMotorSelectOptions("motorIdInput", detectedMotors, state.motorIdHex, detectedMotors[0] || "");
 
   const status = $("connectionStatus");
   status.textContent = state.connected ? "Online" : "Offline";
@@ -1129,12 +1208,20 @@ function render(state) {
 
   const arm = state.arm || {};
   const armIds = arm.motorIdHex || {};
+  const armModels = arm.models || {};
   const armOffsets = arm.offsets || {};
   const armDirections = arm.directions || {};
   const armTarget = arm.target || {};
-  setControlValue("armBaseMotorIdInput", armIds.base || "0x7F");
-  setControlValue("armShoulderMotorIdInput", armIds.shoulder || "0x01");
-  setControlValue("armElbowMotorIdInput", armIds.elbow || "0x02");
+  const usedArmMotors = new Set();
+  const baseMotor = chooseDetectedMotor(detectedMotors, armIds.base, usedArmMotors);
+  const shoulderMotor = chooseDetectedMotor(detectedMotors, armIds.shoulder, usedArmMotors);
+  const elbowMotor = chooseDetectedMotor(detectedMotors, armIds.elbow, usedArmMotors);
+  setMotorSelectOptions("armBaseMotorIdInput", detectedMotors, armIds.base, baseMotor);
+  setMotorSelectOptions("armShoulderMotorIdInput", detectedMotors, armIds.shoulder, shoulderMotor);
+  setMotorSelectOptions("armElbowMotorIdInput", detectedMotors, armIds.elbow, elbowMotor);
+  setControlValue("armBaseModelInput", armModels.base || state.model || "rs-05");
+  setControlValue("armShoulderModelInput", armModels.shoulder || state.model || "rs-05");
+  setControlValue("armElbowModelInput", armModels.elbow || state.model || "rs-05");
   setControlValue("armLink1Input", Number(arm.link1 || 0.25).toFixed(3));
   setControlValue("armLink2Input", Number(arm.link2 || 0.25).toFixed(3));
   setControlChecked("armElbowUpToggle", arm.elbowUp);

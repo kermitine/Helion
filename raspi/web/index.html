@@ -23,16 +23,10 @@
             <input id="serialPortInput" value="auto" autocomplete="off">
           </label>
           <label>
-            <span>Serial Baud</span>
-            <input id="serialBaudInput" value="921600" inputmode="numeric" autocomplete="off">
-          </label>
-          <label>
             <span>Motor ID</span>
-            <input id="motorIdInput" value="0x7F" autocomplete="off">
-          </label>
-          <label>
-            <span>Host ID</span>
-            <input id="hostIdInput" value="0xFD" autocomplete="off">
+            <select id="motorIdInput">
+              <option value="">Scan motors first</option>
+            </select>
           </label>
           <label>
             <span>Model</span>
@@ -48,6 +42,8 @@
             </select>
           </label>
         </div>
+        <input id="serialBaudInput" type="hidden" value="921600">
+        <input id="hostIdInput" type="hidden" value="0xFD">
 
         <div class="button-row">
           <button data-command="reopen">Reconnect</button>
@@ -208,15 +204,60 @@
                       </label>
                       <label>
                         <span>Base ID</span>
-                        <input id="armBaseMotorIdInput" value="0x7F" autocomplete="off">
+                        <select id="armBaseMotorIdInput">
+                          <option value="">Scan motors first</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>Base Model</span>
+                        <select id="armBaseModelInput">
+                          <option value="rs-05">RS-05</option>
+                          <option value="rs-00">RS-00</option>
+                          <option value="rs-01">RS-01</option>
+                          <option value="rs-02">RS-02</option>
+                          <option value="rs-03">RS-03</option>
+                          <option value="rs-04">RS-04</option>
+                          <option value="rs-06">RS-06</option>
+                          <option value="el-05">EL-05</option>
+                        </select>
                       </label>
                       <label>
                         <span>Shoulder ID</span>
-                        <input id="armShoulderMotorIdInput" value="0x01" autocomplete="off">
+                        <select id="armShoulderMotorIdInput">
+                          <option value="">Scan motors first</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>Shoulder Model</span>
+                        <select id="armShoulderModelInput">
+                          <option value="rs-05">RS-05</option>
+                          <option value="rs-00">RS-00</option>
+                          <option value="rs-01">RS-01</option>
+                          <option value="rs-02">RS-02</option>
+                          <option value="rs-03">RS-03</option>
+                          <option value="rs-04">RS-04</option>
+                          <option value="rs-06">RS-06</option>
+                          <option value="el-05">EL-05</option>
+                        </select>
                       </label>
                       <label>
                         <span>Elbow ID</span>
-                        <input id="armElbowMotorIdInput" value="0x02" autocomplete="off">
+                        <select id="armElbowMotorIdInput">
+                          <option value="">Scan motors first</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>Elbow Model</span>
+                        <select id="armElbowModelInput">
+                          <option value="rs-05">RS-05</option>
+                          <option value="rs-00">RS-00</option>
+                          <option value="rs-01">RS-01</option>
+                          <option value="rs-02">RS-02</option>
+                          <option value="rs-03">RS-03</option>
+                          <option value="rs-04">RS-04</option>
+                          <option value="rs-06">RS-06</option>
+                          <option value="el-05">EL-05</option>
+                        </select>
                       </label>
                     </div>
                   </div>
