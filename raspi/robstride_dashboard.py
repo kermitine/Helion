@@ -8,7 +8,6 @@ import json
 import math
 import mimetypes
 import os
-import subprocess
 import threading
 import time
 from collections import deque
@@ -83,10 +82,14 @@ COMMAND_TIMEOUT_S = 0.6
 ARM_AXES = ("base", "shoulder", "elbow")
 
 ROOT_DIR = Path(__file__).resolve().parent
-REPO_DIR = ROOT_DIR.parent
 WEB_DIR = ROOT_DIR / "web"
-UPDATE_LOG_PATH = ROOT_DIR / "update.log"
-APP_VERSION = "2026.08.27.7"
+VALUES_PATH = Path(
+    os.environ.get(
+        "HELION_VALUES_PATH",
+        Path.home() / ".config" / "helion" / "dashboard-values.json",
+    )
+)
+APP_VERSION = "2026.08.27.8"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -232,12 +235,8 @@ class DashboardController:
         self.last_private_fault: Optional[Dict[str, Any]] = None
         self.discovered_private: List[int] = []
         self.busy = False
-        self.update_lock = threading.Lock()
-        self.update_process: Optional[subprocess.Popen[bytes]] = None
-        self.update_started_at = 0.0
-        self.update_last_exit: Optional[int] = None
-        self.repo_cache: Dict[str, Any] = {}
-        self.repo_cache_at = 0.0
+
+        self.load_saved_values()
 
         if open_can:
             self.open_bus()
@@ -256,105 +255,6 @@ class DashboardController:
     def clear_logs(self) -> None:
         with self.lock:
             self.logs.clear()
-
-    def repo_info(self) -> Dict[str, Any]:
-        now = time.monotonic()
-        with self.update_lock:
-            process = self.update_process
-            running = process is not None and process.poll() is None
-            last_exit = self.update_last_exit
-            started_at = self.update_started_at
-            cached = dict(self.repo_cache) if now - self.repo_cache_at < 2.0 else None
-
-        if cached is None:
-            def git(*args: str) -> str:
-                try:
-                    result = subprocess.run(
-                        ["git", "-C", str(REPO_DIR), *args],
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        timeout=2.0,
-                    )
-                except (OSError, subprocess.TimeoutExpired):
-                    return ""
-                return result.stdout.strip() if result.returncode == 0 else ""
-
-            status_lines = [line for line in git("status", "--short").splitlines() if line.strip()]
-            cached = {
-                "remote": git("remote", "get-url", "origin"),
-                "branch": git("symbolic-ref", "--quiet", "--short", "HEAD"),
-                "commit": git("rev-parse", "--short", "HEAD"),
-                "dirtyCount": len(status_lines),
-                "dirty": len(status_lines) > 0,
-            }
-            with self.update_lock:
-                self.repo_cache = dict(cached)
-                self.repo_cache_at = now
-
-        return {
-            **cached,
-            "updateRunning": running,
-            "updateStartedAt": started_at,
-            "updateLastExit": last_exit,
-            "updateLog": self.update_log_tail(),
-        }
-
-    def update_log_tail(self, max_bytes: int = 12000) -> str:
-        try:
-            with UPDATE_LOG_PATH.open("rb") as handle:
-                handle.seek(0, os.SEEK_END)
-                size = handle.tell()
-                handle.seek(max(0, size - max_bytes), os.SEEK_SET)
-                return handle.read().decode("utf-8", errors="replace")
-        except OSError:
-            return ""
-
-    def start_repo_update(self, remote: str = "origin", branch: str = "") -> Dict[str, Any]:
-        with self.update_lock:
-            if self.update_process is not None and self.update_process.poll() is None:
-                return {"ok": False, "message": "An update is already running."}
-
-            command = ["bash", str(ROOT_DIR / "update_from_github.sh"), remote]
-            if branch:
-                command.append(branch)
-
-            UPDATE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with UPDATE_LOG_PATH.open("ab", buffering=0) as log_file:
-                log_file.write(
-                    f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Dashboard update requested\n".encode(
-                        "utf-8"
-                    )
-                )
-                try:
-                    process = subprocess.Popen(
-                        command,
-                        cwd=str(REPO_DIR),
-                        stdin=subprocess.DEVNULL,
-                        stdout=log_file,
-                        stderr=subprocess.STDOUT,
-                    )
-                except OSError as exc:
-                    log_file.write(f"failed to start update: {exc}\n".encode("utf-8"))
-                    self.update_process = None
-                    self.update_last_exit = -1
-                    return {"ok": False, "message": str(exc)}
-
-            self.update_process = process
-            self.update_started_at = time.time()
-            self.update_last_exit = None
-
-        self.log(f"GitHub update started pid={process.pid}")
-        watcher = threading.Thread(target=self.watch_update_process, args=(process,), daemon=True)
-        watcher.start()
-        return {"ok": True, "pid": process.pid}
-
-    def watch_update_process(self, process: subprocess.Popen[bytes]) -> None:
-        exit_code = process.wait()
-        with self.update_lock:
-            if self.update_process is process:
-                self.update_last_exit = exit_code
-        self.log(f"GitHub update exited with code {exit_code}")
 
     def bus_label(self) -> str:
         return self.bus.label()
@@ -760,6 +660,237 @@ class DashboardController:
                     f"motor={fmt_id(self.motor_id)} host={fmt_id(self.host_id)}"
                 )
         return {"ok": True}
+
+    def values_snapshot(self) -> Dict[str, Any]:
+        with self.lock:
+            serial_port = getattr(self.bus, "serial_port", DEFAULT_SERIAL_PORT)
+            serial_baud = getattr(self.bus, "serial_baud", DEFAULT_SERIAL_BAUD)
+            return {
+                "schemaVersion": 1,
+                "appVersion": APP_VERSION,
+                "serialPort": serial_port,
+                "serialBaud": serial_baud,
+                "motorId": fmt_id(self.motor_id),
+                "hostId": fmt_id(self.host_id),
+                "model": self.model,
+                "testSpeed": self.test_speed,
+                "position": {
+                    "target": self.position_target,
+                    "velocityLimit": self.position_velocity_limit,
+                    "acceleration": self.position_acceleration,
+                    "positionKp": self.position_kp,
+                },
+                "arm": {
+                    "motorIds": {
+                        axis: fmt_id(self.arm_motor_ids[axis])
+                        for axis in ARM_AXES
+                    },
+                    "link1": self.arm_link_1,
+                    "link2": self.arm_link_2,
+                    "elbowUp": self.arm_elbow_up,
+                    "target": dict(self.arm_target),
+                    "velocityLimit": self.arm_velocity_limit,
+                    "acceleration": self.arm_acceleration,
+                    "positionKp": self.arm_position_kp,
+                    "offsets": dict(self.arm_offsets),
+                    "directions": dict(self.arm_directions),
+                },
+            }
+
+    def save_values(self) -> None:
+        payload = self.values_snapshot()
+        VALUES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = VALUES_PATH.with_name(f"{VALUES_PATH.name}.tmp")
+        temp_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temp_path.replace(VALUES_PATH)
+
+    def arm_payload_from_values(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        arm = payload.get("arm")
+        if not isinstance(arm, dict):
+            arm = {}
+        motor_ids = arm.get("motorIds")
+        if not isinstance(motor_ids, dict):
+            motor_ids = arm.get("motorIdHex")
+        if not isinstance(motor_ids, dict):
+            motor_ids = {}
+        offsets = arm.get("offsets")
+        if not isinstance(offsets, dict):
+            offsets = {}
+        directions = arm.get("directions")
+        if not isinstance(directions, dict):
+            directions = {}
+        target = arm.get("target")
+        if not isinstance(target, dict):
+            target = {}
+        return {
+            "armBaseMotorId": payload.get(
+                "armBaseMotorId",
+                motor_ids.get("base", self.arm_motor_ids["base"]),
+            ),
+            "armShoulderMotorId": payload.get(
+                "armShoulderMotorId",
+                motor_ids.get("shoulder", self.arm_motor_ids["shoulder"]),
+            ),
+            "armElbowMotorId": payload.get(
+                "armElbowMotorId",
+                motor_ids.get("elbow", self.arm_motor_ids["elbow"]),
+            ),
+            "armLink1": payload.get("armLink1", arm.get("link1", self.arm_link_1)),
+            "armLink2": payload.get("armLink2", arm.get("link2", self.arm_link_2)),
+            "armElbowUp": payload.get("armElbowUp", arm.get("elbowUp", self.arm_elbow_up)),
+            "armTargetX": payload.get("armTargetX", target.get("x", self.arm_target["x"])),
+            "armTargetY": payload.get("armTargetY", target.get("y", self.arm_target["y"])),
+            "armTargetZ": payload.get("armTargetZ", target.get("z", self.arm_target["z"])),
+            "armVelocityLimit": payload.get(
+                "armVelocityLimit",
+                arm.get("velocityLimit", self.arm_velocity_limit),
+            ),
+            "armAcceleration": payload.get(
+                "armAcceleration",
+                arm.get("acceleration", self.arm_acceleration),
+            ),
+            "armPositionKp": payload.get(
+                "armPositionKp",
+                arm.get("positionKp", self.arm_position_kp),
+            ),
+            "armBaseOffset": payload.get(
+                "armBaseOffset",
+                offsets.get("base", self.arm_offsets["base"]),
+            ),
+            "armBaseDirection": payload.get(
+                "armBaseDirection",
+                directions.get("base", self.arm_directions["base"]),
+            ),
+            "armShoulderOffset": payload.get(
+                "armShoulderOffset",
+                offsets.get("shoulder", self.arm_offsets["shoulder"]),
+            ),
+            "armShoulderDirection": payload.get(
+                "armShoulderDirection",
+                directions.get("shoulder", self.arm_directions["shoulder"]),
+            ),
+            "armElbowOffset": payload.get(
+                "armElbowOffset",
+                offsets.get("elbow", self.arm_offsets["elbow"]),
+            ),
+            "armElbowDirection": payload.get(
+                "armElbowDirection",
+                directions.get("elbow", self.arm_directions["elbow"]),
+            ),
+        }
+
+    def apply_values_payload(self, payload: Dict[str, Any]) -> Tuple[bool, str, int, bool]:
+        if not isinstance(payload, dict):
+            raise ValueError("values payload must be a JSON object")
+        position = payload.get("position")
+        if not isinstance(position, dict):
+            position = {}
+        with self.lock:
+            old_serial_port = getattr(self.bus, "serial_port", DEFAULT_SERIAL_PORT)
+            old_serial_baud = getattr(self.bus, "serial_baud", DEFAULT_SERIAL_BAUD)
+            old_motor_id = self.motor_id
+            old_host_id = self.host_id
+            old_model = self.model
+            new_serial_port = str(payload.get("serialPort") or old_serial_port)
+            new_serial_baud = parse_int(payload.get("serialBaud"), old_serial_baud)
+            new_motor_id = parse_int(payload.get("motorId"), old_motor_id) & 0xFF
+            new_host_id = parse_int(payload.get("hostId"), old_host_id) & 0xFF
+            new_model = str(payload.get("model") or old_model).lower()
+            self.motor_id = new_motor_id
+            self.host_id = new_host_id
+            self.model = new_model
+            self.test_speed = max(
+                0.0,
+                min(3.0, abs(parse_float(payload.get("testSpeed"), self.test_speed))),
+            )
+            self.position_target = parse_float(
+                position.get("target", payload.get("positionTarget")),
+                self.position_target,
+            )
+            self.position_velocity_limit = positive_float(
+                position.get("velocityLimit", payload.get("positionVelocityLimit")),
+                self.position_velocity_limit,
+                20.0,
+            )
+            self.position_acceleration = positive_float(
+                position.get("acceleration", payload.get("positionAcceleration")),
+                self.position_acceleration,
+                200.0,
+            )
+            self.position_kp = nonnegative_float(
+                position.get("positionKp", payload.get("positionKp")),
+                self.position_kp,
+                200.0,
+            )
+            self.apply_arm_payload(self.arm_payload_from_values(payload))
+            bus_changed = (
+                new_serial_port != old_serial_port
+                or new_serial_baud != old_serial_baud
+            )
+            control_changed = (
+                new_motor_id != old_motor_id
+                or new_host_id != old_host_id
+                or new_model != old_model
+            )
+            if bus_changed or control_changed:
+                self.velocity_configured = False
+                self.position_configured = False
+                self.arm_position_configured = False
+                self.oscillating = False
+                self.jog_active = False
+                self.commanded_speed = 0.0
+        return bus_changed, new_serial_port, new_serial_baud, control_changed
+
+    def apply_values(self, payload: Dict[str, Any], persist: bool = True) -> Dict[str, Any]:
+        try:
+            with self.command_lock:
+                bus_changed, serial_port, serial_baud, control_changed = self.apply_values_payload(payload)
+                reopened: Optional[bool] = None
+                if bus_changed:
+                    reopened = self.reopen_bus(
+                        serial_port=serial_port,
+                        serial_baud=serial_baud,
+                    )
+                if persist:
+                    self.save_values()
+        except (OSError, TypeError, ValueError) as exc:
+            self.log(f"Values save failed: {exc}")
+            return {"ok": False, "message": str(exc)}
+
+        if persist:
+            self.log(f"Values saved to {VALUES_PATH}")
+        elif bus_changed or control_changed:
+            self.log("Dashboard values applied")
+        result: Dict[str, Any] = {
+            "ok": True,
+            "path": str(VALUES_PATH),
+        }
+        if reopened is not None:
+            result["reopened"] = reopened
+            if not reopened:
+                result["message"] = self.open_error
+        return result
+
+    def load_saved_values(self) -> None:
+        try:
+            payload = json.loads(VALUES_PATH.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, json.JSONDecodeError) as exc:
+            self.log(f"Saved values skipped: {exc}")
+            return
+        try:
+            bus_changed, serial_port, serial_baud, _control_changed = self.apply_values_payload(payload)
+            if bus_changed:
+                with self.bus_lock:
+                    self.bus.close()
+                    self.bus = create_bus(serial_port=serial_port, serial_baud=serial_baud)
+            self.log(f"Loaded saved values from {VALUES_PATH}")
+        except (TypeError, ValueError) as exc:
+            self.log(f"Saved values skipped: {exc}")
 
     def configure_velocity(self) -> bool:
         return self.configure_private_velocity()
@@ -1238,6 +1369,7 @@ class DashboardController:
             bus_stats = self.bus.stats()
             snapshot = {
                 "appVersion": APP_VERSION,
+                "valuesPath": str(VALUES_PATH),
                 "connected": self.connected,
                 "openError": self.open_error,
                 "transport": transport,
@@ -1285,7 +1417,6 @@ class DashboardController:
                 "logs": list(self.logs),
                 "canStats": bus_stats,
             }
-        snapshot["repo"] = self.repo_info()
         return snapshot
 
 
@@ -1303,8 +1434,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             logs = self.controller.snapshot()["logs"]
             self.send_json({"after": after, "logs": logs})
             return
-        if parsed.path == "/api/update/log":
-            self.send_json({"log": self.controller.update_log_tail()})
+        if parsed.path == "/api/values":
+            self.send_json(self.controller.values_snapshot())
             return
         self.serve_static(parsed.path)
 
@@ -1314,14 +1445,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/config":
             self.send_json(self.controller.configure(payload))
             return
+        if parsed.path == "/api/values":
+            self.send_json(self.controller.apply_values(payload))
+            return
         if parsed.path == "/api/logs/clear":
             self.controller.clear_logs()
             self.send_json({"ok": True})
-            return
-        if parsed.path == "/api/update":
-            remote = str(payload.get("remote") or "origin")
-            branch = str(payload.get("branch") or "")
-            self.send_json(self.controller.start_repo_update(remote, branch))
             return
         if parsed.path == "/api/command":
             command = str(payload.get("command") or "")

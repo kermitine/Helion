@@ -86,12 +86,10 @@ Raspberry Pi backend code, increment `APP_VERSION` in
 `raspi/robstride_dashboard.py` before committing so the Pi page makes it obvious
 which update is running.
 
-Use SSH for the initial install and for service-level changes such as port,
-Linux permissions, or systemd edits. After that, normal dashboard/backend/UI code
-updates can be applied from the web UI with **Update From GitHub**, as long as
-the new code has already been committed and pushed to GitHub.
+Use SSH for the initial install, service-level changes such as port, Linux
+permissions or systemd edits, and code updates.
 
-Normal terminal update flow:
+Normal update flow:
 
 ```bash
 # On your dev machine
@@ -103,20 +101,6 @@ git push
 helion-update
 ```
 
-Normal web update flow:
-
-```bash
-# On your dev machine
-git add .
-git commit -m "Update RobStride dashboard"
-git push
-```
-
-Then open the dashboard and press **Update From GitHub** in the Repository
-panel. The dashboard will run the pull/check/restart sequence in the
-background. The page may disconnect for a few seconds while the service
-restarts.
-
 To apply a service setting change, such as switching an existing install to port
 `80`, pull the latest repo and rerun the installer:
 
@@ -127,7 +111,7 @@ bash raspi/install_dashboard.sh
 ```
 
 Keep the dashboard on a trusted local network only. It can move the motor and
-pull executable code from the configured Git remote.
+change saved motor setup values.
 
 Useful service checks:
 
@@ -153,6 +137,16 @@ The dashboard Arm IK panel solves a three-axis base/shoulder/elbow arm in the
 browser as you edit the values. The canvas uses the same link lengths, target,
 elbow-up setting, joint offsets, and motor directions that will be sent by
 **Move IK**.
+
+The setup wizard can split total reach into link lengths, nudge or preset the
+target point, flip joint directions, and set offsets from the currently solved
+pose with **Zero Here**. The **Files** step can save the current dashboard values
+on the Pi, download them as JSON, or upload a JSON values file. Saved values are
+loaded on dashboard startup from:
+
+```text
+~/.config/helion/dashboard-values.json
+```
 
 For each IK move, the backend computes:
 

@@ -249,6 +249,88 @@ select {
   min-width: 0;
 }
 
+.ik-wizard {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #121a1a;
+  padding: 12px;
+  margin-bottom: 14px;
+}
+
+.wizard-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.wizard-head span {
+  color: var(--accent-2);
+  font-size: 0.78rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.wizard-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.wizard-tabs button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 0;
+  background: #111919;
+  font-size: 0.82rem;
+}
+
+.wizard-tabs button.active {
+  background: #163429;
+  color: var(--accent);
+}
+
+.wizard-panel {
+  display: none;
+  padding-top: 10px;
+}
+
+.wizard-panel.active {
+  display: grid;
+  gap: 10px;
+}
+
+.wizard-grid,
+.preset-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.wizard-grid {
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  align-items: end;
+}
+
+.preset-grid {
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+}
+
+.wizard-nudges {
+  grid-template-columns: minmax(92px, 1.35fr) repeat(6, minmax(48px, 0.7fr));
+}
+
+.calibration-grid {
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+}
+
+.file-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .arm-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
@@ -403,8 +485,7 @@ button.jog-right {
 }
 
 .metric span,
-.bus-grid span,
-.repo-grid span {
+.bus-grid span {
   color: var(--muted);
   font-size: 0.8rem;
 }
@@ -422,15 +503,10 @@ button.jog-right {
   margin-top: 12px;
 }
 
-.bus-grid,
-.repo-grid {
+.bus-grid {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 8px 14px;
-}
-
-.repo-grid {
-  margin-bottom: 10px;
 }
 
 pre {
@@ -447,17 +523,6 @@ pre {
   min-height: 74px;
   padding: 10px;
   white-space: pre-wrap;
-}
-
-#repoRemote {
-  min-height: 54px;
-  padding: 10px;
-  white-space: pre-wrap;
-}
-
-.update-row {
-  grid-template-columns: 1fr 1fr;
-  margin-top: 10px;
 }
 
 .list-pair {
@@ -531,6 +596,9 @@ pre {
   .button-row,
   .arm-actions,
   .arm-grid,
+  .wizard-grid,
+  .preset-grid,
+  .file-grid,
   .toggle-row,
   .motion-grid,
   .jog-grid,
@@ -546,5 +614,14 @@ pre {
 
   .ik-readout {
     grid-template-columns: 1fr;
+  }
+
+  .wizard-tabs,
+  .wizard-nudges {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .wizard-nudges label {
+    grid-column: 1 / -1;
   }
 }

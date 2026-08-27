@@ -123,6 +123,70 @@
 
           <div class="arm-layout">
             <div class="arm-editor">
+              <div class="ik-wizard">
+                <div class="wizard-head">
+                  <h3>Setup Wizard</h3>
+                  <span id="valuesState">Not saved</span>
+                </div>
+                <div class="wizard-tabs" role="tablist" aria-label="IK setup">
+                  <button type="button" class="active" data-wizard-step="geometry">Geometry</button>
+                  <button type="button" data-wizard-step="target">Target</button>
+                  <button type="button" data-wizard-step="calibration">Calibration</button>
+                  <button type="button" data-wizard-step="files">Files</button>
+                </div>
+
+                <div class="wizard-panel active" data-wizard-panel="geometry">
+                  <div class="wizard-grid">
+                    <label>
+                      <span>Total Reach</span>
+                      <input id="wizardTotalReachInput" type="number" min="0.002" max="20" step="0.01" value="0.50" inputmode="decimal">
+                    </label>
+                    <button id="wizardSplitLinksBtn" type="button" class="soft">Split Links</button>
+                    <button id="wizardSyncReachBtn" type="button">Use Current</button>
+                  </div>
+                </div>
+
+                <div class="wizard-panel" data-wizard-panel="target">
+                  <div class="preset-grid">
+                    <button type="button" data-target-preset="home">Home</button>
+                    <button type="button" data-target-preset="forward">Forward</button>
+                    <button type="button" data-target-preset="left">Left</button>
+                    <button type="button" data-target-preset="high">High</button>
+                  </div>
+                  <div class="wizard-grid wizard-nudges">
+                    <label>
+                      <span>Step</span>
+                      <input id="wizardNudgeStepInput" type="number" min="0.001" max="1" step="0.005" value="0.010" inputmode="decimal">
+                    </label>
+                    <button type="button" data-nudge-axis="x" data-nudge-dir="-1">X-</button>
+                    <button type="button" data-nudge-axis="x" data-nudge-dir="1">X+</button>
+                    <button type="button" data-nudge-axis="y" data-nudge-dir="-1">Y-</button>
+                    <button type="button" data-nudge-axis="y" data-nudge-dir="1">Y+</button>
+                    <button type="button" data-nudge-axis="z" data-nudge-dir="-1">Z-</button>
+                    <button type="button" data-nudge-axis="z" data-nudge-dir="1">Z+</button>
+                  </div>
+                </div>
+
+                <div class="wizard-panel" data-wizard-panel="calibration">
+                  <div class="preset-grid calibration-grid">
+                    <button id="wizardZeroOffsetsBtn" type="button">Zero Offsets</button>
+                    <button id="wizardZeroHereBtn" type="button" class="soft">Zero Here</button>
+                    <button type="button" data-invert-axis="base">Invert Base</button>
+                    <button type="button" data-invert-axis="shoulder">Invert Shoulder</button>
+                    <button type="button" data-invert-axis="elbow">Invert Elbow</button>
+                  </div>
+                </div>
+
+                <div class="wizard-panel" data-wizard-panel="files">
+                  <div class="preset-grid file-grid">
+                    <button id="saveValuesBtn" type="button" class="soft">Save Values</button>
+                    <button id="downloadValuesBtn" type="button">Download JSON</button>
+                    <button id="uploadValuesBtn" type="button">Upload JSON</button>
+                    <input id="uploadValuesInput" type="file" accept="application/json,.json" hidden>
+                  </div>
+                </div>
+              </div>
+
               <h3>Motors</h3>
               <div class="arm-grid">
                 <label>
@@ -295,23 +359,6 @@
             <span id="selectedMotor">0x7F</span>
           </div>
           <div id="privateList" class="chip-list"></div>
-        </div>
-
-        <div class="panel repo-panel">
-          <div class="panel-head">
-            <h2>Repository</h2>
-            <span id="updateState">Ready</span>
-          </div>
-          <div class="repo-grid">
-            <span>Branch</span><strong id="repoBranch">--</strong>
-            <span>Commit</span><strong id="repoCommit">--</strong>
-            <span>Changes</span><strong id="repoDirty">--</strong>
-          </div>
-          <pre id="repoRemote">origin</pre>
-          <div class="button-row update-row">
-            <button id="updateRepoBtn" class="soft">Update From GitHub</button>
-            <button id="showUpdateLogBtn">Update Log</button>
-          </div>
         </div>
 
         <div class="panel log-panel">

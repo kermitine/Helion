@@ -7,7 +7,6 @@ let ikViewPitch = 0.58;
 let ikDrag = null;
 
 const commandButtons = [...document.querySelectorAll("[data-command]")];
-const updateButtons = [$("updateRepoBtn"), $("showUpdateLogBtn")].filter(Boolean);
 const configControlIds = [
   "serialPortInput",
   "serialBaudInput",
@@ -42,6 +41,14 @@ const armControlIds = [
   "armElbowDirectionInput",
 ];
 const speedControlIds = ["speedSlider"];
+const valueButtons = [$("saveValuesBtn"), $("downloadValuesBtn"), $("uploadValuesBtn")].filter(Boolean);
+const allValueControlIds = [
+  ...configControlIds,
+  ...positionControlIds,
+  ...armControlIds,
+  ...speedControlIds,
+];
+const allValueControlIdSet = new Set(allValueControlIds);
 const dirtyControls = new Set();
 
 function fixed(value, digits, suffix) {
@@ -65,6 +72,7 @@ function setControlChecked(id, checked) {
 
 function markDirty(id) {
   dirtyControls.add(id);
+  if (allValueControlIdSet.has(id)) setValuesState("Unsaved");
 }
 
 function clearDirty(ids) {
@@ -127,6 +135,215 @@ async function post(path, payload) {
   return response.json();
 }
 
+function hasValue(value) {
+  return value !== undefined && value !== null && value !== "";
+}
+
+function objectValue(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function firstValue(...values) {
+  for (const value of values) {
+    if (hasValue(value)) return value;
+  }
+  return undefined;
+}
+
+function idText(value, fallback) {
+  if (!hasValue(value)) return fallback;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return `0x${(value & 0xff).toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return String(value);
+}
+
+function directionText(value) {
+  if (!hasValue(value)) return undefined;
+  return String(Number(value) < 0 ? -1 : 1);
+}
+
+function setValuesState(text, title = "") {
+  const el = $("valuesState");
+  if (!el) return;
+  el.textContent = text;
+  if (title) el.title = title;
+}
+
+function setDirtyValue(id, value) {
+  const el = $(id);
+  if (!el || !hasValue(value)) return;
+  el.value = String(value);
+  markDirty(id);
+}
+
+function setDirtyNumber(id, value, digits) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return;
+  setDirtyValue(id, numeric.toFixed(digits));
+}
+
+function setDirtyChecked(id, checked) {
+  const el = $(id);
+  if (!el || checked === undefined || checked === null) return;
+  el.checked = Boolean(checked);
+  markDirty(id);
+}
+
+function collectValues() {
+  return {
+    schemaVersion: 1,
+    appVersion: state && state.appVersion ? state.appVersion : undefined,
+    exportedAt: new Date().toISOString(),
+    serialPort: $("serialPortInput").value.trim(),
+    serialBaud: $("serialBaudInput").value.trim(),
+    motorId: $("motorIdInput").value.trim(),
+    hostId: $("hostIdInput").value.trim(),
+    model: $("modelInput").value,
+    testSpeed: numberInput("speedSlider"),
+    position: {
+      target: numberInput("positionTargetInput"),
+      velocityLimit: numberInput("positionVelocityInput"),
+      acceleration: numberInput("positionAccelerationInput"),
+      positionKp: numberInput("positionKpInput"),
+    },
+    arm: {
+      motorIds: {
+        base: $("armBaseMotorIdInput").value.trim(),
+        shoulder: $("armShoulderMotorIdInput").value.trim(),
+        elbow: $("armElbowMotorIdInput").value.trim(),
+      },
+      link1: numberInput("armLink1Input"),
+      link2: numberInput("armLink2Input"),
+      elbowUp: $("armElbowUpToggle").checked,
+      target: {
+        x: numberInput("armTargetXInput"),
+        y: numberInput("armTargetYInput"),
+        z: numberInput("armTargetZInput"),
+      },
+      velocityLimit: numberInput("armVelocityInput"),
+      acceleration: numberInput("armAccelerationInput"),
+      positionKp: numberInput("armKpInput"),
+      offsets: {
+        base: numberInput("armBaseOffsetInput"),
+        shoulder: numberInput("armShoulderOffsetInput"),
+        elbow: numberInput("armElbowOffsetInput"),
+      },
+      directions: {
+        base: $("armBaseDirectionInput").value,
+        shoulder: $("armShoulderDirectionInput").value,
+        elbow: $("armElbowDirectionInput").value,
+      },
+    },
+  };
+}
+
+function applyValuePayload(payload) {
+  const position = objectValue(payload.position);
+  const arm = objectValue(payload.arm);
+  const motorIds = objectValue(arm.motorIds || arm.motorIdHex);
+  const target = objectValue(arm.target);
+  const offsets = objectValue(arm.offsets);
+  const directions = objectValue(arm.directions);
+
+  setDirtyValue("serialPortInput", payload.serialPort);
+  setDirtyValue("serialBaudInput", payload.serialBaud);
+  setDirtyValue("motorIdInput", hasValue(payload.motorId) ? idText(payload.motorId, "") : undefined);
+  setDirtyValue("hostIdInput", hasValue(payload.hostId) ? idText(payload.hostId, "") : undefined);
+  setDirtyValue("modelInput", payload.model);
+  setDirtyNumber("speedSlider", payload.testSpeed, 2);
+  $("speedValue").textContent = `${Number($("speedSlider").value).toFixed(2)} rad/s`;
+
+  setDirtyNumber("positionTargetInput", firstValue(position.target, payload.positionTarget), 3);
+  setDirtyNumber(
+    "positionVelocityInput",
+    firstValue(position.velocityLimit, payload.positionVelocityLimit),
+    3,
+  );
+  setDirtyNumber(
+    "positionAccelerationInput",
+    firstValue(position.acceleration, payload.positionAcceleration),
+    2,
+  );
+  setDirtyNumber("positionKpInput", firstValue(position.positionKp, payload.positionKp), 2);
+
+  setDirtyValue(
+    "armBaseMotorIdInput",
+    hasValue(firstValue(motorIds.base, payload.armBaseMotorId))
+      ? idText(firstValue(motorIds.base, payload.armBaseMotorId), "")
+      : undefined,
+  );
+  setDirtyValue(
+    "armShoulderMotorIdInput",
+    hasValue(firstValue(motorIds.shoulder, payload.armShoulderMotorId))
+      ? idText(firstValue(motorIds.shoulder, payload.armShoulderMotorId), "")
+      : undefined,
+  );
+  setDirtyValue(
+    "armElbowMotorIdInput",
+    hasValue(firstValue(motorIds.elbow, payload.armElbowMotorId))
+      ? idText(firstValue(motorIds.elbow, payload.armElbowMotorId), "")
+      : undefined,
+  );
+  setDirtyNumber("armLink1Input", firstValue(arm.link1, payload.armLink1), 3);
+  setDirtyNumber("armLink2Input", firstValue(arm.link2, payload.armLink2), 3);
+  setDirtyChecked("armElbowUpToggle", firstValue(arm.elbowUp, payload.armElbowUp));
+  setDirtyNumber("armTargetXInput", firstValue(target.x, payload.armTargetX), 3);
+  setDirtyNumber("armTargetYInput", firstValue(target.y, payload.armTargetY), 3);
+  setDirtyNumber("armTargetZInput", firstValue(target.z, payload.armTargetZ), 3);
+  setDirtyNumber("armVelocityInput", firstValue(arm.velocityLimit, payload.armVelocityLimit), 3);
+  setDirtyNumber("armAccelerationInput", firstValue(arm.acceleration, payload.armAcceleration), 2);
+  setDirtyNumber("armKpInput", firstValue(arm.positionKp, payload.armPositionKp), 2);
+  setDirtyNumber("armBaseOffsetInput", firstValue(offsets.base, payload.armBaseOffset), 3);
+  setDirtyValue("armBaseDirectionInput", directionText(firstValue(directions.base, payload.armBaseDirection)));
+  setDirtyNumber("armShoulderOffsetInput", firstValue(offsets.shoulder, payload.armShoulderOffset), 3);
+  setDirtyValue(
+    "armShoulderDirectionInput",
+    directionText(firstValue(directions.shoulder, payload.armShoulderDirection)),
+  );
+  setDirtyNumber("armElbowOffsetInput", firstValue(offsets.elbow, payload.armElbowOffset), 3);
+  setDirtyValue("armElbowDirectionInput", directionText(firstValue(directions.elbow, payload.armElbowDirection)));
+  renderIkPreview();
+}
+
+async function saveValues(successText = "Values saved") {
+  if (busy) return;
+  busy = true;
+  renderBusy(true);
+  try {
+    const result = await post("/api/values", collectValues());
+    if (result.ok === false) {
+      appendLocalLog(`Values failed: ${result.message || "save rejected"}`);
+      setValuesState("Save failed");
+    } else {
+      clearDirty(allValueControlIds);
+      setValuesState("Saved", result.path || "");
+      appendLocalLog(`${successText}${result.path ? `: ${result.path}` : ""}`);
+      await refresh();
+    }
+  } catch (error) {
+    appendLocalLog(`UI error: ${error.message}`);
+    setValuesState("Save failed");
+  } finally {
+    busy = false;
+    renderBusy(false);
+  }
+}
+
+function downloadValues() {
+  const data = JSON.stringify(collectValues(), null, 2);
+  const url = URL.createObjectURL(new Blob([`${data}\n`], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "helion-dashboard-values.json";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  setValuesState("Downloaded");
+  appendLocalLog("Values downloaded");
+}
+
 async function applyConfig() {
   await post("/api/config", {
     serialPort: $("serialPortInput").value.trim(),
@@ -165,9 +382,8 @@ function renderBusy(isBusy) {
     const command = button.dataset.command;
     button.disabled = isBusy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault"].includes(command);
   });
-  const updateRunning = Boolean(state && state.repo && state.repo.updateRunning);
-  updateButtons.forEach((button) => {
-    button.disabled = isBusy || updateRunning;
+  valueButtons.forEach((button) => {
+    button.disabled = isBusy;
   });
 }
 
@@ -464,6 +680,93 @@ function renderIkPreview() {
   $("armConfiguredState").classList.toggle("fault", !preview.ok);
   renderArmSolution(preview);
   drawIkCanvas(preview);
+  const reachInput = $("wizardTotalReachInput");
+  if (reachInput && document.activeElement !== reachInput) {
+    reachInput.value = (preview.arm.link1 + preview.arm.link2).toFixed(3);
+  }
+}
+
+function setWizardStep(step) {
+  document.querySelectorAll("[data-wizard-step]").forEach((button) => {
+    const active = button.dataset.wizardStep === step;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  document.querySelectorAll("[data-wizard-panel]").forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.wizardPanel === step);
+  });
+}
+
+function setArmTarget(x, y, z) {
+  setDirtyNumber("armTargetXInput", x, 3);
+  setDirtyNumber("armTargetYInput", y, 3);
+  setDirtyNumber("armTargetZInput", z, 3);
+  renderIkPreview();
+}
+
+function applyTargetPreset(name) {
+  const arm = armInputState();
+  const reach = Math.max(arm.link1 + arm.link2, 0.002);
+  const safe = reach * 0.68;
+  if (name === "forward") {
+    setArmTarget(safe * 0.95, 0, reach * 0.16);
+  } else if (name === "left") {
+    setArmTarget(safe * 0.68, safe * 0.46, reach * 0.18);
+  } else if (name === "high") {
+    setArmTarget(safe * 0.48, 0, reach * 0.56);
+  } else {
+    setArmTarget(safe * 0.82, 0, reach * 0.22);
+  }
+}
+
+function nudgeTarget(axis, direction) {
+  const id = `armTarget${axis.toUpperCase()}Input`;
+  const step = Math.max(0.001, Math.abs(numberInput("wizardNudgeStepInput") || 0.01));
+  setDirtyNumber(id, numberInput(id) + direction * step, 3);
+  renderIkPreview();
+}
+
+function zeroOffsets() {
+  ["Base", "Shoulder", "Elbow"].forEach((axis) => {
+    setDirtyNumber(`arm${axis}OffsetInput`, 0, 3);
+  });
+  renderIkPreview();
+}
+
+function zeroHere() {
+  const preview = armPreview();
+  if (!preview.ok) {
+    appendLocalLog(`Zero Here skipped: ${preview.message}`);
+    return;
+  }
+  setDirtyNumber("armBaseOffsetInput", -preview.arm.directions.base * preview.joints.base, 3);
+  setDirtyNumber("armShoulderOffsetInput", -preview.arm.directions.shoulder * preview.joints.shoulder, 3);
+  setDirtyNumber("armElbowOffsetInput", -preview.arm.directions.elbow * preview.joints.elbow, 3);
+  renderIkPreview();
+}
+
+function invertAxis(axis) {
+  const map = {
+    base: "armBaseDirectionInput",
+    shoulder: "armShoulderDirectionInput",
+    elbow: "armElbowDirectionInput",
+  };
+  const id = map[axis];
+  if (!id) return;
+  setDirtyValue(id, Number($(id).value) < 0 ? "1" : "-1");
+  renderIkPreview();
+}
+
+function splitLinks() {
+  const total = Math.max(0.002, Math.abs(numberInput("wizardTotalReachInput") || 0.5));
+  setDirtyNumber("armLink1Input", total / 2, 3);
+  setDirtyNumber("armLink2Input", total / 2, 3);
+  renderIkPreview();
+}
+
+function syncReach() {
+  const arm = armInputState();
+  $("wizardTotalReachInput").value = (arm.link1 + arm.link2).toFixed(3);
 }
 
 function render(state) {
@@ -569,33 +872,13 @@ function render(state) {
     ? `${frame.kind} ${frame.idHex} dlc=${frame.dlc}\n${frame.dataHex}`
     : "No CAN frame yet";
 
-  const repo = state.repo || {};
-  $("repoBranch").textContent = repo.branch || "--";
-  $("repoCommit").textContent = repo.commit || "--";
-  $("repoDirty").textContent =
-    typeof repo.dirtyCount === "number" ? `${repo.dirtyCount} file(s)` : "--";
-  $("repoDirty").classList.toggle("warn", Boolean(repo.dirty));
-  $("repoRemote").textContent = repo.remote || "No git remote found";
-  if (repo.updateRunning) {
-    $("updateState").textContent = "Updating";
-  } else if (repo.updateLastExit === 0) {
-    $("updateState").textContent = "Updated";
-  } else if (typeof repo.updateLastExit === "number") {
-    $("updateState").textContent = "Update failed";
-  } else {
-    $("updateState").textContent = "Ready";
-  }
-  $("updateState").classList.toggle("warn", Boolean(repo.updateRunning));
-  $("updateState").classList.toggle(
-    "fault",
-    typeof repo.updateLastExit === "number" && repo.updateLastExit !== 0
-  );
-  $("updateRepoBtn").disabled = Boolean(repo.updateRunning || busy);
-
   renderChips("privateList", state.discoveredPrivate);
 
   $("logOutput").textContent = (state.logs || []).join("\n");
   $("logOutput").scrollTop = $("logOutput").scrollHeight;
+  if (state.valuesPath && $("valuesState").textContent === "Not saved") {
+    setValuesState("Ready", state.valuesPath);
+  }
 }
 
 async function refresh() {
@@ -653,31 +936,53 @@ $("clearLogBtn").addEventListener("click", () => {
   });
 });
 
-$("updateRepoBtn").addEventListener("click", async () => {
-  if (!confirm("Pull the current GitHub branch and restart the dashboard?")) return;
-  busy = true;
-  renderBusy(true);
+$("saveValuesBtn").addEventListener("click", () => {
+  saveValues();
+});
+
+$("downloadValuesBtn").addEventListener("click", downloadValues);
+
+$("uploadValuesBtn").addEventListener("click", () => {
+  $("uploadValuesInput").click();
+});
+
+$("uploadValuesInput").addEventListener("change", async (event) => {
+  const [file] = event.target.files || [];
+  if (!file) return;
   try {
-    const result = await post("/api/update", { remote: "origin" });
-    appendLocalLog(result.ok ? `Update started pid=${result.pid}` : `Update failed: ${result.message}`);
-    setTimeout(refresh, 1000);
+    const payload = JSON.parse(await file.text());
+    applyValuePayload(payload);
+    await saveValues("Values uploaded and saved");
   } catch (error) {
     appendLocalLog(`UI error: ${error.message}`);
+    setValuesState("Upload failed");
   } finally {
-    busy = false;
-    renderBusy(false);
+    event.target.value = "";
   }
 });
 
-$("showUpdateLogBtn").addEventListener("click", async () => {
-  try {
-    const result = await fetch("/api/update/log", { cache: "no-store" }).then((r) => r.json());
-    $("logOutput").textContent = result.log || "No update log yet";
-    $("logOutput").scrollTop = $("logOutput").scrollHeight;
-  } catch (error) {
-    appendLocalLog(`UI error: ${error.message}`);
-  }
+document.querySelectorAll("[data-wizard-step]").forEach((button) => {
+  button.addEventListener("click", () => setWizardStep(button.dataset.wizardStep));
 });
+
+document.querySelectorAll("[data-target-preset]").forEach((button) => {
+  button.addEventListener("click", () => applyTargetPreset(button.dataset.targetPreset));
+});
+
+document.querySelectorAll("[data-nudge-axis]").forEach((button) => {
+  button.addEventListener("click", () => {
+    nudgeTarget(button.dataset.nudgeAxis, Number(button.dataset.nudgeDir || 1));
+  });
+});
+
+document.querySelectorAll("[data-invert-axis]").forEach((button) => {
+  button.addEventListener("click", () => invertAxis(button.dataset.invertAxis));
+});
+
+$("wizardSplitLinksBtn").addEventListener("click", splitLinks);
+$("wizardSyncReachBtn").addEventListener("click", syncReach);
+$("wizardZeroOffsetsBtn").addEventListener("click", zeroOffsets);
+$("wizardZeroHereBtn").addEventListener("click", zeroHere);
 
 const ikCanvas = $("armIkCanvas");
 ikCanvas.addEventListener("pointerdown", (event) => {
