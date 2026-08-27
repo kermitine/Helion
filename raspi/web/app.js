@@ -55,8 +55,7 @@ const dirtyControls = new Set();
 const wizardSteps = [
   { key: "joints", title: "Joints", visual: "3-axis base + shoulder + elbow" },
   { key: "lengths", title: "Lengths", visual: "Set link lengths and total reach" },
-  { key: "home", title: "Home", visual: "Set the zero pose and motor directions" },
-  { key: "target", title: "Target", visual: "Pick or nudge the live target point" },
+  { key: "home", title: "Home", visual: "Straight ahead, level shoulder, straight elbow" },
   { key: "save", title: "Save", visual: "Save, download, or upload the setup" },
 ];
 
@@ -722,10 +721,7 @@ function updateWizardVisual(preview) {
     el.textContent = `Reach ${(arm.link1 + arm.link2).toFixed(3)} m from links ${arm.link1.toFixed(3)} + ${arm.link2.toFixed(3)} m`;
   } else if (step.key === "home") {
     el.textContent =
-      `Offsets base ${arm.offsets.base.toFixed(3)}, shoulder ${arm.offsets.shoulder.toFixed(3)}, elbow ${arm.offsets.elbow.toFixed(3)} rad`;
-  } else if (step.key === "target") {
-    el.textContent =
-      `Target x ${arm.target.x.toFixed(3)}, y ${arm.target.y.toFixed(3)}, z ${arm.target.z.toFixed(3)} m`;
+      `Home will save offsets from the current motor positions: base ${arm.offsets.base.toFixed(3)}, shoulder ${arm.offsets.shoulder.toFixed(3)}, elbow ${arm.offsets.elbow.toFixed(3)} rad`;
   } else {
     el.textContent = state && state.valuesPath ? `Values path ${state.valuesPath}` : step.visual;
   }
@@ -1044,15 +1040,6 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("ikWizardFlow").hidden) closeWizard();
 });
 
-document.querySelectorAll("[data-focus-id]").forEach((button) => {
-  button.addEventListener("click", () => {
-    const target = $(button.dataset.focusId);
-    if (!target) return;
-    target.scrollIntoView({ behavior: "smooth", block: "center" });
-    target.focus();
-  });
-});
-
 document.querySelectorAll("[data-target-preset]").forEach((button) => {
   button.addEventListener("click", () => applyTargetPreset(button.dataset.targetPreset));
 });
@@ -1063,14 +1050,8 @@ document.querySelectorAll("[data-nudge-axis]").forEach((button) => {
   });
 });
 
-document.querySelectorAll("[data-invert-axis]").forEach((button) => {
-  button.addEventListener("click", () => invertAxis(button.dataset.invertAxis));
-});
-
 $("wizardSplitLinksBtn").addEventListener("click", splitLinks);
 $("wizardSyncReachBtn").addEventListener("click", syncReach);
-$("wizardZeroOffsetsBtn").addEventListener("click", zeroOffsets);
-$("wizardZeroHereBtn").addEventListener("click", zeroHere);
 
 const ikCanvas = $("armIkCanvas");
 ikCanvas.addEventListener("pointerdown", (event) => {

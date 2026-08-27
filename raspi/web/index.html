@@ -123,13 +123,52 @@
 
           <div class="arm-summary">
             <button id="setupIkBtn" type="button" class="soft">Setup IK</button>
+            <div class="main-target-control">
+              <div class="arm-grid">
+                <label>
+                  <span>X</span>
+                  <input id="armTargetXInput" type="number" step="0.01" value="0.25" inputmode="decimal">
+                </label>
+                <label>
+                  <span>Y</span>
+                  <input id="armTargetYInput" type="number" step="0.01" value="0.00" inputmode="decimal">
+                </label>
+                <label>
+                  <span>Z</span>
+                  <input id="armTargetZInput" type="number" step="0.01" value="0.10" inputmode="decimal">
+                </label>
+                <label>
+                  <span>Step</span>
+                  <input id="wizardNudgeStepInput" type="number" min="0.001" max="1" step="0.005" value="0.010" inputmode="decimal">
+                </label>
+              </div>
+              <div class="preset-grid">
+                <button type="button" data-target-preset="home">Home</button>
+                <button type="button" data-target-preset="forward">Forward</button>
+                <button type="button" data-target-preset="left">Left</button>
+                <button type="button" data-target-preset="high">High</button>
+              </div>
+              <div class="wizard-grid wizard-nudges">
+                <button type="button" data-nudge-axis="x" data-nudge-dir="-1">X-</button>
+                <button type="button" data-nudge-axis="x" data-nudge-dir="1">X+</button>
+                <button type="button" data-nudge-axis="y" data-nudge-dir="-1">Y-</button>
+                <button type="button" data-nudge-axis="y" data-nudge-dir="1">Y+</button>
+                <button type="button" data-nudge-axis="z" data-nudge-dir="-1">Z-</button>
+                <button type="button" data-nudge-axis="z" data-nudge-dir="1">Z+</button>
+              </div>
+              <div class="button-row arm-actions">
+                <button class="soft" data-command="arm-move">Move IK</button>
+                <button class="danger" data-command="arm-stop">Stop Arm</button>
+                <button class="danger" data-command="arm-clear-fault">Clear Arm Faults</button>
+              </div>
+            </div>
             <pre id="armSolution">--</pre>
           </div>
 
           <div class="wizard-overlay" id="ikWizardFlow" role="dialog" aria-modal="true" aria-labelledby="wizardStepTitle" hidden>
             <div class="wizard-window">
               <div class="wizard-progress">
-                <span id="wizardStepCount">1 / 5</span>
+                <span id="wizardStepCount">1 / 4</span>
                 <strong id="wizardStepTitle">Joints</strong>
                 <button id="wizardCloseBtn" type="button" class="ghost">Close</button>
               </div>
@@ -201,83 +240,39 @@
                   </div>
 
                   <div class="wizard-panel" data-flow-panel="home">
-                    <div class="arm-grid arm-grid-wide">
-                      <label>
-                        <span>Base Offset</span>
-                        <input id="armBaseOffsetInput" type="number" step="0.01" value="0.00" inputmode="decimal">
-                      </label>
-                      <label>
-                        <span>Base Dir</span>
-                        <select id="armBaseDirectionInput">
-                          <option value="1">+1</option>
-                          <option value="-1">-1</option>
-                        </select>
-                      </label>
-                      <label>
-                        <span>Shoulder Offset</span>
-                        <input id="armShoulderOffsetInput" type="number" step="0.01" value="0.00" inputmode="decimal">
-                      </label>
-                      <label>
-                        <span>Shoulder Dir</span>
-                        <select id="armShoulderDirectionInput">
-                          <option value="1">+1</option>
-                          <option value="-1">-1</option>
-                        </select>
-                      </label>
-                      <label>
-                        <span>Elbow Offset</span>
-                        <input id="armElbowOffsetInput" type="number" step="0.01" value="0.00" inputmode="decimal">
-                      </label>
-                      <label>
-                        <span>Elbow Dir</span>
-                        <select id="armElbowDirectionInput">
-                          <option value="1">+1</option>
-                          <option value="-1">-1</option>
-                        </select>
-                      </label>
+                    <div class="home-guide">
+                      <div class="home-pose-visual" aria-hidden="true">
+                        <span class="home-base"></span>
+                        <span class="home-link home-link-a"></span>
+                        <span class="home-joint home-joint-a"></span>
+                        <span class="home-link home-link-b"></span>
+                        <span class="home-joint home-joint-b"></span>
+                      </div>
+                      <ol>
+                        <li>Turn motor torque off or support the arm so it cannot fall.</li>
+                        <li>Manually place the base straight ahead, shoulder level, and elbow straight.</li>
+                        <li>Hold the arm still, then press Home Zero once.</li>
+                      </ol>
                     </div>
-                    <div class="preset-grid calibration-grid">
+                    <div class="home-button-row">
                       <button class="soft" data-command="arm-home-zero">Home Zero</button>
-                      <button id="wizardZeroOffsetsBtn" type="button">Zero Offsets</button>
-                      <button id="wizardZeroHereBtn" type="button">Zero Here</button>
-                      <button type="button" data-invert-axis="base">Invert Base</button>
-                      <button type="button" data-invert-axis="shoulder">Invert Shoulder</button>
-                      <button type="button" data-invert-axis="elbow">Invert Elbow</button>
                     </div>
-                  </div>
-
-                  <div class="wizard-panel" data-flow-panel="target">
-                    <div class="arm-grid">
-                      <label>
-                        <span>X</span>
-                        <input id="armTargetXInput" type="number" step="0.01" value="0.25" inputmode="decimal">
-                      </label>
-                      <label>
-                        <span>Y</span>
-                        <input id="armTargetYInput" type="number" step="0.01" value="0.00" inputmode="decimal">
-                      </label>
-                      <label>
-                        <span>Z</span>
-                        <input id="armTargetZInput" type="number" step="0.01" value="0.10" inputmode="decimal">
-                      </label>
-                      <label>
-                        <span>Step</span>
-                        <input id="wizardNudgeStepInput" type="number" min="0.001" max="1" step="0.005" value="0.010" inputmode="decimal">
-                      </label>
-                    </div>
-                    <div class="preset-grid">
-                      <button type="button" data-target-preset="home">Home</button>
-                      <button type="button" data-target-preset="forward">Forward</button>
-                      <button type="button" data-target-preset="left">Left</button>
-                      <button type="button" data-target-preset="high">High</button>
-                    </div>
-                    <div class="wizard-grid wizard-nudges">
-                      <button type="button" data-nudge-axis="x" data-nudge-dir="-1">X-</button>
-                      <button type="button" data-nudge-axis="x" data-nudge-dir="1">X+</button>
-                      <button type="button" data-nudge-axis="y" data-nudge-dir="-1">Y-</button>
-                      <button type="button" data-nudge-axis="y" data-nudge-dir="1">Y+</button>
-                      <button type="button" data-nudge-axis="z" data-nudge-dir="-1">Z-</button>
-                      <button type="button" data-nudge-axis="z" data-nudge-dir="1">Z+</button>
+                    <div class="hidden-calibration-fields">
+                      <input id="armBaseOffsetInput" type="number" step="0.01" value="0.00" inputmode="decimal">
+                      <select id="armBaseDirectionInput">
+                        <option value="1">+1</option>
+                        <option value="-1">-1</option>
+                      </select>
+                      <input id="armShoulderOffsetInput" type="number" step="0.01" value="0.00" inputmode="decimal">
+                      <select id="armShoulderDirectionInput">
+                        <option value="1">+1</option>
+                        <option value="-1">-1</option>
+                      </select>
+                      <input id="armElbowOffsetInput" type="number" step="0.01" value="0.00" inputmode="decimal">
+                      <select id="armElbowDirectionInput">
+                        <option value="1">+1</option>
+                        <option value="-1">-1</option>
+                      </select>
                     </div>
                   </div>
 
@@ -295,11 +290,6 @@
                         <span>Position Kp</span>
                         <input id="armKpInput" type="number" min="0" max="200" step="0.5" value="5.0" inputmode="decimal">
                       </label>
-                    </div>
-                    <div class="button-row arm-actions">
-                      <button class="soft" data-command="arm-move">Move IK</button>
-                      <button class="danger" data-command="arm-stop">Stop Arm</button>
-                      <button class="danger" data-command="arm-clear-fault">Clear Arm Faults</button>
                     </div>
                     <div class="preset-grid file-grid">
                       <button id="saveValuesBtn" type="button" class="soft">Save Values</button>
