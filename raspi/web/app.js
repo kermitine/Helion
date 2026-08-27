@@ -5,8 +5,10 @@ let busy = false;
 let ikViewYaw = -0.72;
 let ikViewPitch = 0.58;
 let ikDrag = null;
-let targetPadMode = "xy";
-let targetPadDrag = null;
+let targetViewYaw = -0.74;
+let targetViewPitch = 0.62;
+let targetEditorDrag = null;
+let targetGizmoHitZones = [];
 let wizardStepIndex = 0;
 
 const commandButtons = [...document.querySelectorAll("[data-command]")];
@@ -711,39 +713,38 @@ function drawIkCanvas(preview) {
   }
 }
 
-function targetPlaneCorners(target, radius) {
-  const size = radius * 0.72;
-  if (targetPadMode === "xz") {
-    return [
-      { x: -size, y: target.y, z: -size },
-      { x: size, y: target.y, z: -size },
-      { x: size, y: target.y, z: size },
-      { x: -size, y: target.y, z: size },
-    ];
-  }
-  if (targetPadMode === "yz") {
-    return [
-      { x: target.x, y: -size, z: -size },
-      { x: target.x, y: size, z: -size },
-      { x: target.x, y: size, z: size },
-      { x: target.x, y: -size, z: size },
-    ];
-  }
-  return [
-    { x: -size, y: -size, z: target.z },
-    { x: size, y: -size, z: target.z },
-    { x: size, y: size, z: target.z },
-    { x: -size, y: size, z: target.z },
-  ];
+function drawGizmoArrow(ctx, start, end, color, label) {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const length = Math.max(1, Math.hypot(dx, dy));
+  const ux = dx / length;
+  const uy = dy / length;
+  const head = 12;
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 4;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(start.x, start.y);
+  ctx.lineTo(end.x, end.y);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(end.x, end.y);
+  ctx.lineTo(end.x - ux * head - uy * head * 0.45, end.y - uy * head + ux * head * 0.45);
+  ctx.lineTo(end.x - ux * head + uy * head * 0.45, end.y - uy * head - ux * head * 0.45);
+  ctx.closePath();
+  ctx.fill();
+  ctx.font = "13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  ctx.fillText(label, end.x + ux * 8, end.y + uy * 8);
 }
 
-function drawTargetPad(preview) {
-  const canvas = $("targetControlCanvas");
+function drawTargetScene(preview, canvasId, options = {}) {
+  const canvas = $(canvasId);
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
   const rect = canvas.getBoundingClientRect();
   const width = Math.max(320, rect.width || canvas.width);
-  const height = Math.max(190, rect.height || canvas.height);
+  const height = Math.max(options.compact ? 170 : 260, rect.height || canvas.height);
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.floor(width * dpr);
   canvas.height = Math.floor(height * dpr);
@@ -756,10 +757,10 @@ function drawTargetPad(preview) {
     Math.hypot(target.x, target.y, target.z),
     0.2
   );
-  const scale = Math.min(width / (sceneRadius * 2.85), height / (sceneRadius * 2.35));
+  const scale = Math.min(width / (sceneRadius * (options.compact ? 3.0 : 2.75)), height / (sceneRadius * 2.35));
   const centerX = width * 0.5;
-  const centerY = height * 0.7;
-  const project = (point) => projectPoint(point, scale, centerX, centerY, -0.74, 0.62);
+  const centerY = height * (options.compact ? 0.72 : 0.68);
+  const project = (point) => projectPoint(point, scale, centerX, centerY, targetViewYaw, targetViewPitch);
 
   const gradient = ctx.createLinearGradient(0, 0, width, height);
   gradient.addColorStop(0, "#0f1717");
@@ -782,16 +783,6 @@ function drawTargetPad(preview) {
     ], project);
     ctx.stroke();
   }
-
-  const plane = targetPlaneCorners(target, sceneRadius);
-  ctx.beginPath();
-  drawProjectedPath(ctx, plane, project);
-  ctx.closePath();
-  ctx.fillStyle = "rgba(114, 183, 255, 0.10)";
-  ctx.strokeStyle = "rgba(114, 183, 255, 0.55)";
-  ctx.lineWidth = 2;
-  ctx.fill();
-  ctx.stroke();
 
   const origin = project({ x: 0, y: 0, z: 0 });
   [
@@ -855,9 +846,33 @@ function drawTargetPad(preview) {
   ctx.lineWidth = 3;
   ctx.stroke();
 
+  if (options.gizmo) {
+    const gizmoLength = sceneRadius * 0.34;
+    const xEnd = project({ x: target.x + gizmoLength, y: target.y, z: target.z });
+    const yEnd = project({ x: target.x, y: target.y + gizmoLength, z: target.z });
+    const zEnd = project({ x: target.x, y: target.y, z: target.z + gizmoLength });
+    drawGizmoArrow(ctx, targetTop, xEnd, "#ff7d73", "X");
+    drawGizmoArrow(ctx, targetTop, yEnd, "#72b7ff", "Y");
+    drawGizmoArrow(ctx, targetTop, zEnd, "#56d6a8", "Z");
+    targetGizmoHitZones = [
+      { axis: "x", start: targetTop, end: xEnd, scale, length: gizmoLength },
+      { axis: "y", start: targetTop, end: yEnd, scale, length: gizmoLength },
+      { axis: "z", start: targetTop, end: zEnd, scale, length: gizmoLength },
+      { axis: "target", start: targetTop, end: targetTop, scale, length: gizmoLength },
+    ];
+  }
+
   ctx.fillStyle = "#cddbd7";
   ctx.font = "13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
-  ctx.fillText(`${targetPadMode.toUpperCase()} drag plane`, 14, 22);
+  ctx.fillText(options.compact ? "Click Edit Target for transform controls" : "Drag X / Y / Z handles. Drag empty space to rotate.", 14, 22);
+}
+
+function drawTargetPad(preview) {
+  drawTargetScene(preview, "targetControlCanvas", { compact: true });
+}
+
+function drawTargetEditor(preview) {
+  drawTargetScene(preview, "targetEditorCanvas", { gizmo: true });
 }
 
 function renderIkPreview() {
@@ -866,6 +881,8 @@ function renderIkPreview() {
   renderArmSolution(preview);
   drawIkCanvas(preview);
   drawTargetPad(preview);
+  drawTargetEditor(preview);
+  renderTargetEditorInputs(preview);
   updateWizardVisual(preview);
   const reachInput = $("wizardTotalReachInput");
   if (reachInput && document.activeElement !== reachInput) {
@@ -932,6 +949,36 @@ function setArmTarget(x, y, z) {
   renderIkPreview();
 }
 
+function syncTargetEditorInputs() {
+  const x = numberInput("targetEditorXInput");
+  const y = numberInput("targetEditorYInput");
+  const z = numberInput("targetEditorZInput");
+  setArmTarget(x, y, z);
+}
+
+function renderTargetEditorInputs(preview) {
+  const target = preview.arm.target;
+  const inputMap = [
+    ["targetEditorXInput", target.x],
+    ["targetEditorYInput", target.y],
+    ["targetEditorZInput", target.z],
+  ];
+  inputMap.forEach(([id, value]) => {
+    const el = $(id);
+    if (el && document.activeElement !== el) el.value = value.toFixed(3);
+  });
+  const readouts = [
+    ["targetReadoutX", `${target.x.toFixed(3)} m`],
+    ["targetReadoutY", `${target.y.toFixed(3)} m`],
+    ["targetReadoutZ", `${target.z.toFixed(3)} m`],
+    ["targetReadoutReach", `${preview.joints.reach.toFixed(3)} m`],
+  ];
+  readouts.forEach(([id, value]) => {
+    const el = $(id);
+    if (el) el.textContent = value;
+  });
+}
+
 function applyTargetPreset(name) {
   const arm = armInputState();
   const reach = Math.max(arm.link1 + arm.link2, 0.002);
@@ -954,38 +1001,60 @@ function nudgeTarget(axis, direction) {
   renderIkPreview();
 }
 
-function setTargetPadMode(mode) {
-  targetPadMode = ["xy", "xz", "yz"].includes(mode) ? mode : "xy";
-  document.querySelectorAll("[data-target-pad-mode]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.targetPadMode === targetPadMode);
-  });
-  renderIkPreview();
+function openTargetEditor() {
+  $("targetEditorFlow").hidden = false;
+  document.body.classList.add("modal-open");
+  requestAnimationFrame(renderIkPreview);
 }
 
-function setTargetFromPadDrag(event) {
-  if (!targetPadDrag || event.pointerId !== targetPadDrag.id) return;
-  const width = Math.max(1, targetPadDrag.width);
-  const height = Math.max(1, targetPadDrag.height);
-  const scale = (targetPadDrag.radius * 2.1) / Math.min(width, height);
-  const dx = (event.clientX - targetPadDrag.x) * scale;
-  const dy = (event.clientY - targetPadDrag.y) * scale;
-  const next = { ...targetPadDrag.target };
+function closeTargetEditor() {
+  $("targetEditorFlow").hidden = true;
+  document.body.classList.remove("modal-open");
+  targetEditorDrag = null;
+}
 
-  if (targetPadMode === "xz") {
-    next.x += dx;
-    next.z -= dy;
-  } else if (targetPadMode === "yz") {
-    next.y += dx;
-    next.z -= dy;
-  } else {
-    next.x += dx;
-    next.y -= dy;
+function distanceToSegment(point, start, end) {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (!lengthSq) return Math.hypot(point.x - start.x, point.y - start.y);
+  const t = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSq));
+  return Math.hypot(point.x - (start.x + dx * t), point.y - (start.y + dy * t));
+}
+
+function pickTargetGizmo(point) {
+  const center = targetGizmoHitZones.find((zone) => zone.axis === "target");
+  if (center && Math.hypot(point.x - center.start.x, point.y - center.start.y) <= 16) return center;
+  return targetGizmoHitZones
+    .filter((zone) => zone.axis !== "target")
+    .find((zone) => distanceToSegment(point, zone.start, zone.end) <= 14);
+}
+
+function moveTargetOnAxis(event) {
+  if (!targetEditorDrag) return;
+  if (targetEditorDrag.mode === "orbit") {
+    targetViewYaw = targetEditorDrag.yaw + (event.clientX - targetEditorDrag.x) * 0.01;
+    targetViewPitch = Math.max(0.2, Math.min(1.25, targetEditorDrag.pitch + (event.clientY - targetEditorDrag.y) * 0.008));
+    renderIkPreview();
+    return;
   }
 
-  setDirtyNumber("armTargetXInput", next.x, 3);
-  setDirtyNumber("armTargetYInput", next.y, 3);
-  setDirtyNumber("armTargetZInput", next.z, 3);
-  renderIkPreview();
+  const dx = event.clientX - targetEditorDrag.x;
+  const dy = event.clientY - targetEditorDrag.y;
+  const axis = targetEditorDrag.zone.axis;
+  const screenX = targetEditorDrag.zone.end.x - targetEditorDrag.zone.start.x;
+  const screenY = targetEditorDrag.zone.end.y - targetEditorDrag.zone.start.y;
+  const screenLength = Math.max(1, Math.hypot(screenX, screenY));
+  const direction = (dx * screenX + dy * screenY) / screenLength;
+  const meters = (direction / Math.max(1, targetEditorDrag.zone.scale)) * 1.35;
+  const next = { ...targetEditorDrag.target };
+  if (axis === "target") {
+    next.x += dx / Math.max(1, targetEditorDrag.zone.scale);
+    next.z -= dy / Math.max(1, targetEditorDrag.zone.scale);
+  } else {
+    next[axis] += meters;
+  }
+  setArmTarget(next.x, next.y, next.z);
 }
 
 function zeroOffsets() {
@@ -1235,8 +1304,13 @@ $("ikWizardFlow").addEventListener("click", (event) => {
   if (event.target === $("ikWizardFlow")) closeWizard();
 });
 
+$("targetEditorFlow").addEventListener("click", (event) => {
+  if (event.target === $("targetEditorFlow")) closeTargetEditor();
+});
+
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("ikWizardFlow").hidden) closeWizard();
+  if (event.key === "Escape" && !$("targetEditorFlow").hidden) closeTargetEditor();
 });
 
 document.querySelectorAll("[data-target-preset]").forEach((button) => {
@@ -1249,43 +1323,60 @@ document.querySelectorAll("[data-nudge-axis]").forEach((button) => {
   });
 });
 
-document.querySelectorAll("[data-target-pad-mode]").forEach((button) => {
-  button.addEventListener("click", () => setTargetPadMode(button.dataset.targetPadMode));
-});
-
 $("wizardSplitLinksBtn").addEventListener("click", splitLinks);
 $("wizardSyncReachBtn").addEventListener("click", syncReach);
 
 const targetCanvas = $("targetControlCanvas");
-targetCanvas.addEventListener("pointerdown", (event) => {
-  const preview = armPreview();
-  const rect = targetCanvas.getBoundingClientRect();
-  targetPadDrag = {
-    id: event.pointerId,
-    x: event.clientX,
-    y: event.clientY,
-    width: rect.width || targetCanvas.width,
-    height: rect.height || targetCanvas.height,
-    radius: Math.max(
-      preview.arm.link1 + preview.arm.link2,
-      Math.hypot(preview.arm.target.x, preview.arm.target.y, preview.arm.target.z),
-      0.2,
-    ),
-    target: { ...preview.arm.target },
-  };
-  targetCanvas.classList.add("dragging");
-  targetCanvas.setPointerCapture(event.pointerId);
+targetCanvas.addEventListener("click", openTargetEditor);
+$("editTargetBtn").addEventListener("click", openTargetEditor);
+$("targetEditorCloseBtn").addEventListener("click", closeTargetEditor);
+$("targetEditorApplyBtn").addEventListener("click", closeTargetEditor);
+$("targetEditorHomeBtn").addEventListener("click", () => applyTargetPreset("home"));
+["targetEditorXInput", "targetEditorYInput", "targetEditorZInput"].forEach((id) => {
+  const el = $(id);
+  el.addEventListener("input", syncTargetEditorInputs);
+  el.addEventListener("change", syncTargetEditorInputs);
 });
 
-targetCanvas.addEventListener("pointermove", setTargetFromPadDrag);
+const targetEditorCanvas = $("targetEditorCanvas");
+targetEditorCanvas.addEventListener("pointerdown", (event) => {
+  const preview = armPreview();
+  const rect = targetEditorCanvas.getBoundingClientRect();
+  const point = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  const zone = pickTargetGizmo(point);
+  targetEditorDrag = zone
+    ? {
+        id: event.pointerId,
+        mode: "axis",
+        zone,
+        x: event.clientX,
+        y: event.clientY,
+        target: { ...preview.arm.target },
+      }
+    : {
+        id: event.pointerId,
+        mode: "orbit",
+        x: event.clientX,
+        y: event.clientY,
+        yaw: targetViewYaw,
+        pitch: targetViewPitch,
+      };
+  targetEditorCanvas.classList.add("dragging");
+  targetEditorCanvas.setPointerCapture(event.pointerId);
+});
 
-function endTargetPadDrag() {
-  targetPadDrag = null;
-  targetCanvas.classList.remove("dragging");
+targetEditorCanvas.addEventListener("pointermove", (event) => {
+  if (!targetEditorDrag || event.pointerId !== targetEditorDrag.id) return;
+  moveTargetOnAxis(event);
+});
+
+function endTargetEditorDrag() {
+  targetEditorDrag = null;
+  targetEditorCanvas.classList.remove("dragging");
 }
 
-targetCanvas.addEventListener("pointerup", endTargetPadDrag);
-targetCanvas.addEventListener("pointercancel", endTargetPadDrag);
+targetEditorCanvas.addEventListener("pointerup", endTargetEditorDrag);
+targetEditorCanvas.addEventListener("pointercancel", endTargetEditorDrag);
 
 const ikCanvas = $("armIkCanvas");
 ikCanvas.addEventListener("pointerdown", (event) => {

@@ -127,13 +127,9 @@
               <div class="target-pad">
                 <div class="target-pad-head">
                   <h3>Target Position</h3>
-                  <div class="target-pad-modes" aria-label="Target drag plane">
-                    <button type="button" class="active" data-target-pad-mode="xy">XY</button>
-                    <button type="button" data-target-pad-mode="xz">XZ</button>
-                    <button type="button" data-target-pad-mode="yz">YZ</button>
-                  </div>
+                  <button id="editTargetBtn" type="button" class="soft">Edit Target</button>
                 </div>
-                <canvas id="targetControlCanvas" width="720" height="280"></canvas>
+                <canvas id="targetControlCanvas" width="720" height="240"></canvas>
               </div>
               <div class="arm-grid">
                 <label>
@@ -347,6 +343,48 @@
                     <span>Base <strong id="ikBaseValue">--</strong></span>
                     <span>Shoulder <strong id="ikShoulderValue">--</strong></span>
                     <span>Elbow <strong id="ikElbowValue">--</strong></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="wizard-overlay" id="targetEditorFlow" role="dialog" aria-modal="true" aria-labelledby="targetEditorTitle" hidden>
+            <div class="target-window">
+              <div class="wizard-progress">
+                <span>Target</span>
+                <strong id="targetEditorTitle">Position Editor</strong>
+                <button id="targetEditorCloseBtn" type="button" class="ghost">Close</button>
+              </div>
+
+              <div class="target-editor-body">
+                <div class="target-stage">
+                  <canvas id="targetEditorCanvas" width="980" height="620"></canvas>
+                </div>
+                <div class="target-editor-panel">
+                  <div class="ik-readout target-readout">
+                    <span>X <strong id="targetReadoutX">--</strong></span>
+                    <span>Y <strong id="targetReadoutY">--</strong></span>
+                    <span>Z <strong id="targetReadoutZ">--</strong></span>
+                    <span>Reach <strong id="targetReadoutReach">--</strong></span>
+                  </div>
+                  <div class="arm-grid">
+                    <label>
+                      <span>X</span>
+                      <input id="targetEditorXInput" type="number" step="0.01" inputmode="decimal">
+                    </label>
+                    <label>
+                      <span>Y</span>
+                      <input id="targetEditorYInput" type="number" step="0.01" inputmode="decimal">
+                    </label>
+                    <label>
+                      <span>Z</span>
+                      <input id="targetEditorZInput" type="number" step="0.01" inputmode="decimal">
+                    </label>
+                  </div>
+                  <div class="button-row target-editor-actions">
+                    <button id="targetEditorHomeBtn" type="button">Home</button>
+                    <button id="targetEditorApplyBtn" type="button" class="soft">Done</button>
                   </div>
                 </div>
               </div>

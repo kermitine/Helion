@@ -286,39 +286,18 @@ select {
   font-weight: 650;
 }
 
-.target-pad-modes {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(44px, 1fr));
-  gap: 6px;
-  width: min(190px, 55%);
-}
-
-.target-pad-modes button {
-  width: auto;
-  min-height: 32px;
-  padding: 6px 8px;
-  font-size: 0.78rem;
-}
-
-.target-pad-modes button.active {
-  border-color: rgba(114, 183, 255, 0.65);
-  background: #17304a;
-  color: var(--text);
+.target-pad-head button {
+  width: min(170px, 48%);
 }
 
 #targetControlCanvas {
   display: block;
   width: 100%;
-  height: 230px;
+  height: 180px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #101819;
-  cursor: grab;
-  touch-action: none;
-}
-
-#targetControlCanvas.dragging {
-  cursor: grabbing;
+  cursor: pointer;
 }
 
 .wizard-overlay {
@@ -346,6 +325,67 @@ select {
   background: var(--band);
   padding: 14px;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+}
+
+.target-window {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  width: min(1180px, 100%);
+  height: min(820px, calc(100vh - 36px));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--band);
+  padding: 14px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+}
+
+.target-editor-body {
+  display: grid;
+  grid-template-columns: minmax(420px, 1fr) minmax(270px, 0.34fr);
+  gap: 14px;
+  min-height: 0;
+}
+
+.target-stage,
+.target-editor-panel {
+  min-width: 0;
+  min-height: 0;
+}
+
+.target-stage {
+  display: grid;
+}
+
+#targetEditorCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 520px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #101819;
+  cursor: grab;
+  touch-action: none;
+}
+
+#targetEditorCanvas.dragging {
+  cursor: grabbing;
+}
+
+.target-editor-panel {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  overflow: auto;
+}
+
+.target-readout {
+  grid-template-columns: 1fr;
+}
+
+.target-editor-actions {
+  grid-template-columns: 1fr 1fr;
 }
 
 .wizard-body {
@@ -815,12 +855,12 @@ pre {
     flex-direction: column;
   }
 
-  .target-pad-modes {
+  .target-pad-head button {
     width: 100%;
   }
 
   #targetControlCanvas {
-    height: 200px;
+    height: 170px;
   }
 
   .wizard-overlay {
@@ -830,6 +870,21 @@ pre {
   .wizard-window {
     height: calc(100vh - 16px);
     padding: 10px;
+  }
+
+  .target-window {
+    height: calc(100vh - 16px);
+    padding: 10px;
+  }
+
+  .target-editor-body {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  #targetEditorCanvas {
+    min-height: 390px;
+    height: 390px;
   }
 
   .wizard-body {
