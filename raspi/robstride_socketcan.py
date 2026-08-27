@@ -93,6 +93,7 @@ DEFAULT_CURRENT_LIMIT_A = 1.00
 DEFAULT_ACCEL_RAD_S2 = 5.0
 OSCILLATION_PERIOD_S = 2.5
 MOTOR_STUDIO_JOG_S = 0.75
+VELOCITY_REFRESH_S = 0.10
 RAW_TRACE_DURATION_S = 3.0
 RAW_TRACE_FRAME_LIMIT = 32
 STATUS_PRINT_PERIOD_S = 0.5
@@ -659,6 +660,7 @@ class RobStrideSocketCanTool:
         self.commanded_speed = 0.0
         self.jog_stop_at = 0.0
         self.last_oscillation_at = time.monotonic()
+        self.last_velocity_refresh_at = 0.0
         self.last_feedback_at = 0.0
         self.last_status_print_at = 0.0
         self.raw_trace_until = 0.0
@@ -1088,18 +1090,19 @@ class RobStrideSocketCanTool:
         print("MotorBridge MIT position target sent.")
         return True
 
-    def send_speed_target(self, speed_rad_s: float) -> bool:
+    def send_speed_target(self, speed_rad_s: float, wait_feedback: bool = True) -> bool:
         try:
             if self.protocol == PROTOCOL_MIT:
                 self.send_mit_velocity(speed_rad_s, DEFAULT_CURRENT_LIMIT_A)
-                feedback = self.wait_mit_feedback(0.10)
-                if feedback:
+                feedback = self.wait_mit_feedback(0.10) if wait_feedback else None
+                if feedback is not None:
                     self.print_mit_feedback(feedback, prefix="  ")
             else:
                 self.write_private_param_f32(PARAM_SPD_REF, speed_rad_s)
         except OSError as exc:
             print(f"CAN TX failed: {exc}")
             return False
+        self.last_velocity_refresh_at = time.monotonic()
         return True
 
     def set_speed(self, speed_rad_s: float) -> bool:
@@ -1423,10 +1426,18 @@ class RobStrideSocketCanTool:
             self.send_speed_target(self.commanded_speed)
             print(f"osc speed={self.commanded_speed:+.2f} rad/s")
 
+    def update_velocity_refresh(self) -> None:
+        if not self.velocity_mode_configured or abs(self.commanded_speed) <= 0.0001:
+            return
+        now = time.monotonic()
+        if now - self.last_velocity_refresh_at >= VELOCITY_REFRESH_S:
+            self.send_speed_target(self.commanded_speed, wait_feedback=False)
+
     def update(self) -> None:
         self.update_raw_trace()
         self.update_jog()
         self.update_oscillation()
+        self.update_velocity_refresh()
 
     def print_interface_status(self) -> None:
         stats = self.bus.stats() if hasattr(self.bus, "stats") else {}

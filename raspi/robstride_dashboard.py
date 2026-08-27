@@ -88,6 +88,7 @@ COMM_PROACTIVE_REPORT = 0x18
 MOTOR_STUDIO_JOG_SPEED_RAD_S = 1.0
 MOTOR_STUDIO_JOG_S = 0.75
 OSCILLATION_PERIOD_S = 2.5
+VELOCITY_REFRESH_S = 0.10
 MAX_LOG_LINES = 240
 MAX_FRAME_HISTORY = 600
 COMMAND_TIMEOUT_S = 0.6
@@ -96,7 +97,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 REPO_DIR = ROOT_DIR.parent
 WEB_DIR = ROOT_DIR / "web"
 UPDATE_LOG_PATH = ROOT_DIR / "update.log"
-APP_VERSION = "2026.08.27.2"
+APP_VERSION = "2026.08.27.3"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -203,6 +204,7 @@ class DashboardController:
         self.jog_active = False
         self.jog_stop_at = 0.0
         self.last_oscillation_at = time.monotonic()
+        self.last_velocity_refresh_at = 0.0
         self.last_feedback_at = 0.0
         self.last_private_fault_at = 0.0
         self.last_raw_frame: Optional[Dict[str, Any]] = None
@@ -977,14 +979,18 @@ class DashboardController:
                 out.append(host)
         return out
 
-    def set_speed(self, speed: float) -> bool:
-        if not self.velocity_configured and not self.configure_velocity():
-            return False
-        self.commanded_speed = speed
+    def send_velocity_target(self, speed: float) -> None:
         if self.protocol == PROTOCOL_MIT:
             self.send_mit_velocity(speed)
         else:
             self.write_private_param_f32(PARAM_SPD_REF, speed)
+        self.last_velocity_refresh_at = time.monotonic()
+
+    def set_speed(self, speed: float) -> bool:
+        if not self.velocity_configured and not self.configure_velocity():
+            return False
+        self.commanded_speed = speed
+        self.send_velocity_target(speed)
         self.position_configured = False
         self.log(f"{self.protocol} speed={speed:+.2f} rad/s sent")
         return True
@@ -1127,6 +1133,14 @@ class DashboardController:
                 if self.oscillating and now - self.last_oscillation_at >= OSCILLATION_PERIOD_S:
                     self.last_oscillation_at = now
                     self.set_speed(-self.commanded_speed)
+                if (
+                    self.velocity_configured
+                    and not self.position_configured
+                    and abs(self.commanded_speed) > 0.0001
+                    and now - self.last_velocity_refresh_at >= VELOCITY_REFRESH_S
+                    and not self.command_lock.locked()
+                ):
+                    self.send_velocity_target(self.commanded_speed)
             except Exception as exc:
                 self.log(f"motion update failed: {exc}")
             time.sleep(0.03)
