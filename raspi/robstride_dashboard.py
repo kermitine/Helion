@@ -707,6 +707,7 @@ class DashboardController:
                     "positionKp": self.position_kp,
                 },
                 "arm": {
+                    "jointCount": 3,
                     "motorIds": {
                         axis: fmt_id(self.arm_motor_ids[axis])
                         for axis in ARM_AXES

@@ -273,30 +273,78 @@ select {
   text-align: right;
 }
 
-.wizard-tabs {
+.wizard-launch {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.wizard-flow {
+  display: grid;
+  gap: 10px;
+}
+
+.wizard-flow[hidden] {
+  display: none;
+}
+
+.wizard-progress {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.wizard-progress > span {
+  color: var(--accent-2);
+  font-size: 0.78rem;
+  font-weight: 720;
+}
+
+.wizard-progress strong {
+  min-width: 0;
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
+}
+
+.wizard-visual {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: center;
   border: 1px solid var(--line);
   border-radius: 8px;
-  overflow: hidden;
+  background: #0f1717;
+  padding: 10px;
 }
 
-.wizard-tabs button {
-  min-height: 38px;
-  border: 0;
-  border-radius: 0;
-  background: #111919;
-  font-size: 0.82rem;
+.wizard-joint-visual {
+  display: grid;
+  grid-template-columns: 14px 42px 14px 42px 14px;
+  align-items: center;
 }
 
-.wizard-tabs button.active {
-  background: #163429;
-  color: var(--accent);
+.wizard-joint-visual span {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--warn);
+  border-radius: 50%;
+  background: #221d12;
+}
+
+.wizard-joint-visual i {
+  display: block;
+  height: 4px;
+  background: var(--accent);
+}
+
+#wizardVisualText {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
 }
 
 .wizard-panel {
   display: none;
-  padding-top: 10px;
 }
 
 .wizard-panel.active {
@@ -329,6 +377,12 @@ select {
 
 .file-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.wizard-footer {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
 }
 
 .arm-grid {
@@ -616,7 +670,6 @@ pre {
     grid-template-columns: 1fr;
   }
 
-  .wizard-tabs,
   .wizard-nudges {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

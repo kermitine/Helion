@@ -128,62 +128,97 @@
                   <h3>Setup Wizard</h3>
                   <span id="valuesState">Not saved</span>
                 </div>
-                <div class="wizard-tabs" role="tablist" aria-label="IK setup">
-                  <button type="button" class="active" data-wizard-step="geometry">Geometry</button>
-                  <button type="button" data-wizard-step="target">Target</button>
-                  <button type="button" data-wizard-step="calibration">Calibration</button>
-                  <button type="button" data-wizard-step="files">Files</button>
+                <div class="wizard-launch" id="wizardLaunch">
+                  <button id="setupIkBtn" type="button" class="soft">Setup IK</button>
                 </div>
 
-                <div class="wizard-panel active" data-wizard-panel="geometry">
-                  <div class="wizard-grid">
-                    <label>
-                      <span>Total Reach</span>
-                      <input id="wizardTotalReachInput" type="number" min="0.002" max="20" step="0.01" value="0.50" inputmode="decimal">
-                    </label>
-                    <button id="wizardSplitLinksBtn" type="button" class="soft">Split Links</button>
-                    <button id="wizardSyncReachBtn" type="button">Use Current</button>
+                <div class="wizard-flow" id="ikWizardFlow" hidden>
+                  <div class="wizard-progress">
+                    <span id="wizardStepCount">1 / 5</span>
+                    <strong id="wizardStepTitle">Joints</strong>
+                    <button id="wizardCloseBtn" type="button" class="ghost">Close</button>
                   </div>
-                </div>
 
-                <div class="wizard-panel" data-wizard-panel="target">
-                  <div class="preset-grid">
-                    <button type="button" data-target-preset="home">Home</button>
-                    <button type="button" data-target-preset="forward">Forward</button>
-                    <button type="button" data-target-preset="left">Left</button>
-                    <button type="button" data-target-preset="high">High</button>
+                  <div class="wizard-visual">
+                    <div class="wizard-joint-visual" aria-hidden="true">
+                      <span></span>
+                      <i></i>
+                      <span></span>
+                      <i></i>
+                      <span></span>
+                    </div>
+                    <span id="wizardVisualText">Base + shoulder + elbow</span>
                   </div>
-                  <div class="wizard-grid wizard-nudges">
-                    <label>
-                      <span>Step</span>
-                      <input id="wizardNudgeStepInput" type="number" min="0.001" max="1" step="0.005" value="0.010" inputmode="decimal">
-                    </label>
-                    <button type="button" data-nudge-axis="x" data-nudge-dir="-1">X-</button>
-                    <button type="button" data-nudge-axis="x" data-nudge-dir="1">X+</button>
-                    <button type="button" data-nudge-axis="y" data-nudge-dir="-1">Y-</button>
-                    <button type="button" data-nudge-axis="y" data-nudge-dir="1">Y+</button>
-                    <button type="button" data-nudge-axis="z" data-nudge-dir="-1">Z-</button>
-                    <button type="button" data-nudge-axis="z" data-nudge-dir="1">Z+</button>
-                  </div>
-                </div>
 
-                <div class="wizard-panel" data-wizard-panel="calibration">
-                  <div class="preset-grid calibration-grid">
-                    <button class="soft" data-command="arm-home-zero">Home Zero</button>
-                    <button id="wizardZeroOffsetsBtn" type="button">Zero Offsets</button>
-                    <button id="wizardZeroHereBtn" type="button" class="soft">Zero Here</button>
-                    <button type="button" data-invert-axis="base">Invert Base</button>
-                    <button type="button" data-invert-axis="shoulder">Invert Shoulder</button>
-                    <button type="button" data-invert-axis="elbow">Invert Elbow</button>
+                  <div class="wizard-panel active" data-flow-panel="joints">
+                    <div class="wizard-grid">
+                      <label>
+                        <span>Joints</span>
+                        <select id="wizardJointCountInput">
+                          <option value="3">3 - Base, Shoulder, Elbow</option>
+                        </select>
+                      </label>
+                      <button type="button" data-focus-id="armBaseMotorIdInput">Base ID</button>
+                      <button type="button" data-focus-id="armShoulderMotorIdInput">Shoulder ID</button>
+                      <button type="button" data-focus-id="armElbowMotorIdInput">Elbow ID</button>
+                    </div>
                   </div>
-                </div>
 
-                <div class="wizard-panel" data-wizard-panel="files">
-                  <div class="preset-grid file-grid">
-                    <button id="saveValuesBtn" type="button" class="soft">Save Values</button>
-                    <button id="downloadValuesBtn" type="button">Download JSON</button>
-                    <button id="uploadValuesBtn" type="button">Upload JSON</button>
-                    <input id="uploadValuesInput" type="file" accept="application/json,.json" hidden>
+                  <div class="wizard-panel" data-flow-panel="lengths">
+                    <div class="wizard-grid">
+                      <label>
+                        <span>Total Reach</span>
+                        <input id="wizardTotalReachInput" type="number" min="0.002" max="20" step="0.01" value="0.50" inputmode="decimal">
+                      </label>
+                      <button id="wizardSplitLinksBtn" type="button" class="soft">Split Links</button>
+                      <button id="wizardSyncReachBtn" type="button">Use Current</button>
+                    </div>
+                  </div>
+
+                  <div class="wizard-panel" data-flow-panel="home">
+                    <div class="preset-grid calibration-grid">
+                      <button class="soft" data-command="arm-home-zero">Home Zero</button>
+                      <button id="wizardZeroOffsetsBtn" type="button">Zero Offsets</button>
+                      <button id="wizardZeroHereBtn" type="button">Zero Here</button>
+                      <button type="button" data-invert-axis="base">Invert Base</button>
+                      <button type="button" data-invert-axis="shoulder">Invert Shoulder</button>
+                      <button type="button" data-invert-axis="elbow">Invert Elbow</button>
+                    </div>
+                  </div>
+
+                  <div class="wizard-panel" data-flow-panel="target">
+                    <div class="preset-grid">
+                      <button type="button" data-target-preset="home">Home</button>
+                      <button type="button" data-target-preset="forward">Forward</button>
+                      <button type="button" data-target-preset="left">Left</button>
+                      <button type="button" data-target-preset="high">High</button>
+                    </div>
+                    <div class="wizard-grid wizard-nudges">
+                      <label>
+                        <span>Step</span>
+                        <input id="wizardNudgeStepInput" type="number" min="0.001" max="1" step="0.005" value="0.010" inputmode="decimal">
+                      </label>
+                      <button type="button" data-nudge-axis="x" data-nudge-dir="-1">X-</button>
+                      <button type="button" data-nudge-axis="x" data-nudge-dir="1">X+</button>
+                      <button type="button" data-nudge-axis="y" data-nudge-dir="-1">Y-</button>
+                      <button type="button" data-nudge-axis="y" data-nudge-dir="1">Y+</button>
+                      <button type="button" data-nudge-axis="z" data-nudge-dir="-1">Z-</button>
+                      <button type="button" data-nudge-axis="z" data-nudge-dir="1">Z+</button>
+                    </div>
+                  </div>
+
+                  <div class="wizard-panel" data-flow-panel="save">
+                    <div class="preset-grid file-grid">
+                      <button id="saveValuesBtn" type="button" class="soft">Save Values</button>
+                      <button id="downloadValuesBtn" type="button">Download JSON</button>
+                      <button id="uploadValuesBtn" type="button">Upload JSON</button>
+                      <input id="uploadValuesInput" type="file" accept="application/json,.json" hidden>
+                    </div>
+                  </div>
+
+                  <div class="wizard-footer">
+                    <button id="wizardBackBtn" type="button">Back</button>
+                    <button id="wizardNextBtn" type="button" class="soft">Next</button>
                   </div>
                 </div>
               </div>

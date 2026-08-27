@@ -5,6 +5,7 @@ let busy = false;
 let ikViewYaw = -0.72;
 let ikViewPitch = 0.58;
 let ikDrag = null;
+let wizardStepIndex = 0;
 
 const commandButtons = [...document.querySelectorAll("[data-command]")];
 const configControlIds = [
@@ -47,9 +48,17 @@ const allValueControlIds = [
   ...positionControlIds,
   ...armControlIds,
   ...speedControlIds,
+  "wizardJointCountInput",
 ];
 const allValueControlIdSet = new Set(allValueControlIds);
 const dirtyControls = new Set();
+const wizardSteps = [
+  { key: "joints", title: "Joints", visual: "3-axis base + shoulder + elbow" },
+  { key: "lengths", title: "Lengths", visual: "Set link lengths and total reach" },
+  { key: "home", title: "Home", visual: "Set the zero pose and motor directions" },
+  { key: "target", title: "Target", visual: "Pick or nudge the live target point" },
+  { key: "save", title: "Save", visual: "Save, download, or upload the setup" },
+];
 
 function fixed(value, digits, suffix) {
   if (typeof value !== "number" || Number.isNaN(value)) return "--";
@@ -213,6 +222,7 @@ function collectValues() {
         shoulder: $("armShoulderMotorIdInput").value.trim(),
         elbow: $("armElbowMotorIdInput").value.trim(),
       },
+      jointCount: numberInput("wizardJointCountInput") || 3,
       link1: numberInput("armLink1Input"),
       link2: numberInput("armLink2Input"),
       elbowUp: $("armElbowUpToggle").checked,
@@ -287,6 +297,9 @@ function applyValuePayload(payload) {
   );
   setDirtyNumber("armLink1Input", firstValue(arm.link1, payload.armLink1), 3);
   setDirtyNumber("armLink2Input", firstValue(arm.link2, payload.armLink2), 3);
+  if (Number(firstValue(arm.jointCount, payload.armJointCount)) === 3) {
+    setDirtyValue("wizardJointCountInput", "3");
+  }
   setDirtyChecked("armElbowUpToggle", firstValue(arm.elbowUp, payload.armElbowUp));
   setDirtyNumber("armTargetXInput", firstValue(target.x, payload.armTargetX), 3);
   setDirtyNumber("armTargetYInput", firstValue(target.y, payload.armTargetY), 3);
@@ -695,15 +708,36 @@ function renderIkPreview() {
   }
 }
 
-function setWizardStep(step) {
-  document.querySelectorAll("[data-wizard-step]").forEach((button) => {
-    const active = button.dataset.wizardStep === step;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-selected", active ? "true" : "false");
+function openWizard() {
+  $("wizardLaunch").hidden = true;
+  $("ikWizardFlow").hidden = false;
+  setWizardStep(wizardStepIndex);
+}
+
+function closeWizard() {
+  $("ikWizardFlow").hidden = true;
+  $("wizardLaunch").hidden = false;
+}
+
+function setWizardStep(index) {
+  wizardStepIndex = Math.max(0, Math.min(wizardSteps.length - 1, Number(index) || 0));
+  const step = wizardSteps[wizardStepIndex];
+  $("wizardStepCount").textContent = `${wizardStepIndex + 1} / ${wizardSteps.length}`;
+  $("wizardStepTitle").textContent = step.title;
+  $("wizardVisualText").textContent = step.visual;
+  $("wizardBackBtn").disabled = wizardStepIndex === 0;
+  $("wizardNextBtn").textContent = wizardStepIndex === wizardSteps.length - 1 ? "Done" : "Next";
+  document.querySelectorAll("[data-flow-panel]").forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.flowPanel === step.key);
   });
-  document.querySelectorAll("[data-wizard-panel]").forEach((panel) => {
-    panel.classList.toggle("active", panel.dataset.wizardPanel === step);
-  });
+}
+
+function stepWizard(direction) {
+  if (direction > 0 && wizardStepIndex >= wizardSteps.length - 1) {
+    closeWizard();
+    return;
+  }
+  setWizardStep(wizardStepIndex + direction);
 }
 
 function setArmTarget(x, y, z) {
@@ -938,6 +972,10 @@ $("activeReportsToggle").addEventListener("change", () => {
   sendCommand("active-report", { enabled: $("activeReportsToggle").checked });
 });
 
+$("wizardJointCountInput").addEventListener("change", () => {
+  markDirty("wizardJointCountInput");
+});
+
 $("clearLogBtn").addEventListener("click", () => {
   $("logOutput").textContent = "";
   post("/api/logs/clear", {}).then(refresh).catch((error) => {
@@ -970,8 +1008,18 @@ $("uploadValuesInput").addEventListener("change", async (event) => {
   }
 });
 
-document.querySelectorAll("[data-wizard-step]").forEach((button) => {
-  button.addEventListener("click", () => setWizardStep(button.dataset.wizardStep));
+$("setupIkBtn").addEventListener("click", openWizard);
+$("wizardCloseBtn").addEventListener("click", closeWizard);
+$("wizardBackBtn").addEventListener("click", () => stepWizard(-1));
+$("wizardNextBtn").addEventListener("click", () => stepWizard(1));
+
+document.querySelectorAll("[data-focus-id]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const target = $(button.dataset.focusId);
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.focus();
+  });
 });
 
 document.querySelectorAll("[data-target-preset]").forEach((button) => {
