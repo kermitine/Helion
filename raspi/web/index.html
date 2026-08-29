@@ -63,7 +63,7 @@
           <div class="id-setup-body">
             <div class="id-setup-panel">
               <div class="wizard-head">
-                <h3>One motor at a time</h3>
+                <h3>One current-ID motor</h3>
                 <span id="idSetupState">Ready</span>
               </div>
 
@@ -75,7 +75,7 @@
                 <i></i>
                 <div class="id-node id-motor-node">
                   <span id="idSetupOldPreview">0x7F</span>
-                  <strong>Single Motor</strong>
+                  <strong>Current-ID Motor</strong>
                 </div>
                 <i></i>
                 <div class="id-node id-role-node">
@@ -85,9 +85,9 @@
               </div>
 
               <ol class="id-setup-steps">
-                <li>Power off the arm and leave exactly one motor connected to the CAN adapter.</li>
-                <li>Power that one motor, scan, choose its IK role, then set its new ID.</li>
-                <li>Repeat for each motor before running IK with the full arm connected.</li>
+                <li>Leave already-assigned motors connected if each one has a unique ID.</li>
+                <li>Power only one unassigned motor that still uses the Current ID.</li>
+                <li>Choose its IK role, set its new ID, then repeat for the next unassigned motor.</li>
               </ol>
 
               <div class="arm-grid">
@@ -117,7 +117,7 @@
               </div>
 
               <div class="button-row id-setup-actions">
-                <button id="idSetupScanBtn" type="button">Scan Single</button>
+                <button id="idSetupScanBtn" type="button">Scan Bus</button>
                 <button id="idSetupAssignBtn" type="button" class="soft">Set ID</button>
               </div>
 

@@ -658,7 +658,7 @@ function updateIdSetupUi() {
   $("idSetupState").textContent = motors.length === 1
     ? `Detected ${motors[0]}`
     : motors.length > 1
-      ? "Multiple IDs online"
+      ? "Unique IDs online"
       : "Ready";
 }
 
@@ -1320,7 +1320,7 @@ async function scanSingleMotorForIdSetup() {
   if (busy) return;
   busy = true;
   renderBusy(true);
-  setIdSetupMessage("Scanning for the one connected motor...", true);
+  setIdSetupMessage("Scanning IDs on the bus...", true);
   try {
     await applyConfig();
     const result = await post("/api/command", { command: "id-scan" });
@@ -1337,7 +1337,9 @@ async function scanSingleMotorForIdSetup() {
     setIdSetupMessage(
       motors.length === 1
         ? `Detected ${motors[0]}. Choose the IK role and set the new ID.`
-        : "For ID setup, leave exactly one motor connected before pressing Set ID.",
+        : motors.length > 1
+          ? "Multiple unique IDs are online. That is OK if only one motor uses the Current ID you are changing."
+          : "No IDs found. Check power/CAN wiring, or enter the current ID manually.",
       true,
     );
   } catch (error) {
@@ -1363,15 +1365,11 @@ async function assignMotorId() {
     return;
   }
   const detectedMotors = normalizedMotorList(state ? state.discoveredPrivate : []);
-  if (detectedMotors.length > 1) {
-    setIdSetupMessage("Disconnect all but the one motor being assigned, then scan again.", true);
-    return;
-  }
   if (detectedMotors.includes(newMotorId) && newMotorId !== oldMotorId) {
     setIdSetupMessage(`${newMotorId} is already online. Choose a free ID.`, true);
     return;
   }
-  if (!confirm("Power the arm with exactly one motor connected to CAN. If multiple same-ID motors are connected, they may all take this new ID.")) {
+  if (!confirm(`Only one connected motor should currently use ${oldMotorId}. Already-assigned motors on other IDs can stay connected. If multiple motors still share ${oldMotorId}, they may all change or the command may fail.`)) {
     return;
   }
 
