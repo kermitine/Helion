@@ -466,6 +466,14 @@ select {
   align-items: center;
 }
 
+.wizard-joint-visual.two-joint {
+  grid-template-columns: 14px 42px 14px;
+}
+
+.wizard-joint-visual.two-joint :nth-child(n+4) {
+  display: none;
+}
+
 .wizard-joint-visual span {
   width: 14px;
   height: 14px;
@@ -516,12 +524,28 @@ select {
   height: 100%;
 }
 
+.home-two-joint {
+  display: none;
+}
+
+.home-pose-visual.two-joint .home-three-joint {
+  display: none;
+}
+
+.home-pose-visual.two-joint .home-two-joint {
+  display: inline;
+}
+
 .home-button-row {
   display: grid;
 }
 
 .hidden-calibration-fields {
   display: none;
+}
+
+.mode-hidden {
+  display: none !important;
 }
 
 .wizard-panel {
@@ -587,6 +611,16 @@ select {
   margin: 0;
   padding: 10px;
   white-space: pre-wrap;
+}
+
+.safety-warning {
+  border: 1px solid rgba(255, 209, 102, 0.58);
+  border-radius: 8px;
+  background: #211806;
+  color: #ffe7a3;
+  padding: 10px 12px;
+  font-size: 0.86rem;
+  font-weight: 650;
 }
 
 .ik-stage {

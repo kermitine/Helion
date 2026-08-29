@@ -80,6 +80,7 @@ MAX_LOG_LINES = 240
 MAX_FRAME_HISTORY = 600
 COMMAND_TIMEOUT_S = 0.6
 ARM_AXES = ("base", "shoulder", "elbow")
+ARM_JOINT_COUNTS = (2, 3)
 
 ROOT_DIR = Path(__file__).resolve().parent
 WEB_DIR = ROOT_DIR / "web"
@@ -89,7 +90,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.08.27.8"
+APP_VERSION = "2026.08.29.1"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -139,6 +140,89 @@ def model_name(value: Any, default: str = DEFAULT_MODEL) -> str:
     return parsed if parsed in PRIVATE_MODEL_LIMITS else default
 
 
+def arm_joint_count(value: Any, default: int = 3) -> int:
+    try:
+        parsed = int(str(value), 0)
+    except (TypeError, ValueError):
+        parsed = default
+    return parsed if parsed in ARM_JOINT_COUNTS else default if default in ARM_JOINT_COUNTS else 3
+
+
+def arm_axes_for_count(joint_count: int) -> Tuple[str, ...]:
+    return ("base", "shoulder") if joint_count == 2 else ARM_AXES
+
+
+def point_sub(a: Dict[str, float], b: Dict[str, float]) -> Dict[str, float]:
+    return {"x": a["x"] - b["x"], "y": a["y"] - b["y"], "z": a["z"] - b["z"]}
+
+
+def point_add(a: Dict[str, float], b: Dict[str, float]) -> Dict[str, float]:
+    return {"x": a["x"] + b["x"], "y": a["y"] + b["y"], "z": a["z"] + b["z"]}
+
+
+def point_scale(a: Dict[str, float], scale: float) -> Dict[str, float]:
+    return {"x": a["x"] * scale, "y": a["y"] * scale, "z": a["z"] * scale}
+
+
+def point_dot(a: Dict[str, float], b: Dict[str, float]) -> float:
+    return a["x"] * b["x"] + a["y"] * b["y"] + a["z"] * b["z"]
+
+
+def point_length(a: Dict[str, float]) -> float:
+    return math.sqrt(point_dot(a, a))
+
+
+def trim_segment(
+    start: Dict[str, float],
+    end: Dict[str, float],
+    trim_start: float,
+    trim_end: float,
+) -> Optional[Tuple[Dict[str, float], Dict[str, float]]]:
+    vector = point_sub(end, start)
+    length = point_length(vector)
+    if length <= 0.000001 or trim_start + trim_end >= length:
+        return None
+    direction = point_scale(vector, 1.0 / length)
+    return (
+        point_add(start, point_scale(direction, trim_start)),
+        point_add(end, point_scale(direction, -trim_end)),
+    )
+
+
+def closest_point_on_segment_distance(
+    point: Dict[str, float],
+    start: Dict[str, float],
+    end: Dict[str, float],
+) -> float:
+    segment = point_sub(end, start)
+    length_sq = point_dot(segment, segment)
+    if length_sq <= 0.000001:
+        return point_length(point_sub(point, start))
+    t = max(0.0, min(1.0, point_dot(point_sub(point, start), segment) / length_sq))
+    closest = point_add(start, point_scale(segment, t))
+    return point_length(point_sub(point, closest))
+
+
+def segment_distance(
+    a0: Dict[str, float],
+    a1: Dict[str, float],
+    b0: Dict[str, float],
+    b1: Dict[str, float],
+) -> float:
+    # Sampling both trimmed capsules is stable enough for short robot-arm links
+    # and avoids false positives at the shared elbow joint.
+    distances = []
+    for i in range(17):
+        t = i / 16.0
+        point = point_add(a0, point_scale(point_sub(a1, a0), t))
+        distances.append(closest_point_on_segment_distance(point, b0, b1))
+    for i in range(17):
+        t = i / 16.0
+        point = point_add(b0, point_scale(point_sub(b1, b0), t))
+        distances.append(closest_point_on_segment_distance(point, a0, a1))
+    return min(distances) if distances else 0.0
+
+
 @dataclass
 class ArmIkSolution:
     base: float
@@ -175,6 +259,88 @@ def solve_three_axis_arm_ik(
     return ArmIkSolution(base=base, shoulder=shoulder, elbow=elbow)
 
 
+def solve_arm_ik(
+    joint_count: int,
+    x: float,
+    y: float,
+    z: float,
+    link_1: float,
+    link_2: float,
+    elbow_up: bool,
+) -> ArmIkSolution:
+    if joint_count != 2:
+        return solve_three_axis_arm_ik(x, y, z, link_1, link_2, elbow_up)
+
+    link = max(abs(link_1) + abs(link_2), 0.001)
+    radial = math.hypot(x, y)
+    reach = math.hypot(radial, z)
+    if reach <= 0.0001:
+        raise ValueError("IK target unreachable: 2-joint target cannot be at the base origin")
+    if reach > link:
+        raise ValueError(f"IK target unreachable: reach={reach:.3f}, allowed=0.000..{link:.3f}")
+    return ArmIkSolution(
+        base=math.atan2(y, x),
+        shoulder=math.atan2(z, radial),
+        elbow=0.0,
+    )
+
+
+def arm_solution_points(
+    joint_count: int,
+    solution: ArmIkSolution,
+    target: Dict[str, float],
+    link_1: float,
+    link_2: float,
+) -> List[Dict[str, float]]:
+    p0 = {"x": 0.0, "y": 0.0, "z": 0.0}
+    if joint_count == 2:
+        return [p0, {"x": target["x"], "y": target["y"], "z": target["z"]}]
+
+    base_dir = {"x": math.cos(solution.base), "y": math.sin(solution.base)}
+    p1 = {
+        "x": link_1 * math.cos(solution.shoulder) * base_dir["x"],
+        "y": link_1 * math.cos(solution.shoulder) * base_dir["y"],
+        "z": link_1 * math.sin(solution.shoulder),
+    }
+    p2 = {
+        "x": p1["x"] + link_2 * math.cos(solution.shoulder + solution.elbow) * base_dir["x"],
+        "y": p1["y"] + link_2 * math.cos(solution.shoulder + solution.elbow) * base_dir["y"],
+        "z": p1["z"] + link_2 * math.sin(solution.shoulder + solution.elbow),
+    }
+    return [p0, p1, p2]
+
+
+def arm_safety_check(
+    joint_count: int,
+    points: List[Dict[str, float]],
+    link_radii: Dict[str, float],
+) -> Dict[str, Any]:
+    warnings: List[str] = []
+    if joint_count == 3 and len(points) >= 3:
+        radius_1 = max(0.0, link_radii.get("link1", 0.0))
+        radius_2 = max(0.0, link_radii.get("link2", 0.0))
+        required_clearance = radius_1 + radius_2
+        if required_clearance > 0.0:
+            link_1_length = point_length(point_sub(points[1], points[0]))
+            link_2_length = point_length(point_sub(points[2], points[1]))
+            if required_clearance >= min(link_1_length, link_2_length):
+                warnings.append(
+                    "link radii are too large for the configured lengths: "
+                    f"{required_clearance:.3f} m clearance needed"
+                )
+                return {"ok": False, "warnings": warnings}
+            upper = trim_segment(points[0], points[1], 0.0, required_clearance)
+            forearm = trim_segment(points[1], points[2], required_clearance, 0.0)
+            if upper and forearm:
+                clearance = segment_distance(upper[0], upper[1], forearm[0], forearm[1])
+                if clearance < required_clearance:
+                    warnings.append(
+                        "link radii overlap: "
+                        f"clearance {clearance:.3f} m is below {required_clearance:.3f} m"
+                    )
+    return {"ok": not warnings, "warnings": warnings}
+
+
 class DashboardController:
     def __init__(
         self,
@@ -208,6 +374,7 @@ class DashboardController:
         self.position_kp = DEFAULT_POSITION_KP
         self.velocity_configured = False
         self.position_configured = False
+        self.arm_joint_count = 3
         self.arm_motor_ids = {
             "base": self.motor_id,
             "shoulder": 0x01,
@@ -218,6 +385,7 @@ class DashboardController:
         self.arm_directions = {axis: 1 for axis in ARM_AXES}
         self.arm_link_1 = 0.25
         self.arm_link_2 = 0.25
+        self.arm_link_radii = {"link1": 0.015, "link2": 0.015}
         self.arm_target = {"x": 0.25, "y": 0.0, "z": 0.10}
         self.arm_elbow_up = False
         self.arm_velocity_limit = DEFAULT_POSITION_VEL_RAD_S
@@ -326,6 +494,9 @@ class DashboardController:
             if self.arm_motor_ids.get(axis) == motor_id:
                 return self.arm_motor_models.get(axis, self.model)
         return self.model
+
+    def active_arm_axes(self) -> Tuple[str, ...]:
+        return arm_axes_for_count(self.arm_joint_count)
 
     def send_private_get_id(self, target_id: int) -> None:
         self.send_private(COMM_GET_ID, self.host_id, target_id, bytes(8))
@@ -726,7 +897,7 @@ class DashboardController:
                     "positionKp": self.position_kp,
                 },
                 "arm": {
-                    "jointCount": 3,
+                    "jointCount": self.arm_joint_count,
                     "motorIds": {
                         axis: fmt_id(self.arm_motor_ids[axis])
                         for axis in ARM_AXES
@@ -734,6 +905,7 @@ class DashboardController:
                     "models": dict(self.arm_motor_models),
                     "link1": self.arm_link_1,
                     "link2": self.arm_link_2,
+                    "radii": dict(self.arm_link_radii),
                     "elbowUp": self.arm_elbow_up,
                     "target": dict(self.arm_target),
                     "velocityLimit": self.arm_velocity_limit,
@@ -769,6 +941,9 @@ class DashboardController:
         offsets = arm.get("offsets")
         if not isinstance(offsets, dict):
             offsets = {}
+        radii = arm.get("radii")
+        if not isinstance(radii, dict):
+            radii = {}
         directions = arm.get("directions")
         if not isinstance(directions, dict):
             directions = {}
@@ -776,6 +951,7 @@ class DashboardController:
         if not isinstance(target, dict):
             target = {}
         return {
+            "armJointCount": payload.get("armJointCount", arm.get("jointCount", self.arm_joint_count)),
             "armBaseMotorId": payload.get(
                 "armBaseMotorId",
                 motor_ids.get("base", self.arm_motor_ids["base"]),
@@ -802,6 +978,14 @@ class DashboardController:
             ),
             "armLink1": payload.get("armLink1", arm.get("link1", self.arm_link_1)),
             "armLink2": payload.get("armLink2", arm.get("link2", self.arm_link_2)),
+            "armLink1Radius": payload.get(
+                "armLink1Radius",
+                radii.get("link1", self.arm_link_radii["link1"]),
+            ),
+            "armLink2Radius": payload.get(
+                "armLink2Radius",
+                radii.get("link2", self.arm_link_radii["link2"]),
+            ),
             "armElbowUp": payload.get("armElbowUp", arm.get("elbowUp", self.arm_elbow_up)),
             "armTargetX": payload.get("armTargetX", target.get("x", self.arm_target["x"])),
             "armTargetY": payload.get("armTargetY", target.get("y", self.arm_target["y"])),
@@ -856,6 +1040,7 @@ class DashboardController:
             old_motor_id = self.motor_id
             old_host_id = self.host_id
             old_model = self.model
+            old_arm_joint_count = self.arm_joint_count
             old_arm_motor_models = dict(self.arm_motor_models)
             new_serial_port = str(payload.get("serialPort") or old_serial_port)
             new_serial_baud = parse_int(payload.get("serialBaud"), old_serial_baud)
@@ -897,6 +1082,7 @@ class DashboardController:
                 new_motor_id != old_motor_id
                 or new_host_id != old_host_id
                 or new_model != old_model
+                or self.arm_joint_count != old_arm_joint_count
                 or self.arm_motor_models != old_arm_motor_models
             )
             if bus_changed or control_changed:
@@ -1109,6 +1295,7 @@ class DashboardController:
         return True
 
     def apply_arm_payload(self, payload: Dict[str, Any]) -> None:
+        self.arm_joint_count = arm_joint_count(payload.get("armJointCount"), self.arm_joint_count)
         self.arm_motor_ids = {
             "base": parse_int(payload.get("armBaseMotorId"), self.arm_motor_ids["base"]) & 0xFF,
             "shoulder": parse_int(payload.get("armShoulderMotorId"), self.arm_motor_ids["shoulder"]) & 0xFF,
@@ -1131,6 +1318,10 @@ class DashboardController:
         }
         self.arm_link_1 = positive_float(payload.get("armLink1"), self.arm_link_1, 10.0)
         self.arm_link_2 = positive_float(payload.get("armLink2"), self.arm_link_2, 10.0)
+        self.arm_link_radii = {
+            "link1": nonnegative_float(payload.get("armLink1Radius"), self.arm_link_radii["link1"], 2.0),
+            "link2": nonnegative_float(payload.get("armLink2Radius"), self.arm_link_radii["link2"], 2.0),
+        }
         self.arm_target = {
             "x": parse_float(payload.get("armTargetX"), self.arm_target["x"]),
             "y": parse_float(payload.get("armTargetY"), self.arm_target["y"]),
@@ -1144,7 +1335,40 @@ class DashboardController:
     def arm_motor_target(self, axis: str, joint_angle: float) -> float:
         return self.arm_offsets[axis] + (self.arm_directions[axis] * joint_angle)
 
+    def validate_arm_command_motors(self, payload: Dict[str, Any]) -> Tuple[bool, str]:
+        joint_count = arm_joint_count(payload.get("armJointCount"), self.arm_joint_count)
+        axes = arm_axes_for_count(joint_count)
+        keys = {
+            "base": "armBaseMotorId",
+            "shoulder": "armShoulderMotorId",
+            "elbow": "armElbowMotorId",
+        }
+        parsed: Dict[str, int] = {}
+        missing = []
+        for axis in axes:
+            value = payload.get(keys[axis])
+            if value is None or value == "":
+                missing.append(axis)
+                continue
+            try:
+                parsed[axis] = parse_int(value, -1) & 0xFF
+            except (TypeError, ValueError):
+                return False, f"{axis} motor ID is invalid"
+        if missing:
+            return False, f"Select detected motor IDs for: {', '.join(missing)}"
+
+        seen: Dict[int, str] = {}
+        for axis, motor_id in parsed.items():
+            if motor_id in seen:
+                return False, f"{axis} and {seen[motor_id]} both use {fmt_id(motor_id)}"
+            seen[motor_id] = axis
+        return True, ""
+
     def home_arm_zero(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        ok, message = self.validate_arm_command_motors(payload)
+        if not ok:
+            self.log(message)
+            return {"ok": False, "message": message}
         self.apply_arm_payload(payload)
         with self.lock:
             self.oscillating = False
@@ -1154,9 +1378,9 @@ class DashboardController:
             self.arm_position_configured = False
             self.commanded_speed = 0.0
 
-        offsets: Dict[str, float] = {}
+        offsets: Dict[str, float] = dict(self.arm_offsets)
         hosts: Dict[str, int] = {}
-        for axis in ARM_AXES:
+        for axis in self.active_arm_axes():
             motor_id = self.arm_motor_ids[axis]
             result = self.read_disabled_position_for(motor_id, COMMAND_TIMEOUT_S)
             if result is None:
@@ -1184,13 +1408,17 @@ class DashboardController:
             "ok": True,
             "message": "Arm home zero saved",
             "offsets": dict(offsets),
-            "hosts": {axis: fmt_id(hosts[axis]) for axis in ARM_AXES},
+            "hosts": {axis: fmt_id(hosts[axis]) for axis in self.active_arm_axes()},
             "path": str(VALUES_PATH),
         }
 
     def move_arm_ik(self, payload: Dict[str, Any]) -> bool:
+        ok, message = self.validate_arm_command_motors(payload)
+        if not ok:
+            raise ValueError(message)
         self.apply_arm_payload(payload)
-        solution = solve_three_axis_arm_ik(
+        solution = solve_arm_ik(
+            self.arm_joint_count,
             self.arm_target["x"],
             self.arm_target["y"],
             self.arm_target["z"],
@@ -1203,9 +1431,19 @@ class DashboardController:
             "shoulder": solution.shoulder,
             "elbow": solution.elbow,
         }
+        points = arm_solution_points(
+            self.arm_joint_count,
+            solution,
+            self.arm_target,
+            self.arm_link_1,
+            self.arm_link_2,
+        )
+        safety = arm_safety_check(self.arm_joint_count, points, self.arm_link_radii)
+        if not safety["ok"]:
+            raise ValueError(f"Unsafe IK target: {'; '.join(safety['warnings'])}")
         motor_targets = {
             axis: self.arm_motor_target(axis, joint_angles[axis])
-            for axis in ARM_AXES
+            for axis in self.active_arm_axes()
         }
         self.oscillating = False
         self.jog_active = False
@@ -1218,7 +1456,7 @@ class DashboardController:
             f"x={self.arm_target['x']:+.3f} y={self.arm_target['y']:+.3f} z={self.arm_target['z']:+.3f} "
             f"joints base={joint_angles['base']:+.3f} shoulder={joint_angles['shoulder']:+.3f} elbow={joint_angles['elbow']:+.3f}"
         )
-        for axis in ARM_AXES:
+        for axis in self.active_arm_axes():
             if not self.configure_private_position_motor(
                 axis,
                 self.arm_motor_ids[axis],
@@ -1230,17 +1468,23 @@ class DashboardController:
                 self.stop_arm()
                 return False
         self.arm_joint_angles = joint_angles
-        self.arm_motor_targets = motor_targets
+        self.arm_motor_targets = {
+            axis: motor_targets.get(axis, self.arm_motor_targets.get(axis, 0.0))
+            for axis in ARM_AXES
+        }
         self.arm_position_configured = True
         self.last_arm_position_refresh_at = time.monotonic()
+        active_targets = " ".join(
+            f"{axis}={motor_targets[axis]:+.3f}"
+            for axis in self.active_arm_axes()
+        )
         self.log(
-            "Arm targets sent "
-            f"base={motor_targets['base']:+.3f} shoulder={motor_targets['shoulder']:+.3f} elbow={motor_targets['elbow']:+.3f}"
+            f"Arm targets sent {active_targets}"
         )
         return True
 
     def send_arm_position_targets(self) -> None:
-        for axis in ARM_AXES:
+        for axis in self.active_arm_axes():
             self.write_private_param_f32_to(
                 self.arm_motor_ids[axis],
                 PARAM_LOC_REF,
@@ -1255,7 +1499,7 @@ class DashboardController:
         self.oscillating = False
         self.jog_active = False
         self.commanded_speed = 0.0
-        for motor_id in sorted(set(self.arm_motor_ids.values())):
+        for motor_id in sorted(set(self.arm_motor_ids[axis] for axis in self.active_arm_axes())):
             self.send_private_disable_to(motor_id, False)
             self.wait_private_status_for(motor_id, 0.20)
         self.log("Arm stop/disable sent")
@@ -1267,7 +1511,7 @@ class DashboardController:
         self.oscillating = False
         self.jog_active = False
         self.commanded_speed = 0.0
-        for motor_id in sorted(set(self.arm_motor_ids.values())):
+        for motor_id in sorted(set(self.arm_motor_ids[axis] for axis in self.active_arm_axes())):
             self.send_private_disable_to(motor_id, True)
             self.wait_private_status_for(motor_id, 0.20)
         with self.lock:
@@ -1437,7 +1681,8 @@ class DashboardController:
 
     def arm_solution_snapshot(self) -> Dict[str, Any]:
         try:
-            solution = solve_three_axis_arm_ik(
+            solution = solve_arm_ik(
+                self.arm_joint_count,
                 self.arm_target["x"],
                 self.arm_target["y"],
                 self.arm_target["z"],
@@ -1449,6 +1694,7 @@ class DashboardController:
             return {
                 "ok": False,
                 "message": str(exc),
+                "safety": {"ok": False, "warnings": [str(exc)]},
                 "jointAngles": dict(self.arm_joint_angles),
                 "motorTargets": dict(self.arm_motor_targets),
             }
@@ -1457,13 +1703,22 @@ class DashboardController:
             "shoulder": solution.shoulder,
             "elbow": solution.elbow,
         }
+        points = arm_solution_points(
+            self.arm_joint_count,
+            solution,
+            self.arm_target,
+            self.arm_link_1,
+            self.arm_link_2,
+        )
+        safety = arm_safety_check(self.arm_joint_count, points, self.arm_link_radii)
         return {
             "ok": True,
             "message": "",
+            "safety": safety,
             "jointAngles": joint_angles,
             "motorTargets": {
                 axis: self.arm_motor_target(axis, joint_angles[axis])
-                for axis in ARM_AXES
+                for axis in self.active_arm_axes()
             },
         }
 
@@ -1503,6 +1758,7 @@ class DashboardController:
                 "velocityConfigured": self.velocity_configured,
                 "positionConfigured": self.position_configured,
                 "arm": {
+                    "jointCount": self.arm_joint_count,
                     "motorIds": dict(self.arm_motor_ids),
                     "motorIdHex": {axis: fmt_id(self.arm_motor_ids[axis]) for axis in ARM_AXES},
                     "models": dict(self.arm_motor_models),
@@ -1510,6 +1766,7 @@ class DashboardController:
                     "directions": dict(self.arm_directions),
                     "link1": self.arm_link_1,
                     "link2": self.arm_link_2,
+                    "radii": dict(self.arm_link_radii),
                     "target": dict(self.arm_target),
                     "elbowUp": self.arm_elbow_up,
                     "velocityLimit": self.arm_velocity_limit,

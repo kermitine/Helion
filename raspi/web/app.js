@@ -34,6 +34,8 @@ const armControlIds = [
   "armElbowModelInput",
   "armLink1Input",
   "armLink2Input",
+  "armLink1RadiusInput",
+  "armLink2RadiusInput",
   "armElbowUpToggle",
   "armTargetXInput",
   "armTargetYInput",
@@ -60,7 +62,7 @@ const allValueControlIds = [
 const allValueControlIdSet = new Set(allValueControlIds);
 const dirtyControls = new Set();
 const wizardSteps = [
-  { key: "joints", title: "Joints", visual: "3-axis base + shoulder + elbow" },
+  { key: "joints", title: "Joints", visual: "Base + shoulder, optional elbow" },
   { key: "lengths", title: "Lengths", visual: "Set link lengths and total reach" },
   { key: "home", title: "Home", visual: "Straight ahead, level shoulder, straight elbow" },
   { key: "save", title: "Save", visual: "Save, download, or upload the setup" },
@@ -106,9 +108,18 @@ function numberInput(id) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function jointCountInput() {
+  return Number($("wizardJointCountInput").value) === 2 ? 2 : 3;
+}
+
+function activeArmAxes() {
+  return jointCountInput() === 2 ? ["base", "shoulder"] : ["base", "shoulder", "elbow"];
+}
+
 function selectedMotorValue(id, fallback = "") {
   const el = $(id);
   const value = el && typeof el.value === "string" ? el.value.trim() : "";
+  if (el && el.tagName === "SELECT" && !el.disabled) return value;
   return value || fallback || "";
 }
 
@@ -118,10 +129,9 @@ function currentArmMotorValue(axis, fallback = "") {
   return ids[axis] || fallback;
 }
 
-function currentArmModelValue(axis, fallback = "") {
-  const arm = state && state.arm ? state.arm : {};
-  const models = arm.models || {};
-  return models[axis] || fallback || (state ? state.model : "");
+function strictMotorValue(id) {
+  const el = $(id);
+  return el && typeof el.value === "string" ? el.value.trim() : "";
 }
 
 function commandPayload(command) {
@@ -135,6 +145,7 @@ function commandPayload(command) {
   }
   if (command === "arm-move" || command === "arm-home-zero") {
     return {
+      armJointCount: jointCountInput(),
       armBaseMotorId: selectedMotorValue("armBaseMotorIdInput", currentArmMotorValue("base")),
       armShoulderMotorId: selectedMotorValue("armShoulderMotorIdInput", currentArmMotorValue("shoulder")),
       armElbowMotorId: selectedMotorValue("armElbowMotorIdInput", currentArmMotorValue("elbow")),
@@ -143,6 +154,8 @@ function commandPayload(command) {
       armElbowModel: $("armElbowModelInput").value,
       armLink1: numberInput("armLink1Input"),
       armLink2: numberInput("armLink2Input"),
+      armLink1Radius: numberInput("armLink1RadiusInput"),
+      armLink2Radius: numberInput("armLink2RadiusInput"),
       armElbowUp: $("armElbowUpToggle").checked,
       armTargetX: numberInput("armTargetXInput"),
       armTargetY: numberInput("armTargetYInput"),
@@ -254,9 +267,13 @@ function collectValues() {
         shoulder: $("armShoulderModelInput").value,
         elbow: $("armElbowModelInput").value,
       },
-      jointCount: numberInput("wizardJointCountInput") || 3,
+      jointCount: jointCountInput(),
       link1: numberInput("armLink1Input"),
       link2: numberInput("armLink2Input"),
+      radii: {
+        link1: numberInput("armLink1RadiusInput"),
+        link2: numberInput("armLink2RadiusInput"),
+      },
       elbowUp: $("armElbowUpToggle").checked,
       target: {
         x: numberInput("armTargetXInput"),
@@ -285,6 +302,7 @@ function applyValuePayload(payload) {
   const arm = objectValue(payload.arm);
   const motorIds = objectValue(arm.motorIds || arm.motorIdHex);
   const models = objectValue(arm.models);
+  const radii = objectValue(arm.radii);
   const target = objectValue(arm.target);
   const offsets = objectValue(arm.offsets);
   const directions = objectValue(arm.directions);
@@ -333,10 +351,13 @@ function applyValuePayload(payload) {
   setDirtyValue("armElbowModelInput", firstValue(models.elbow, payload.armElbowModel));
   setDirtyNumber("armLink1Input", firstValue(arm.link1, payload.armLink1), 3);
   setDirtyNumber("armLink2Input", firstValue(arm.link2, payload.armLink2), 3);
-  if (Number(firstValue(arm.jointCount, payload.armJointCount)) === 3) {
-    setDirtyValue("wizardJointCountInput", "3");
+  const jointCount = Number(firstValue(arm.jointCount, payload.armJointCount));
+  if (jointCount === 2 || jointCount === 3) {
+    setDirtyValue("wizardJointCountInput", String(jointCount));
   }
   setDirtyChecked("armElbowUpToggle", firstValue(arm.elbowUp, payload.armElbowUp));
+  setDirtyNumber("armLink1RadiusInput", firstValue(radii.link1, payload.armLink1Radius), 3);
+  setDirtyNumber("armLink2RadiusInput", firstValue(radii.link2, payload.armLink2Radius), 3);
   setDirtyNumber("armTargetXInput", firstValue(target.x, payload.armTargetX), 3);
   setDirtyNumber("armTargetYInput", firstValue(target.y, payload.armTargetY), 3);
   setDirtyNumber("armTargetZInput", firstValue(target.z, payload.armTargetZ), 3);
@@ -404,8 +425,50 @@ async function applyConfig() {
   clearDirty(configControlIds);
 }
 
+function validateArmCommandMotors() {
+  const inputIds = {
+    base: "armBaseMotorIdInput",
+    shoulder: "armShoulderMotorIdInput",
+    elbow: "armElbowMotorIdInput",
+  };
+  const labels = {
+    base: "Base",
+    shoulder: "Shoulder",
+    elbow: "Elbow",
+  };
+  const seen = new Map();
+  const missing = [];
+  for (const axis of activeArmAxes()) {
+    const value = strictMotorValue(inputIds[axis]);
+    if (!value) {
+      missing.push(labels[axis]);
+      continue;
+    }
+    if (seen.has(value)) {
+      appendLocalLog(`Arm IK blocked: ${labels[axis]} and ${seen.get(value)} both use ${value}`);
+      return false;
+    }
+    seen.set(value, labels[axis]);
+  }
+  if (missing.length) {
+    appendLocalLog(`Arm IK blocked: select detected motors for ${missing.join(", ")}`);
+    return false;
+  }
+  return true;
+}
+
 async function sendCommand(command, extra = {}) {
   if (busy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault"].includes(command)) return;
+  if ((command === "arm-move" || command === "arm-home-zero") && !validateArmCommandMotors()) return;
+  if (command === "arm-move") {
+    const preview = armPreview();
+    if (!preview.ok || !preview.safe) {
+      const warnings = preview.safety && preview.safety.warnings ? preview.safety.warnings : [preview.message || "unsafe IK target"];
+      appendLocalLog(`Arm IK blocked: ${warnings.join("; ")}`);
+      renderIkPreview();
+      return;
+    }
+  }
   if (
     command === "arm-home-zero" &&
     !confirm("Place the arm at its home zero pose. This will disable the arm motors, read their current positions, and save those readings as IK offsets.")
@@ -443,6 +506,7 @@ function renderBusy(isBusy) {
   valueButtons.forEach((button) => {
     button.disabled = isBusy;
   });
+  if (!isBusy) renderArmSafety(armPreview());
 }
 
 function appendLocalLog(line) {
@@ -513,7 +577,7 @@ function setMotorSelectOptions(id, motors, preferred, fallback = "") {
 function chooseDetectedMotor(motors, preferred, used) {
   const normalized = idText(preferred, "");
   const uniquePreferred = motors.includes(normalized) && !used.has(normalized) ? normalized : "";
-  const selected = uniquePreferred || motors.find((motor) => !used.has(motor)) || motors[0] || "";
+  const selected = uniquePreferred || motors.find((motor) => !used.has(motor)) || "";
   if (selected) used.add(selected);
   return selected;
 }
@@ -521,8 +585,13 @@ function chooseDetectedMotor(motors, preferred, used) {
 function armInputState() {
   const direction = (id) => (Number($(id).value) < 0 ? -1 : 1);
   return {
+    jointCount: jointCountInput(),
     link1: Math.max(Math.abs(numberInput("armLink1Input")), 0.001),
     link2: Math.max(Math.abs(numberInput("armLink2Input")), 0.001),
+    radii: {
+      link1: Math.max(0, numberInput("armLink1RadiusInput")),
+      link2: Math.max(0, numberInput("armLink2RadiusInput")),
+    },
     elbowUp: $("armElbowUpToggle").checked,
     target: {
       x: numberInput("armTargetXInput"),
@@ -547,7 +616,23 @@ function solveArmIk(arm) {
   const radial = Math.hypot(x, y);
   const reach = Math.hypot(radial, z);
   const maxReach = arm.link1 + arm.link2;
-  const minReach = Math.abs(arm.link1 - arm.link2);
+  const minReach = arm.jointCount === 2 ? 0 : Math.abs(arm.link1 - arm.link2);
+  if (arm.jointCount === 2) {
+    if (reach <= 0.0001) {
+      throw new Error("unreachable: 2-joint target cannot be at the base origin");
+    }
+    if (reach > maxReach) {
+      throw new Error(`unreachable: reach=${reach.toFixed(3)}, allowed=0.000..${maxReach.toFixed(3)}`);
+    }
+    return {
+      base: Math.atan2(y, x),
+      shoulder: Math.atan2(z, radial),
+      elbow: 0,
+      reach,
+      minReach,
+      maxReach,
+    };
+  }
   if (reach > maxReach || reach < minReach) {
     throw new Error(`unreachable: reach=${reach.toFixed(3)}, allowed=${minReach.toFixed(3)}..${maxReach.toFixed(3)}`);
   }
@@ -566,6 +651,87 @@ function solveArmIk(arm) {
   return { base, shoulder, elbow, reach, minReach, maxReach };
 }
 
+function pointSub(a, b) {
+  return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
+}
+
+function pointAdd(a, b) {
+  return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
+}
+
+function pointScale(a, scale) {
+  return { x: a.x * scale, y: a.y * scale, z: a.z * scale };
+}
+
+function pointDot(a, b) {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+function pointLength(a) {
+  return Math.sqrt(pointDot(a, a));
+}
+
+function trimSegment(start, end, trimStart, trimEnd) {
+  const vector = pointSub(end, start);
+  const length = pointLength(vector);
+  if (length <= 0.000001 || trimStart + trimEnd >= length) return null;
+  const direction = pointScale(vector, 1 / length);
+  return [
+    pointAdd(start, pointScale(direction, trimStart)),
+    pointAdd(end, pointScale(direction, -trimEnd)),
+  ];
+}
+
+function closestPointOnSegmentDistance(point, start, end) {
+  const segment = pointSub(end, start);
+  const lengthSq = pointDot(segment, segment);
+  if (lengthSq <= 0.000001) return pointLength(pointSub(point, start));
+  const t = Math.max(0, Math.min(1, pointDot(pointSub(point, start), segment) / lengthSq));
+  const closest = pointAdd(start, pointScale(segment, t));
+  return pointLength(pointSub(point, closest));
+}
+
+function segmentDistance(a0, a1, b0, b1) {
+  const distances = [];
+  for (let i = 0; i <= 16; i += 1) {
+    const t = i / 16;
+    const point = pointAdd(a0, pointScale(pointSub(a1, a0), t));
+    distances.push(closestPointOnSegmentDistance(point, b0, b1));
+  }
+  for (let i = 0; i <= 16; i += 1) {
+    const t = i / 16;
+    const point = pointAdd(b0, pointScale(pointSub(b1, b0), t));
+    distances.push(closestPointOnSegmentDistance(point, a0, a1));
+  }
+  return Math.min(...distances);
+}
+
+function armSafetyCheck(arm, points) {
+  const warnings = [];
+  if (arm.jointCount === 3 && points.length >= 3) {
+    const radius1 = Math.max(0, arm.radii.link1 || 0);
+    const radius2 = Math.max(0, arm.radii.link2 || 0);
+    const required = radius1 + radius2;
+    if (required > 0) {
+      const link1Length = pointLength(pointSub(points[1], points[0]));
+      const link2Length = pointLength(pointSub(points[2], points[1]));
+      if (required >= Math.min(link1Length, link2Length)) {
+        warnings.push(`link radii are too large for the configured lengths: ${required.toFixed(3)} m clearance needed`);
+        return { ok: false, warnings };
+      }
+      const upper = trimSegment(points[0], points[1], 0, required);
+      const forearm = trimSegment(points[1], points[2], required, 0);
+      if (upper && forearm) {
+        const clearance = segmentDistance(upper[0], upper[1], forearm[0], forearm[1]);
+        if (clearance < required) {
+          warnings.push(`link radii overlap: clearance ${clearance.toFixed(3)} m is below ${required.toFixed(3)} m`);
+        }
+      }
+    }
+  }
+  return { ok: warnings.length === 0, warnings };
+}
+
 function armPreview() {
   const arm = armInputState();
   try {
@@ -577,6 +743,15 @@ function armPreview() {
     };
     const baseDir = { x: Math.cos(joints.base), y: Math.sin(joints.base) };
     const p0 = { x: 0, y: 0, z: 0 };
+    if (arm.jointCount === 2) {
+      const p1 = {
+        x: arm.target.x,
+        y: arm.target.y,
+        z: arm.target.z,
+      };
+      const points = [p0, p1];
+      return { ok: true, safe: true, arm, joints, motorTargets, points, safety: armSafetyCheck(arm, points), message: "" };
+    }
     const p1 = {
       x: arm.link1 * Math.cos(joints.shoulder) * baseDir.x,
       y: arm.link1 * Math.cos(joints.shoulder) * baseDir.y,
@@ -587,16 +762,24 @@ function armPreview() {
       y: p1.y + arm.link2 * Math.cos(joints.shoulder + joints.elbow) * baseDir.y,
       z: p1.z + arm.link2 * Math.sin(joints.shoulder + joints.elbow),
     };
-    return { ok: true, arm, joints, motorTargets, points: [p0, p1, p2], message: "" };
+    const points = [p0, p1, p2];
+    const safety = armSafetyCheck(arm, points);
+    return { ok: true, safe: safety.ok, arm, joints, motorTargets, points, safety, message: "" };
   } catch (error) {
     const radial = Math.hypot(arm.target.x, arm.target.y);
     const reach = Math.hypot(radial, arm.target.z);
     return {
       ok: false,
       arm,
-      joints: { reach, minReach: Math.abs(arm.link1 - arm.link2), maxReach: arm.link1 + arm.link2 },
+      joints: {
+        reach,
+        minReach: arm.jointCount === 2 ? 0 : Math.abs(arm.link1 - arm.link2),
+        maxReach: arm.link1 + arm.link2,
+      },
       motorTargets: null,
       points: [{ x: 0, y: 0, z: 0 }, arm.target],
+      safe: false,
+      safety: { ok: false, warnings: [error.message] },
       message: error.message,
     };
   }
@@ -612,17 +795,40 @@ function renderArmSolution(preview) {
     return;
   }
   const { joints, motorTargets } = preview;
-  $("armSolution").textContent =
-    `joints rad  base=${joints.base.toFixed(3)} ` +
-    `shoulder=${joints.shoulder.toFixed(3)} ` +
-    `elbow=${joints.elbow.toFixed(3)}\n` +
-    `motors rad  base=${motorTargets.base.toFixed(3)} ` +
-    `shoulder=${motorTargets.shoulder.toFixed(3)} ` +
-    `elbow=${motorTargets.elbow.toFixed(3)}`;
+  if (preview.arm.jointCount === 2) {
+    $("armSolution").textContent =
+      `joints rad  base=${joints.base.toFixed(3)} ` +
+      `shoulder=${joints.shoulder.toFixed(3)}\n` +
+      `motors rad  base=${motorTargets.base.toFixed(3)} ` +
+      `shoulder=${motorTargets.shoulder.toFixed(3)}`;
+  } else {
+    $("armSolution").textContent =
+      `joints rad  base=${joints.base.toFixed(3)} ` +
+      `shoulder=${joints.shoulder.toFixed(3)} ` +
+      `elbow=${joints.elbow.toFixed(3)}\n` +
+      `motors rad  base=${motorTargets.base.toFixed(3)} ` +
+      `shoulder=${motorTargets.shoulder.toFixed(3)} ` +
+      `elbow=${motorTargets.elbow.toFixed(3)}`;
+  }
   $("ikReachValue").textContent = `${joints.reach.toFixed(3)} m`;
   $("ikBaseValue").textContent = `${joints.base.toFixed(3)} rad`;
   $("ikShoulderValue").textContent = `${joints.shoulder.toFixed(3)} rad`;
-  $("ikElbowValue").textContent = `${joints.elbow.toFixed(3)} rad`;
+  $("ikElbowValue").textContent = preview.arm.jointCount === 2 ? "--" : `${joints.elbow.toFixed(3)} rad`;
+}
+
+function renderArmSafety(preview) {
+  const warning = $("armSafetyWarning");
+  const moveButton = document.querySelector('[data-command="arm-move"]');
+  const warnings = preview.safety && preview.safety.warnings ? preview.safety.warnings : [];
+  const unsafe = !preview.ok || !preview.safe;
+  if (warning) {
+    warning.hidden = !warnings.length || !preview.ok;
+    warning.textContent = warnings.length ? `Safety warning: ${warnings.join("; ")}` : "";
+  }
+  if (moveButton) {
+    moveButton.disabled = busy || unsafe;
+    moveButton.title = unsafe && warnings.length ? warnings.join("; ") : "";
+  }
 }
 
 function projectPoint(point, scale, centerX, centerY, yaw, pitch) {
@@ -664,6 +870,45 @@ function drawProjectedPath(ctx, points, project) {
   });
 }
 
+function previewLinkRadii(preview) {
+  const radii = preview.arm.radii || {};
+  const radius1 = Math.max(0, radii.link1 || 0);
+  const radius2 = Math.max(0, radii.link2 || 0);
+  return preview.arm.jointCount === 2 ? [Math.max(radius1, radius2)] : [radius1, radius2];
+}
+
+function drawArmCapsules(ctx, points, preview, scale, options = {}) {
+  const radii = previewLinkRadii(preview);
+  const unsafe = !preview.safe;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.shadowColor = "rgba(0, 0, 0, 0.35)";
+  ctx.shadowBlur = options.shadow ? 12 : 0;
+  points.slice(1).forEach((point, index) => {
+    const previous = points[index];
+    const radiusWidth = radii[index] * scale * 2;
+    const outerWidth = Math.max(options.minOuterWidth || 8, radiusWidth);
+    ctx.strokeStyle = unsafe ? "#ff6b5f" : "#d99a24";
+    ctx.lineWidth = outerWidth;
+    ctx.beginPath();
+    ctx.moveTo(previous.x, previous.y);
+    ctx.lineTo(point.x, point.y);
+    ctx.stroke();
+  });
+  ctx.shadowBlur = 0;
+  points.slice(1).forEach((point, index) => {
+    const previous = points[index];
+    const radiusWidth = radii[index] * scale * 2;
+    const outerWidth = Math.max(options.minOuterWidth || 8, radiusWidth);
+    ctx.strokeStyle = unsafe ? "#ffd0cc" : "#ffe7a3";
+    ctx.lineWidth = Math.max(options.minInnerWidth || 3, outerWidth * 0.28);
+    ctx.beginPath();
+    ctx.moveTo(previous.x, previous.y);
+    ctx.lineTo(point.x, point.y);
+    ctx.stroke();
+  });
+}
+
 function drawIkCanvas(preview) {
   const canvas = $("armIkCanvas");
   if (!canvas) return;
@@ -678,11 +923,12 @@ function drawIkCanvas(preview) {
   ctx.clearRect(0, 0, width, height);
 
   const target = preview.arm.target;
+  const maxLinkRadius = Math.max(...previewLinkRadii(preview));
   const sceneRadius = Math.max(
     preview.arm.link1 + preview.arm.link2,
     Math.hypot(target.x, target.y, target.z),
     0.2
-  );
+  ) + maxLinkRadius * 1.2;
   const scale = Math.min(width / (sceneRadius * 2.7), height / (sceneRadius * 2.25));
   const centerX = width * 0.50;
   const centerY = height * 0.70;
@@ -738,7 +984,7 @@ function drawIkCanvas(preview) {
 
   const targetTop = project(target);
   const targetBase = project({ x: target.x, y: target.y, z: 0 });
-  ctx.strokeStyle = preview.ok ? "#ffd166" : "#ff6b5f";
+  ctx.strokeStyle = preview.ok && preview.safe ? "#ffd166" : "#ff6b5f";
   ctx.lineWidth = 2;
   ctx.setLineDash([5, 4]);
   ctx.beginPath();
@@ -746,34 +992,16 @@ function drawIkCanvas(preview) {
   ctx.lineTo(targetTop.x, targetTop.y);
   ctx.stroke();
   ctx.setLineDash([]);
-  ctx.fillStyle = preview.ok ? "#ffd166" : "#ff6b5f";
+  ctx.fillStyle = preview.ok && preview.safe ? "#ffd166" : "#ff6b5f";
   ctx.beginPath();
   ctx.arc(targetTop.x, targetTop.y, 6, 0, Math.PI * 2);
   ctx.fill();
 
   if (preview.ok) {
     const points = preview.points.map(project);
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.shadowColor = "rgba(0, 0, 0, 0.35)";
-    ctx.shadowBlur = 12;
-    ctx.strokeStyle = "#d99a24";
-    ctx.lineWidth = 13;
-    ctx.beginPath();
-    ctx.moveTo(points[0].x, points[0].y);
-    ctx.lineTo(points[1].x, points[1].y);
-    ctx.lineTo(points[2].x, points[2].y);
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-    ctx.strokeStyle = "#ffe7a3";
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.moveTo(points[0].x, points[0].y);
-    ctx.lineTo(points[1].x, points[1].y);
-    ctx.lineTo(points[2].x, points[2].y);
-    ctx.stroke();
+    drawArmCapsules(ctx, points, preview, scale, { minOuterWidth: 9, minInnerWidth: 3, shadow: true });
     points.forEach((point, index) => {
-      ctx.fillStyle = index === 2 ? "#ffd166" : "#f3f7f5";
+      ctx.fillStyle = index === points.length - 1 ? "#ffd166" : "#f3f7f5";
       ctx.beginPath();
       ctx.arc(point.x, point.y, index === 1 ? 7 : 6, 0, Math.PI * 2);
       ctx.fill();
@@ -829,11 +1057,12 @@ function drawTargetScene(preview, canvasId, options = {}) {
   ctx.clearRect(0, 0, width, height);
 
   const target = preview.arm.target;
+  const maxLinkRadius = Math.max(...previewLinkRadii(preview));
   const sceneRadius = Math.max(
     preview.arm.link1 + preview.arm.link2,
     Math.hypot(target.x, target.y, target.z),
     0.2
-  );
+  ) + maxLinkRadius * 1.2;
   const scale = Math.min(width / (sceneRadius * (options.compact ? 3.0 : 2.75)), height / (sceneRadius * 2.35));
   const centerX = width * 0.5;
   const centerY = height * (options.compact ? 0.72 : 0.68);
@@ -886,7 +1115,7 @@ function drawTargetScene(preview, canvasId, options = {}) {
 
   const targetBase = project({ x: target.x, y: target.y, z: 0 });
   const targetTop = project(target);
-  ctx.strokeStyle = preview.ok ? "#ffd166" : "#ff6b5f";
+  ctx.strokeStyle = preview.ok && preview.safe ? "#ffd166" : "#ff6b5f";
   ctx.lineWidth = 2;
   ctx.setLineDash([5, 4]);
   ctx.beginPath();
@@ -897,25 +1126,10 @@ function drawTargetScene(preview, canvasId, options = {}) {
 
   if (preview.ok) {
     const points = preview.points.map(project);
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.strokeStyle = "#d99a24";
-    ctx.lineWidth = 10;
-    ctx.beginPath();
-    ctx.moveTo(points[0].x, points[0].y);
-    ctx.lineTo(points[1].x, points[1].y);
-    ctx.lineTo(points[2].x, points[2].y);
-    ctx.stroke();
-    ctx.strokeStyle = "#ffe7a3";
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(points[0].x, points[0].y);
-    ctx.lineTo(points[1].x, points[1].y);
-    ctx.lineTo(points[2].x, points[2].y);
-    ctx.stroke();
+    drawArmCapsules(ctx, points, preview, scale, { minOuterWidth: 8, minInnerWidth: 2 });
   }
 
-  ctx.fillStyle = preview.ok ? "#ffd166" : "#ff6b5f";
+  ctx.fillStyle = preview.ok && preview.safe ? "#ffd166" : "#ff6b5f";
   ctx.beginPath();
   ctx.arc(targetTop.x, targetTop.y, 8, 0, Math.PI * 2);
   ctx.fill();
@@ -953,9 +1167,11 @@ function drawTargetEditor(preview) {
 }
 
 function renderIkPreview() {
+  updateJointModeUi();
   const preview = armPreview();
-  $("armConfiguredState").classList.toggle("fault", !preview.ok);
+  $("armConfiguredState").classList.toggle("fault", !preview.ok || !preview.safe);
   renderArmSolution(preview);
+  renderArmSafety(preview);
   drawIkCanvas(preview);
   drawTargetPad(preview);
   drawTargetEditor(preview);
@@ -973,12 +1189,20 @@ function updateWizardVisual(preview) {
   if (!step || !el) return;
   const arm = preview ? preview.arm : armInputState();
   if (step.key === "joints") {
-    el.textContent =
-      `3 joints: base ${$("armBaseMotorIdInput").value || "--"} (${$("armBaseModelInput").value}), ` +
-      `shoulder ${$("armShoulderMotorIdInput").value || "--"} (${$("armShoulderModelInput").value}), ` +
-      `elbow ${$("armElbowMotorIdInput").value || "--"} (${$("armElbowModelInput").value})`;
+    if (arm.jointCount === 2) {
+      el.textContent =
+        `2 joints: base ${$("armBaseMotorIdInput").value || "--"} (${$("armBaseModelInput").value}), ` +
+        `shoulder ${$("armShoulderMotorIdInput").value || "--"} (${$("armShoulderModelInput").value})`;
+    } else {
+      el.textContent =
+        `3 joints: base ${$("armBaseMotorIdInput").value || "--"} (${$("armBaseModelInput").value}), ` +
+        `shoulder ${$("armShoulderMotorIdInput").value || "--"} (${$("armShoulderModelInput").value}), ` +
+        `elbow ${$("armElbowMotorIdInput").value || "--"} (${$("armElbowModelInput").value})`;
+    }
   } else if (step.key === "lengths") {
-    el.textContent = `Reach ${(arm.link1 + arm.link2).toFixed(3)} m from links ${arm.link1.toFixed(3)} + ${arm.link2.toFixed(3)} m`;
+    el.textContent =
+      `Reach ${(arm.link1 + arm.link2).toFixed(3)} m from links ${arm.link1.toFixed(3)} + ${arm.link2.toFixed(3)} m. ` +
+      `Radii ${arm.radii.link1.toFixed(3)} / ${arm.radii.link2.toFixed(3)} m`;
   } else if (step.key === "home") {
     el.textContent =
       `Home will save offsets from the current motor positions: base ${arm.offsets.base.toFixed(3)}, shoulder ${arm.offsets.shoulder.toFixed(3)}, elbow ${arm.offsets.elbow.toFixed(3)} rad`;
@@ -1178,6 +1402,22 @@ function syncReach() {
   $("wizardTotalReachInput").value = (arm.link1 + arm.link2).toFixed(3);
 }
 
+function updateJointModeUi() {
+  const twoJoint = jointCountInput() === 2;
+  document.querySelectorAll(".elbow-only").forEach((el) => {
+    el.classList.toggle("mode-hidden", twoJoint);
+  });
+  ["armElbowMotorIdInput", "armElbowModelInput", "armElbowUpToggle"].forEach((id) => {
+    const el = $(id);
+    if (el) el.disabled = twoJoint;
+  });
+  const visual = document.querySelector(".wizard-joint-visual");
+  if (visual) visual.classList.toggle("two-joint", twoJoint);
+  document.querySelectorAll(".home-pose-visual").forEach((el) => {
+    el.classList.toggle("two-joint", twoJoint);
+  });
+}
+
 function render(state) {
   const detectedMotors = normalizedMotorList(state.discoveredPrivate);
   setControlValue("serialPortInput", state.serialPort || "auto");
@@ -1207,8 +1447,11 @@ function render(state) {
   setControlValue("positionKpInput", Number(state.positionKp || 5).toFixed(1));
 
   const arm = state.arm || {};
+  setControlValue("wizardJointCountInput", Number(arm.jointCount) === 2 ? "2" : "3");
+  updateJointModeUi();
   const armIds = arm.motorIdHex || {};
   const armModels = arm.models || {};
+  const armRadii = arm.radii || {};
   const armOffsets = arm.offsets || {};
   const armDirections = arm.directions || {};
   const armTarget = arm.target || {};
@@ -1216,14 +1459,16 @@ function render(state) {
   const baseMotor = chooseDetectedMotor(detectedMotors, armIds.base, usedArmMotors);
   const shoulderMotor = chooseDetectedMotor(detectedMotors, armIds.shoulder, usedArmMotors);
   const elbowMotor = chooseDetectedMotor(detectedMotors, armIds.elbow, usedArmMotors);
-  setMotorSelectOptions("armBaseMotorIdInput", detectedMotors, armIds.base, baseMotor);
-  setMotorSelectOptions("armShoulderMotorIdInput", detectedMotors, armIds.shoulder, shoulderMotor);
-  setMotorSelectOptions("armElbowMotorIdInput", detectedMotors, armIds.elbow, elbowMotor);
+  setMotorSelectOptions("armBaseMotorIdInput", detectedMotors, baseMotor, baseMotor);
+  setMotorSelectOptions("armShoulderMotorIdInput", detectedMotors, shoulderMotor, shoulderMotor);
+  setMotorSelectOptions("armElbowMotorIdInput", detectedMotors, elbowMotor, elbowMotor);
   setControlValue("armBaseModelInput", armModels.base || state.model || "rs-05");
   setControlValue("armShoulderModelInput", armModels.shoulder || state.model || "rs-05");
   setControlValue("armElbowModelInput", armModels.elbow || state.model || "rs-05");
   setControlValue("armLink1Input", Number(arm.link1 || 0.25).toFixed(3));
   setControlValue("armLink2Input", Number(arm.link2 || 0.25).toFixed(3));
+  setControlValue("armLink1RadiusInput", Number(armRadii.link1 ?? 0.015).toFixed(3));
+  setControlValue("armLink2RadiusInput", Number(armRadii.link2 ?? 0.015).toFixed(3));
   setControlChecked("armElbowUpToggle", arm.elbowUp);
   setControlValue("armTargetXInput", Number(armTarget.x || 0).toFixed(3));
   setControlValue("armTargetYInput", Number(armTarget.y || 0).toFixed(3));
@@ -1349,6 +1594,8 @@ $("activeReportsToggle").addEventListener("change", () => {
 
 $("wizardJointCountInput").addEventListener("change", () => {
   markDirty("wizardJointCountInput");
+  updateJointModeUi();
+  renderIkPreview();
 });
 
 $("clearLogBtn").addEventListener("click", () => {
