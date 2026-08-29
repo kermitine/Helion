@@ -65,9 +65,11 @@ COMM_GET_ID = 0x00
 COMM_OPERATION_STATUS = 0x02
 COMM_ENABLE = 0x03
 COMM_DISABLE = 0x04
+COMM_SET_DEVICE_ID = 0x07
 COMM_READ_PARAM = 0x11
 COMM_WRITE_PARAM = 0x12
 COMM_FAULT = 0x15
+COMM_SAVE_PARAMETERS = 0x16
 COMM_PROACTIVE_REPORT = 0x18
 
 MOTOR_STUDIO_JOG_SPEED_RAD_S = 1.0
@@ -81,6 +83,7 @@ MAX_FRAME_HISTORY = 600
 COMMAND_TIMEOUT_S = 0.6
 ARM_AXES = ("base", "shoulder", "elbow")
 ARM_JOINT_COUNTS = (2, 3)
+ARM_ROLE_DEFAULT_IDS = {"base": 0x01, "shoulder": 0x02, "elbow": 0x03}
 
 ROOT_DIR = Path(__file__).resolve().parent
 WEB_DIR = ROOT_DIR / "web"
@@ -90,7 +93,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.08.29.1"
+APP_VERSION = "2026.08.29.2"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -99,6 +102,17 @@ def parse_int(value: Any, default: int) -> int:
     if isinstance(value, int):
         return value
     return int(str(value), 0)
+
+
+def private_device_id(value: Any, name: str, default: Optional[int] = None, allow_zero: bool = False) -> int:
+    if default is None and (value is None or value == ""):
+        raise ValueError(f"{name} is required")
+    parsed = parse_int(value, default if default is not None else -1)
+    minimum = 0 if allow_zero else 1
+    if parsed < minimum or parsed > SCAN_LAST_ID:
+        first = "0x00" if allow_zero else "0x01"
+        raise ValueError(f"{name} must be {first}..{fmt_id(SCAN_LAST_ID)}, got {fmt_id(parsed & 0xFF)}")
+    return parsed & 0xFF
 
 
 def parse_float(value: Any, default: float) -> float:
@@ -501,6 +515,16 @@ class DashboardController:
     def send_private_get_id(self, target_id: int) -> None:
         self.send_private(COMM_GET_ID, self.host_id, target_id, bytes(8))
 
+    def send_private_get_id_with_host(self, target_id: int, host_id: int) -> None:
+        self.send_private(COMM_GET_ID, host_id & 0xFF, target_id & 0xFF, bytes(8))
+
+    def send_private_set_device_id(self, old_id: int, new_id: int, host_id: int, token: bytes) -> None:
+        extra = ((new_id & 0xFF) << 8) | (host_id & 0xFF)
+        self.send_private(COMM_SET_DEVICE_ID, extra, old_id & 0xFF, bytes(token[:8]).ljust(8, b"\x00"))
+
+    def send_private_save_parameters_to(self, target_id: int, host_id: int) -> None:
+        self.send_private(COMM_SAVE_PARAMETERS, host_id & 0xFF, target_id & 0xFF, bytes([1, 2, 3, 4, 5, 6, 7, 8]))
+
     def send_private_disable_to(self, target_id: int, clear_error: bool = False) -> None:
         payload = bytearray(8)
         payload[0] = 1 if clear_error else 0
@@ -677,6 +701,49 @@ class DashboardController:
     def wait_private_status(self, timeout_s: float, after_seq: Optional[int] = None) -> Optional[Any]:
         return self.wait_private_status_for(self.motor_id, timeout_s, after_seq)
 
+    def wait_private_get_id(
+        self,
+        target_id: int,
+        host_id: int,
+        timeout_s: float,
+        after_seq: Optional[int] = None,
+    ) -> Optional[Any]:
+        start_seq = self.current_seq() if after_seq is None else after_seq
+        self.send_private_get_id_with_host(target_id, host_id)
+
+        def matches(frame: Any) -> bool:
+            if not frame.extended or len(frame.data) < 8:
+                return False
+            comm_type, extra, _responder = split_private_ext_id(frame.arbitration_id)
+            return comm_type == COMM_GET_ID and (extra & 0xFF) == (target_id & 0xFF)
+
+        return self.wait_for_frame(matches, timeout_s, start_seq)
+
+    def ping_private_candidates(self, target_id: int, timeout_s: float) -> Optional[Tuple[bytes, int, int]]:
+        per_host_timeout = max(0.08, timeout_s / max(1, len(self.private_host_candidates())))
+        for host in self.private_host_candidates():
+            frame = self.wait_private_get_id(target_id, host, per_host_timeout)
+            if frame is None:
+                continue
+            _comm_type, _extra, responder = split_private_ext_id(frame.arbitration_id)
+            return bytes(frame.data[:8]).ljust(8, b"\x00"), host, responder
+        return None
+
+    def wait_private_save_ack(self, target_id: int, timeout_s: float, after_seq: int) -> bool:
+        def matches(frame: Any) -> bool:
+            if not frame.extended or len(frame.data) < 8:
+                return False
+            comm_type, extra, _responder = split_private_ext_id(frame.arbitration_id)
+            source_motor = extra & 0xFF
+            return source_motor == (target_id & 0xFF) and comm_type in (
+                COMM_GET_ID,
+                COMM_OPERATION_STATUS,
+                COMM_READ_PARAM,
+                COMM_WRITE_PARAM,
+            )
+
+        return self.wait_for_frame(matches, timeout_s, after_seq) is not None
+
     def private_status_position_rad(self, frame: Any, target_id: Optional[int] = None) -> float:
         if frame is None or not frame.extended or len(frame.data) < 2:
             raise ValueError("status frame did not include a motor position")
@@ -774,6 +841,11 @@ class DashboardController:
         if command == "scan-private":
             self.scan_private()
             return {"ok": True}
+        if command == "id-scan":
+            self.scan_private()
+            return {"ok": True}
+        if command == "assign-motor-id":
+            return self.assign_motor_id(payload)
         if command == "configure":
             return {"ok": self.configure_velocity()}
         if command == "forward":
@@ -1609,6 +1681,100 @@ class DashboardController:
                 self.log(f"param {label}={raw[0]}")
             else:
                 self.log(f"param {label}={read_f32_le(raw):.4f}")
+
+    def assign_motor_id(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        old_id = private_device_id(payload.get("oldMotorId"), "current motor ID", self.motor_id, allow_zero=True)
+        new_id = private_device_id(payload.get("newMotorId"), "new motor ID")
+        if old_id == new_id:
+            raise ValueError("current motor ID and new motor ID are the same")
+
+        role = str(payload.get("role") or "").strip().lower()
+        if role and role not in ARM_AXES:
+            raise ValueError("IK role must be base, shoulder, elbow, or blank")
+
+        store = bool(payload.get("store", True))
+        with self.lock:
+            self.oscillating = False
+            self.jog_active = False
+            self.velocity_configured = False
+            self.position_configured = False
+            self.arm_position_configured = False
+            self.commanded_speed = 0.0
+
+        ping = self.ping_private_candidates(old_id, COMMAND_TIMEOUT_S)
+        if ping is None:
+            raise ValueError(f"current motor ID {fmt_id(old_id)} did not respond")
+        token, host_id, responder = ping
+        self.log(
+            f"Assigning motor ID {fmt_id(old_id)} -> {fmt_id(new_id)} "
+            f"host={fmt_id(host_id)} responder={fmt_id(responder)} uuid={bytes_hex(token).replace(' ', '')}"
+        )
+
+        with self.lock:
+            self.host_id = host_id & 0xFF
+        self.send_private_disable_to(old_id, False)
+        time.sleep(0.08)
+        self.send_private_set_device_id(old_id, new_id, host_id, token)
+        time.sleep(0.25)
+
+        verified = self.ping_private_candidates(new_id, COMMAND_TIMEOUT_S)
+        if verified is None:
+            old_still_present = self.ping_private_candidates(old_id, max(0.18, COMMAND_TIMEOUT_S / 2)) is not None
+            if old_still_present:
+                raise ValueError(f"motor stayed at {fmt_id(old_id)}; ID change did not verify")
+            raise ValueError(f"new motor ID {fmt_id(new_id)} did not verify; power-cycle and scan before retrying")
+
+        save_ack = False
+        if store:
+            start = self.current_seq()
+            self.send_private_save_parameters_to(new_id, host_id)
+            save_ack = self.wait_private_save_ack(new_id, 0.50, start)
+            if not save_ack:
+                self.log(f"Save-parameters ack not seen for {fmt_id(new_id)}; ID works but power-cycle persistence is unconfirmed")
+
+        with self.lock:
+            self.motor_id = new_id
+            if role:
+                self.arm_motor_ids[role] = new_id
+                used_ids = {new_id}
+                for axis in ARM_AXES:
+                    if axis == role:
+                        continue
+                    if self.arm_motor_ids[axis] in used_ids:
+                        replacement = ARM_ROLE_DEFAULT_IDS[axis]
+                        if replacement in used_ids:
+                            replacement = next(
+                                candidate
+                                for candidate in range(1, SCAN_LAST_ID + 1)
+                                if candidate not in used_ids
+                            )
+                        self.arm_motor_ids[axis] = replacement
+                    used_ids.add(self.arm_motor_ids[axis])
+            discovered = set(self.discovered_private)
+            discovered.discard(old_id)
+            discovered.add(new_id)
+            self.discovered_private = sorted(discovered)
+
+        if role and store:
+            self.save_values()
+
+        message = f"Motor ID assigned {fmt_id(old_id)} -> {fmt_id(new_id)}"
+        if role:
+            message += f" for {role}"
+        if store:
+            message += " and save sent"
+        self.log(message)
+        return {
+            "ok": True,
+            "message": message,
+            "oldMotorId": old_id,
+            "oldMotorIdHex": fmt_id(old_id),
+            "newMotorId": new_id,
+            "newMotorIdHex": fmt_id(new_id),
+            "role": role,
+            "stored": store,
+            "saveAck": save_ack,
+        }
 
     def scan_private(self) -> None:
         with self.lock:

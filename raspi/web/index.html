@@ -48,8 +48,102 @@
         <div class="button-row">
           <button data-command="reopen">Reconnect</button>
           <button data-command="scan">Scan Private</button>
+          <button id="idSetupBtn" type="button" class="soft">Assign IDs</button>
         </div>
       </section>
+
+      <div class="wizard-overlay" id="idSetupFlow" role="dialog" aria-modal="true" aria-labelledby="idSetupTitle" hidden>
+        <div class="id-window">
+          <div class="wizard-progress">
+            <span>Motor IDs</span>
+            <strong id="idSetupTitle">Assign Unique Motor IDs</strong>
+            <button id="idSetupCloseBtn" type="button" class="ghost">Close</button>
+          </div>
+
+          <div class="id-setup-body">
+            <div class="id-setup-panel">
+              <div class="wizard-head">
+                <h3>One motor at a time</h3>
+                <span id="idSetupState">Ready</span>
+              </div>
+
+              <div class="id-flow-visual" aria-hidden="true">
+                <div class="id-node id-adapter-node">
+                  <span>USB-CAN</span>
+                  <strong>Adapter</strong>
+                </div>
+                <i></i>
+                <div class="id-node id-motor-node">
+                  <span id="idSetupOldPreview">0x7F</span>
+                  <strong>Single Motor</strong>
+                </div>
+                <i></i>
+                <div class="id-node id-role-node">
+                  <span id="idSetupNewPreview">0x01</span>
+                  <strong id="idSetupRolePreview">Base</strong>
+                </div>
+              </div>
+
+              <ol class="id-setup-steps">
+                <li>Power off the arm and leave exactly one motor connected to the CAN adapter.</li>
+                <li>Power that one motor, scan, choose its IK role, then set its new ID.</li>
+                <li>Repeat for each motor before running IK with the full arm connected.</li>
+              </ol>
+
+              <div class="arm-grid">
+                <label>
+                  <span>Current ID</span>
+                  <select id="idSetupOldMotorInput">
+                    <option value="0x7F">0x7F</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Assign As</span>
+                  <select id="idSetupRoleInput">
+                    <option value="base">Base</option>
+                    <option value="shoulder">Shoulder</option>
+                    <option value="elbow">Elbow</option>
+                    <option value="">No IK Slot</option>
+                  </select>
+                </label>
+                <label>
+                  <span>New ID</span>
+                  <select id="idSetupNewMotorInput"></select>
+                </label>
+                <label class="switch">
+                  <input id="idSetupStoreToggle" type="checkbox" checked>
+                  <span>Permanent</span>
+                </label>
+              </div>
+
+              <div class="button-row id-setup-actions">
+                <button id="idSetupScanBtn" type="button">Scan Single</button>
+                <button id="idSetupAssignBtn" type="button" class="soft">Set ID</button>
+              </div>
+
+              <div id="idSetupMessage" class="safety-warning" hidden></div>
+            </div>
+
+            <div class="id-role-preview">
+              <h3>IK Motor Map</h3>
+              <div class="id-role-list">
+                <div>
+                  <span>Base</span>
+                  <strong id="idSetupBasePreview">--</strong>
+                </div>
+                <div>
+                  <span>Shoulder</span>
+                  <strong id="idSetupShoulderPreview">--</strong>
+                </div>
+                <div>
+                  <span>Elbow</span>
+                  <strong id="idSetupElbowPreview">--</strong>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <section class="dashboard-grid">
         <div class="panel controls-panel">
@@ -119,6 +213,7 @@
 
           <div class="arm-summary">
             <button id="setupIkBtn" type="button" class="soft">Setup IK</button>
+            <button id="idSetupIkBtn" type="button">Assign Motor IDs</button>
             <div class="main-target-control">
               <div class="target-pad">
                 <div class="target-pad-head">

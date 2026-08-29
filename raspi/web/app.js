@@ -52,6 +52,7 @@ const armControlIds = [
 ];
 const speedControlIds = ["speedSlider"];
 const valueButtons = [$("saveValuesBtn"), $("downloadValuesBtn"), $("uploadValuesBtn")].filter(Boolean);
+const idSetupButtons = [$("idSetupScanBtn"), $("idSetupAssignBtn")].filter(Boolean);
 const allValueControlIds = [
   ...configControlIds,
   ...positionControlIds,
@@ -67,6 +68,11 @@ const wizardSteps = [
   { key: "home", title: "Home", visual: "Straight ahead, level shoulder, straight elbow" },
   { key: "save", title: "Save", visual: "Save, download, or upload the setup" },
 ];
+const idSetupRoleDefaults = {
+  base: "0x01",
+  shoulder: "0x02",
+  elbow: "0x03",
+};
 
 function fixed(value, digits, suffix) {
   if (typeof value !== "number" || Number.isNaN(value)) return "--";
@@ -506,6 +512,9 @@ function renderBusy(isBusy) {
   valueButtons.forEach((button) => {
     button.disabled = isBusy;
   });
+  idSetupButtons.forEach((button) => {
+    button.disabled = isBusy;
+  });
   if (!isBusy) renderArmSafety(armPreview());
 }
 
@@ -580,6 +589,77 @@ function chooseDetectedMotor(motors, preferred, used) {
   const selected = uniquePreferred || motors.find((motor) => !used.has(motor)) || "";
   if (selected) used.add(selected);
   return selected;
+}
+
+function roleLabel(role) {
+  if (role === "base") return "Base";
+  if (role === "shoulder") return "Shoulder";
+  if (role === "elbow") return "Elbow";
+  return "No IK Slot";
+}
+
+function populateIdSetupNewOptions() {
+  const el = $("idSetupNewMotorInput");
+  if (!el || el.options.length) return;
+  for (let id = 1; id <= 0x7f; id += 1) {
+    const option = document.createElement("option");
+    option.value = idText(id, "");
+    option.textContent = option.value;
+    el.appendChild(option);
+  }
+  el.value = idSetupRoleDefaults.base;
+}
+
+function setIdSetupMotorOptions(motors) {
+  const el = $("idSetupOldMotorInput");
+  if (!el) return;
+  const current = document.activeElement === el ? el.value : "";
+  const choices = motors.length ? motors : [state && state.motorIdHex ? state.motorIdHex : "0x7F"];
+  const selected = choices.includes(current) ? current : choices[0];
+  el.innerHTML = "";
+  choices.forEach((motor) => {
+    const option = document.createElement("option");
+    option.value = motor;
+    option.textContent = motor;
+    el.appendChild(option);
+  });
+  el.value = selected;
+}
+
+function setIdSetupRoleDefault(force = false) {
+  const role = $("idSetupRoleInput").value;
+  const newId = idSetupRoleDefaults[role];
+  if (!newId) return;
+  const el = $("idSetupNewMotorInput");
+  if (force || !el.value) el.value = newId;
+}
+
+function setIdSetupMessage(text, show = Boolean(text)) {
+  const el = $("idSetupMessage");
+  if (!el) return;
+  el.hidden = !show;
+  el.textContent = text || "";
+}
+
+function updateIdSetupUi() {
+  populateIdSetupNewOptions();
+  setIdSetupRoleDefault();
+  const oldId = $("idSetupOldMotorInput").value || "0x7F";
+  const newId = $("idSetupNewMotorInput").value || "--";
+  const role = $("idSetupRoleInput").value;
+  $("idSetupOldPreview").textContent = oldId;
+  $("idSetupNewPreview").textContent = newId;
+  $("idSetupRolePreview").textContent = roleLabel(role);
+  $("idSetupBasePreview").textContent = $("armBaseMotorIdInput").value || "--";
+  $("idSetupShoulderPreview").textContent = $("armShoulderMotorIdInput").value || "--";
+  $("idSetupElbowPreview").textContent = $("armElbowMotorIdInput").value || "--";
+
+  const motors = normalizedMotorList(state ? state.discoveredPrivate : []);
+  $("idSetupState").textContent = motors.length === 1
+    ? `Detected ${motors[0]}`
+    : motors.length > 1
+      ? "Multiple IDs online"
+      : "Ready";
 }
 
 function armInputState() {
@@ -1223,6 +1303,115 @@ function closeWizard() {
   document.body.classList.remove("modal-open");
 }
 
+function openIdSetup() {
+  populateIdSetupNewOptions();
+  setIdSetupMotorOptions(normalizedMotorList(state ? state.discoveredPrivate : []));
+  updateIdSetupUi();
+  $("idSetupFlow").hidden = false;
+  document.body.classList.add("modal-open");
+}
+
+function closeIdSetup() {
+  $("idSetupFlow").hidden = true;
+  document.body.classList.remove("modal-open");
+}
+
+async function scanSingleMotorForIdSetup() {
+  if (busy) return;
+  busy = true;
+  renderBusy(true);
+  setIdSetupMessage("Scanning for the one connected motor...", true);
+  try {
+    await applyConfig();
+    const result = await post("/api/command", { command: "id-scan" });
+    if (result && result.ok === false) {
+      setIdSetupMessage(`Scan failed: ${result.message || "no reply"}`, true);
+      appendLocalLog(`ID setup scan failed: ${result.message || "no reply"}`);
+    } else {
+      appendLocalLog("ID setup scan complete");
+    }
+    await refresh();
+    setIdSetupMotorOptions(normalizedMotorList(state ? state.discoveredPrivate : []));
+    updateIdSetupUi();
+    const motors = normalizedMotorList(state ? state.discoveredPrivate : []);
+    setIdSetupMessage(
+      motors.length === 1
+        ? `Detected ${motors[0]}. Choose the IK role and set the new ID.`
+        : "For ID setup, leave exactly one motor connected before pressing Set ID.",
+      true,
+    );
+  } catch (error) {
+    setIdSetupMessage(`UI error: ${error.message}`, true);
+    appendLocalLog(`UI error: ${error.message}`);
+  } finally {
+    busy = false;
+    renderBusy(false);
+  }
+}
+
+async function assignMotorId() {
+  if (busy) return;
+  const oldMotorId = $("idSetupOldMotorInput").value;
+  const newMotorId = $("idSetupNewMotorInput").value;
+  const role = $("idSetupRoleInput").value;
+  if (!oldMotorId || !newMotorId) {
+    setIdSetupMessage("Select the current ID and new ID first.", true);
+    return;
+  }
+  if (oldMotorId === newMotorId) {
+    setIdSetupMessage("Pick a different new ID.", true);
+    return;
+  }
+  const detectedMotors = normalizedMotorList(state ? state.discoveredPrivate : []);
+  if (detectedMotors.length > 1) {
+    setIdSetupMessage("Disconnect all but the one motor being assigned, then scan again.", true);
+    return;
+  }
+  if (detectedMotors.includes(newMotorId) && newMotorId !== oldMotorId) {
+    setIdSetupMessage(`${newMotorId} is already online. Choose a free ID.`, true);
+    return;
+  }
+  if (!confirm("Power the arm with exactly one motor connected to CAN. If multiple same-ID motors are connected, they may all take this new ID.")) {
+    return;
+  }
+
+  busy = true;
+  renderBusy(true);
+  setIdSetupMessage(`Setting ${oldMotorId} to ${newMotorId}...`, true);
+  try {
+    await applyConfig();
+    const result = await post("/api/command", {
+      command: "assign-motor-id",
+      oldMotorId,
+      newMotorId,
+      role,
+      store: $("idSetupStoreToggle").checked,
+    });
+    if (result && result.ok === false) {
+      setIdSetupMessage(`Set ID failed: ${result.message || "not verified"}`, true);
+      appendLocalLog(`ID setup failed: ${result.message || "not verified"}`);
+    } else {
+      const message = result && result.message ? result.message : `Motor ID assigned ${oldMotorId} -> ${newMotorId}`;
+      setIdSetupMessage(message, true);
+      appendLocalLog(message);
+      if (result && result.role && result.stored) {
+        setValuesState("Saved");
+      } else if (result && result.role) {
+        setValuesState("Unsaved");
+      }
+    }
+    await refresh();
+    setIdSetupMotorOptions(normalizedMotorList(state ? state.discoveredPrivate : []));
+    updateIdSetupUi();
+  } catch (error) {
+    setIdSetupMessage(`UI error: ${error.message}`, true);
+    appendLocalLog(`UI error: ${error.message}`);
+  } finally {
+    busy = false;
+    renderBusy(false);
+  }
+}
+
 function setWizardStep(index) {
   wizardStepIndex = Math.max(0, Math.min(wizardSteps.length - 1, Number(index) || 0));
   const step = wizardSteps[wizardStepIndex];
@@ -1431,6 +1620,7 @@ function render(state) {
   status.className = `status-pill ${state.connected ? "online" : "offline"}`;
   $("subtitle").textContent = state.openError || state.transportLabel || "Helion control surface";
   $("appVersion").textContent = state.appVersion ? `v${state.appVersion}` : "v--";
+  setIdSetupMotorOptions(detectedMotors);
   $("configuredState").textContent = state.positionConfigured
     ? "Position configured"
     : state.velocityConfigured
@@ -1539,6 +1729,7 @@ function render(state) {
 
   $("logOutput").textContent = (state.logs || []).join("\n");
   $("logOutput").scrollTop = $("logOutput").scrollHeight;
+  updateIdSetupUi();
   if (state.valuesPath && $("valuesState").textContent === "Not saved") {
     setValuesState("Ready", state.valuesPath);
   }
@@ -1631,11 +1822,28 @@ $("uploadValuesInput").addEventListener("change", async (event) => {
 });
 
 $("setupIkBtn").addEventListener("click", openWizard);
+$("idSetupIkBtn").addEventListener("click", openIdSetup);
 $("wizardCloseBtn").addEventListener("click", closeWizard);
 $("wizardBackBtn").addEventListener("click", () => stepWizard(-1));
 $("wizardNextBtn").addEventListener("click", () => stepWizard(1));
 $("ikWizardFlow").addEventListener("click", (event) => {
   if (event.target === $("ikWizardFlow")) closeWizard();
+});
+
+$("idSetupBtn").addEventListener("click", openIdSetup);
+$("idSetupCloseBtn").addEventListener("click", closeIdSetup);
+$("idSetupScanBtn").addEventListener("click", scanSingleMotorForIdSetup);
+$("idSetupAssignBtn").addEventListener("click", assignMotorId);
+$("idSetupFlow").addEventListener("click", (event) => {
+  if (event.target === $("idSetupFlow")) closeIdSetup();
+});
+$("idSetupRoleInput").addEventListener("change", () => {
+  setIdSetupRoleDefault(true);
+  updateIdSetupUi();
+});
+["idSetupOldMotorInput", "idSetupNewMotorInput", "idSetupStoreToggle"].forEach((id) => {
+  $(id).addEventListener("input", updateIdSetupUi);
+  $(id).addEventListener("change", updateIdSetupUi);
 });
 
 $("targetEditorFlow").addEventListener("click", (event) => {
@@ -1644,6 +1852,7 @@ $("targetEditorFlow").addEventListener("click", (event) => {
 
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("ikWizardFlow").hidden) closeWizard();
+  if (event.key === "Escape" && !$("idSetupFlow").hidden) closeIdSetup();
   if (event.key === "Escape" && !$("targetEditorFlow").hidden) closeTargetEditor();
 });
 
