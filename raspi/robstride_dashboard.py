@@ -90,9 +90,12 @@ COMMAND_TIMEOUT_S = 0.6
 ARM_AXES = ("base", "shoulder", "elbow")
 ARM_JOINT_COUNTS = (2, 3)
 ARM_ROLE_DEFAULT_IDS = {"base": 0x01, "shoulder": 0x02, "elbow": 0x03}
-ARM_TWIST_DEFAULT_LIMIT_RAD = math.tau
+ARM_TWIST_DEFAULT_LIMIT_RAD = math.pi
 ARM_TWIST_MIN_LIMIT_RAD = math.radians(1.0)
-ARM_TWIST_MAX_LIMIT_RAD = math.tau
+ARM_TWIST_MAX_LIMIT_RAD = math.pi
+ARM_ROUTE_MAX_STEP_RAD = math.radians(45.0)
+ARM_ROUTE_SETTLE_S = 0.08
+ARM_ROUTE_MIN_INTERVAL_S = 0.12
 
 ROOT_DIR = Path(__file__).resolve().parent
 WEB_DIR = ROOT_DIR / "web"
@@ -102,7 +105,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.08.30.1"
+APP_VERSION = "2026.08.30.2"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -297,6 +300,31 @@ def route_arm_joint_angles(
     if joint_count == 2:
         routed["elbow"] = 0.0
     return routed
+
+
+def plan_arm_joint_route(
+    joint_count: int,
+    start_angles: Dict[str, float],
+    target_angles: Dict[str, float],
+    max_step_rad: float = ARM_ROUTE_MAX_STEP_RAD,
+) -> List[Dict[str, float]]:
+    axes = arm_axes_for_count(joint_count)
+    deltas = {
+        axis: float(target_angles.get(axis, 0.0)) - float(start_angles.get(axis, 0.0))
+        for axis in axes
+    }
+    largest_delta = max((abs(delta) for delta in deltas.values()), default=0.0)
+    steps = max(1, int(math.ceil(largest_delta / max(max_step_rad, 0.001))))
+    waypoints: List[Dict[str, float]] = []
+    for step in range(1, steps + 1):
+        blend = step / steps
+        waypoint = dict(start_angles)
+        for axis in axes:
+            waypoint[axis] = float(start_angles.get(axis, 0.0)) + (deltas[axis] * blend)
+        if joint_count == 2:
+            waypoint["elbow"] = 0.0
+        waypoints.append(waypoint)
+    return waypoints
 
 
 def arm_twist_safety_check(
@@ -499,6 +527,8 @@ class DashboardController:
         self.arm_position_configured = False
         self.arm_motor_targets = {axis: 0.0 for axis in ARM_AXES}
         self.arm_joint_angles = {axis: 0.0 for axis in ARM_AXES}
+        self.arm_route_waypoints: Deque[Dict[str, Dict[str, float]]] = deque()
+        self.arm_route_next_at = 0.0
         self.active_reports = False
         self.oscillating = False
         self.jog_active = False
@@ -580,6 +610,7 @@ class DashboardController:
             self.velocity_configured = False
             self.position_configured = False
             self.arm_position_configured = False
+            self.clear_arm_route()
             next_serial_port = serial_port or getattr(self.bus, "serial_port", DEFAULT_SERIAL_PORT)
             next_serial_baud = serial_baud or getattr(self.bus, "serial_baud", DEFAULT_SERIAL_BAUD)
             self.connected = False
@@ -1046,6 +1077,7 @@ class DashboardController:
                     self.velocity_configured = False
                     self.position_configured = False
                     self.arm_position_configured = False
+                    self.clear_arm_route()
                     self.oscillating = False
                     self.jog_active = False
             if bus_changed:
@@ -1288,6 +1320,7 @@ class DashboardController:
                 self.velocity_configured = False
                 self.position_configured = False
                 self.arm_position_configured = False
+                self.clear_arm_route()
                 self.oscillating = False
                 self.jog_active = False
                 self.commanded_speed = 0.0
@@ -1376,12 +1409,14 @@ class DashboardController:
         self.velocity_configured = False
         self.position_configured = False
         self.arm_position_configured = False
+        self.clear_arm_route()
         self.clear_private_fault()
 
     def configure_private_velocity(self) -> bool:
         self.velocity_configured = False
         self.position_configured = False
         self.arm_position_configured = False
+        self.clear_arm_route()
         self.oscillating = False
         self.jog_active = False
         self.log(
@@ -1435,6 +1470,8 @@ class DashboardController:
     def move_private_position(self, position: float, velocity_limit: float, acceleration: float, position_kp: float) -> bool:
         self.velocity_configured = False
         self.position_configured = False
+        self.arm_position_configured = False
+        self.clear_arm_route()
         self.oscillating = False
         self.jog_active = False
         self.commanded_speed = 0.0
@@ -1539,6 +1576,34 @@ class DashboardController:
     def arm_motor_target(self, axis: str, joint_angle: float) -> float:
         return self.arm_offsets[axis] + (self.arm_directions[axis] * joint_angle)
 
+    def arm_motor_targets_for_joints(self, joint_angles: Dict[str, float]) -> Dict[str, float]:
+        return {
+            axis: self.arm_motor_target(axis, joint_angles[axis])
+            for axis in self.active_arm_axes()
+        }
+
+    def clear_arm_route(self) -> None:
+        self.arm_route_waypoints.clear()
+        self.arm_route_next_at = 0.0
+
+    def arm_route_interval(self, previous: Dict[str, float], next_angles: Dict[str, float]) -> float:
+        max_delta = max(
+            (
+                abs(float(next_angles.get(axis, 0.0)) - float(previous.get(axis, 0.0)))
+                for axis in self.active_arm_axes()
+            ),
+            default=0.0,
+        )
+        velocity = max(abs(self.arm_velocity_limit), 0.05)
+        return max(ARM_ROUTE_MIN_INTERVAL_S, (max_delta / velocity) + ARM_ROUTE_SETTLE_S)
+
+    def apply_arm_route_waypoint(self, waypoint: Dict[str, Dict[str, float]]) -> None:
+        self.arm_joint_angles = dict(waypoint["jointAngles"])
+        self.arm_motor_targets = {
+            axis: waypoint["motorTargets"].get(axis, self.arm_motor_targets.get(axis, 0.0))
+            for axis in ARM_AXES
+        }
+
     def validate_arm_command_motors(self, payload: Dict[str, Any]) -> Tuple[bool, str]:
         joint_count = arm_joint_count(payload.get("armJointCount"), self.arm_joint_count)
         axes = arm_axes_for_count(joint_count)
@@ -1580,6 +1645,7 @@ class DashboardController:
             self.velocity_configured = False
             self.position_configured = False
             self.arm_position_configured = False
+            self.clear_arm_route()
             self.commanded_speed = 0.0
 
         offsets: Dict[str, float] = dict(self.arm_offsets)
@@ -1653,58 +1719,93 @@ class DashboardController:
             self.arm_link_1,
             self.arm_link_2,
         )
-        safety = arm_safety_check(
-            self.arm_joint_count,
-            points,
-            self.arm_link_radii,
-            joint_angles,
-            self.arm_twist_limits,
-        )
-        if not safety["ok"]:
-            raise ValueError(f"Unsafe IK target: {'; '.join(safety['warnings'])}")
-        motor_targets = {
-            axis: self.arm_motor_target(axis, joint_angles[axis])
-            for axis in self.active_arm_axes()
-        }
+        route_angles = plan_arm_joint_route(self.arm_joint_count, self.arm_joint_angles, joint_angles)
+        route_waypoints: List[Dict[str, Dict[str, float]]] = []
+        for waypoint_angles in route_angles:
+            waypoint_solution = ArmIkSolution(
+                base=waypoint_angles["base"],
+                shoulder=waypoint_angles["shoulder"],
+                elbow=waypoint_angles["elbow"],
+            )
+            waypoint_points = arm_solution_points(
+                self.arm_joint_count,
+                waypoint_solution,
+                self.arm_target,
+                self.arm_link_1,
+                self.arm_link_2,
+            )
+            waypoint_safety = arm_safety_check(
+                self.arm_joint_count,
+                waypoint_points,
+                self.arm_link_radii,
+                waypoint_angles,
+                self.arm_twist_limits,
+            )
+            if not waypoint_safety["ok"]:
+                raise ValueError(f"Unsafe IK route: {'; '.join(waypoint_safety['warnings'])}")
+            route_waypoints.append(
+                {
+                    "jointAngles": dict(waypoint_angles),
+                    "motorTargets": self.arm_motor_targets_for_joints(waypoint_angles),
+                }
+            )
+
+        first_waypoint = route_waypoints[0]
+        remaining_waypoints = route_waypoints[1:]
         self.oscillating = False
         self.jog_active = False
         self.velocity_configured = False
         self.position_configured = False
         self.arm_position_configured = False
+        self.clear_arm_route()
         self.commanded_speed = 0.0
         self.log(
             "Arm IK target "
             f"x={self.arm_target['x']:+.3f} y={self.arm_target['y']:+.3f} z={self.arm_target['z']:+.3f} "
-            f"joints base={joint_angles['base']:+.3f} shoulder={joint_angles['shoulder']:+.3f} elbow={joint_angles['elbow']:+.3f}"
+            f"joints base={joint_angles['base']:+.3f} shoulder={joint_angles['shoulder']:+.3f} elbow={joint_angles['elbow']:+.3f} "
+            f"route_waypoints={len(route_waypoints)}"
         )
         for axis in self.active_arm_axes():
             if not self.configure_private_position_motor(
                 axis,
                 self.arm_motor_ids[axis],
-                motor_targets[axis],
+                first_waypoint["motorTargets"][axis],
                 self.arm_velocity_limit,
                 self.arm_acceleration,
                 self.arm_position_kp,
             ):
                 self.stop_arm()
                 return False
-        self.arm_joint_angles = joint_angles
-        self.arm_motor_targets = {
-            axis: motor_targets.get(axis, self.arm_motor_targets.get(axis, 0.0))
-            for axis in ARM_AXES
-        }
+        self.apply_arm_route_waypoint(first_waypoint)
+        self.arm_route_waypoints = deque(remaining_waypoints)
+        self.arm_route_next_at = (
+            time.monotonic() + self.arm_route_interval(self.arm_joint_angles, remaining_waypoints[0]["jointAngles"])
+            if remaining_waypoints
+            else 0.0
+        )
         self.arm_position_configured = True
         self.last_arm_position_refresh_at = time.monotonic()
         active_targets = " ".join(
-            f"{axis}={motor_targets[axis]:+.3f}"
+            f"{axis}={self.arm_motor_targets[axis]:+.3f}"
             for axis in self.active_arm_axes()
         )
-        self.log(
-            f"Arm targets sent {active_targets}"
-        )
+        queued = len(self.arm_route_waypoints)
+        self.log(f"Arm route started {active_targets}; queued={queued}")
         return True
 
     def send_arm_position_targets(self) -> None:
+        now = time.monotonic()
+        if self.arm_route_waypoints and now >= self.arm_route_next_at:
+            waypoint = self.arm_route_waypoints.popleft()
+            self.apply_arm_route_waypoint(waypoint)
+            if self.arm_route_waypoints:
+                self.arm_route_next_at = now + self.arm_route_interval(
+                    self.arm_joint_angles,
+                    self.arm_route_waypoints[0]["jointAngles"],
+                )
+            else:
+                self.arm_route_next_at = 0.0
+                self.log("Arm route complete")
         for axis in self.active_arm_axes():
             self.write_private_param_f32_to(
                 self.arm_motor_ids[axis],
@@ -1714,9 +1815,10 @@ class DashboardController:
         self.last_arm_position_refresh_at = time.monotonic()
 
     def stop_arm(self) -> None:
-        self.arm_position_configured = False
         self.velocity_configured = False
         self.position_configured = False
+        self.arm_position_configured = False
+        self.clear_arm_route()
         self.oscillating = False
         self.jog_active = False
         self.commanded_speed = 0.0
@@ -1729,6 +1831,7 @@ class DashboardController:
         self.arm_position_configured = False
         self.velocity_configured = False
         self.position_configured = False
+        self.clear_arm_route()
         self.oscillating = False
         self.jog_active = False
         self.commanded_speed = 0.0
@@ -1763,6 +1866,7 @@ class DashboardController:
         self.send_velocity_target(speed)
         self.position_configured = False
         self.arm_position_configured = False
+        self.clear_arm_route()
         self.log(f"private speed={speed:+.2f} rad/s sent")
         return True
 
@@ -1804,6 +1908,7 @@ class DashboardController:
             self.velocity_configured = False
             self.position_configured = False
             self.arm_position_configured = False
+            self.clear_arm_route()
             self.commanded_speed = 0.0
             self.log("Stop/disable sent")
 
@@ -1848,6 +1953,7 @@ class DashboardController:
             self.velocity_configured = False
             self.position_configured = False
             self.arm_position_configured = False
+            self.clear_arm_route()
             self.commanded_speed = 0.0
 
         ping = self.ping_private_candidates(old_id, COMMAND_TIMEOUT_S)
@@ -2171,6 +2277,7 @@ class DashboardController:
                     "acceleration": self.arm_acceleration,
                     "positionKp": self.arm_position_kp,
                     "configured": self.arm_position_configured,
+                    "routeRemaining": len(self.arm_route_waypoints),
                     "jointAngles": dict(self.arm_joint_angles),
                     "motorTargets": dict(self.arm_motor_targets),
                     "solution": self.arm_solution_snapshot(),

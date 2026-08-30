@@ -157,11 +157,11 @@ target point, flip joint directions, set offsets from the currently solved pose
 with **Zero Here**, and home the arm with **Home Zero**.
 
 The **Safety** step sets link radii for self-collision checks and per-joint
-maximum twist for wire protection. A `360` degree twist limit allows each joint
-to move up to one full turn in either direction around the homed zero pose. IK
-angles are routed to the nearest equivalent physical angle inside that limit, so
-a solved move from `+179` degrees to `-179` degrees is sent as about `+181`
-degrees instead of unwinding almost a full turn.
+maximum twist for wire protection. A `180` degree twist limit allows each joint
+to move from `-180` to `+180` degrees around the homed zero pose. IK angles are
+routed to an equivalent physical angle inside that window, so a move from `+179`
+degrees to `-179` degrees is broken into safe waypoints back through zero
+instead of slipping past the `+180` degree wire limit.
 
 For homing, manually move the arm to its mechanical/kinematic zero pose, then
 press **Home Zero**. The dashboard disables the arm motors, reads each motor's

@@ -12,7 +12,7 @@ let targetGizmoHitZones = [];
 let wizardStepIndex = 0;
 
 const TAU = Math.PI * 2;
-const DEFAULT_TWIST_LIMIT_DEG = 360;
+const DEFAULT_TWIST_LIMIT_DEG = 180;
 const AXIS_LABELS = {
   base: "Base",
   shoulder: "Shoulder",
@@ -92,7 +92,7 @@ function fixed(value, digits, suffix) {
 
 function degToRad(value) {
   const numeric = Number(value);
-  return Number.isFinite(numeric) ? (numeric * Math.PI) / 180 : TAU;
+  return Number.isFinite(numeric) ? (numeric * Math.PI) / 180 : Math.PI;
 }
 
 function radToDeg(value) {
@@ -102,8 +102,8 @@ function radToDeg(value) {
 
 function normalizeTwistLimitRad(value) {
   const numeric = Math.abs(Number(value));
-  if (!Number.isFinite(numeric) || numeric <= 0) return TAU;
-  return Math.min(numeric, TAU);
+  if (!Number.isFinite(numeric) || numeric <= 0) return Math.PI;
+  return Math.min(numeric, Math.PI);
 }
 
 function twistLimitInputRad(id) {
@@ -991,8 +991,19 @@ function twistReadout(preview) {
   return activeAxesForArm(preview.arm)
     .map((axis) => {
       const angle = radToDeg(preview.joints[axis] || 0).toFixed(1);
-      const span = radToDeg(normalizeTwistLimitRad(preview.arm.twistLimits[axis])).toFixed(0);
-      return `${axis}=${angle}/${span}`;
+      const limit = radToDeg(normalizeTwistLimitRad(preview.arm.twistLimits[axis])).toFixed(0);
+      return `${axis}=${angle}/${limit}`;
+    })
+    .join(" ");
+}
+
+function routeDeltaReadout(preview) {
+  const previous = state && state.arm && state.arm.jointAngles ? state.arm.jointAngles : {};
+  return activeAxesForArm(preview.arm)
+    .map((axis) => {
+      const start = Number(previous[axis] || 0);
+      const target = Number(preview.joints[axis] || 0);
+      return `${axis}=${radToDeg(target - start).toFixed(1)}`;
     })
     .join(" ");
 }
@@ -1013,7 +1024,8 @@ function renderArmSolution(preview) {
       `shoulder=${joints.shoulder.toFixed(3)}\n` +
       `motors rad  base=${motorTargets.base.toFixed(3)} ` +
       `shoulder=${motorTargets.shoulder.toFixed(3)}\n` +
-      `twist deg  ${twistReadout(preview)}`;
+      `twist deg  ${twistReadout(preview)}\n` +
+      `route deg  ${routeDeltaReadout(preview)}`;
   } else {
     $("armSolution").textContent =
       `joints rad  base=${joints.base.toFixed(3)} ` +
@@ -1022,7 +1034,8 @@ function renderArmSolution(preview) {
       `motors rad  base=${motorTargets.base.toFixed(3)} ` +
       `shoulder=${motorTargets.shoulder.toFixed(3)} ` +
       `elbow=${motorTargets.elbow.toFixed(3)}\n` +
-      `twist deg  ${twistReadout(preview)}`;
+      `twist deg  ${twistReadout(preview)}\n` +
+      `route deg  ${routeDeltaReadout(preview)}`;
   }
   $("ikReachValue").textContent = `${joints.reach.toFixed(3)} m`;
   $("ikBaseValue").textContent = `${joints.base.toFixed(3)} rad`;
@@ -1822,7 +1835,11 @@ function render(state) {
     "armElbowTwistLimitInput",
     radToDeg(normalizeTwistLimitRad(armTwistLimits.elbow)).toFixed(1),
   );
-  $("armConfiguredState").textContent = arm.configured ? "Holding IK" : "Idle";
+  $("armConfiguredState").textContent = Number(arm.routeRemaining || 0) > 0
+    ? "Routing IK"
+    : arm.configured
+      ? "Holding IK"
+      : "Idle";
   renderIkPreview();
 
   $("activeReportsToggle").checked = state.activeReports;
