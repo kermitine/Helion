@@ -78,12 +78,21 @@ OSCILLATION_PERIOD_S = 2.5
 VELOCITY_REFRESH_S = 0.10
 POSITION_REFRESH_S = 0.10
 ARM_POSITION_REFRESH_S = 0.10
+USB_OPEN_SETTLE_S = 0.20
+PRIVATE_SCAN_RECOVERY_ATTEMPTS = 3
+PRIVATE_SCAN_RECOVERY_SETTLE_S = 0.35
+STARTUP_SCAN_DELAY_S = 1.25
+STARTUP_SCAN_RETRY_S = 2.0
+STARTUP_SCAN_ROUNDS = 1
 MAX_LOG_LINES = 240
 MAX_FRAME_HISTORY = 600
 COMMAND_TIMEOUT_S = 0.6
 ARM_AXES = ("base", "shoulder", "elbow")
 ARM_JOINT_COUNTS = (2, 3)
 ARM_ROLE_DEFAULT_IDS = {"base": 0x01, "shoulder": 0x02, "elbow": 0x03}
+ARM_TWIST_DEFAULT_LIMIT_RAD = math.tau
+ARM_TWIST_MIN_LIMIT_RAD = math.radians(1.0)
+ARM_TWIST_MAX_LIMIT_RAD = math.tau
 
 ROOT_DIR = Path(__file__).resolve().parent
 WEB_DIR = ROOT_DIR / "web"
@@ -93,7 +102,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.08.29.2"
+APP_VERSION = "2026.08.30.1"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -139,6 +148,16 @@ def nonnegative_float(value: Any, default: float, maximum: float) -> float:
     if not math.isfinite(parsed) or parsed < 0.0:
         parsed = default
     return min(parsed, maximum)
+
+
+def twist_limit_rad(value: Any, default: float = ARM_TWIST_DEFAULT_LIMIT_RAD) -> float:
+    try:
+        parsed = parse_float(value, default)
+    except (TypeError, ValueError):
+        parsed = default
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        parsed = default
+    return min(max(abs(parsed), ARM_TWIST_MIN_LIMIT_RAD), ARM_TWIST_MAX_LIMIT_RAD)
 
 
 def signed_direction(value: Any, default: int = 1) -> int:
@@ -237,6 +256,67 @@ def segment_distance(
     return min(distances) if distances else 0.0
 
 
+def routed_angle_within_twist(angle: float, reference: float, twist_limit: float) -> float:
+    limit = twist_limit_rad(twist_limit)
+    if not math.isfinite(angle):
+        return 0.0
+    reference_angle = reference if math.isfinite(reference) else 0.0
+    center_turn = round((reference_angle - angle) / math.tau)
+    candidates = []
+    for turn in range(center_turn - 2, center_turn + 3):
+        candidate = angle + (turn * math.tau)
+        if abs(candidate) <= limit + 0.000001:
+            candidates.append(candidate)
+    if not candidates:
+        return angle + (center_turn * math.tau)
+    return min(candidates, key=lambda item: (abs(item - reference_angle), abs(item)))
+
+
+def route_arm_joint_angles(
+    joint_count: int,
+    joint_angles: Dict[str, float],
+    twist_limits: Dict[str, float],
+    previous_joint_angles: Optional[Dict[str, float]] = None,
+) -> Dict[str, float]:
+    routed = dict(joint_angles)
+    previous = previous_joint_angles or {}
+    for axis in arm_axes_for_count(joint_count):
+        try:
+            angle = float(joint_angles.get(axis, 0.0))
+        except (TypeError, ValueError):
+            angle = 0.0
+        try:
+            reference = float(previous.get(axis, 0.0))
+        except (TypeError, ValueError):
+            reference = 0.0
+        routed[axis] = routed_angle_within_twist(
+            angle,
+            reference,
+            twist_limits.get(axis, ARM_TWIST_DEFAULT_LIMIT_RAD),
+        )
+    if joint_count == 2:
+        routed["elbow"] = 0.0
+    return routed
+
+
+def arm_twist_safety_check(
+    joint_count: int,
+    joint_angles: Dict[str, float],
+    twist_limits: Dict[str, float],
+) -> List[str]:
+    warnings: List[str] = []
+    labels = {"base": "Base", "shoulder": "Shoulder", "elbow": "Elbow"}
+    for axis in arm_axes_for_count(joint_count):
+        angle = float(joint_angles.get(axis, 0.0))
+        limit = twist_limit_rad(twist_limits.get(axis, ARM_TWIST_DEFAULT_LIMIT_RAD))
+        if abs(angle) > limit + 0.000001:
+            warnings.append(
+                f"{labels[axis]} twist {math.degrees(angle):.1f} deg exceeds "
+                f"+/-{math.degrees(limit):.1f} deg from home"
+            )
+    return warnings
+
+
 @dataclass
 class ArmIkSolution:
     base: float
@@ -328,6 +408,8 @@ def arm_safety_check(
     joint_count: int,
     points: List[Dict[str, float]],
     link_radii: Dict[str, float],
+    joint_angles: Optional[Dict[str, float]] = None,
+    twist_limits: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     warnings: List[str] = []
     if joint_count == 3 and len(points) >= 3:
@@ -342,16 +424,24 @@ def arm_safety_check(
                     "link radii are too large for the configured lengths: "
                     f"{required_clearance:.3f} m clearance needed"
                 )
-                return {"ok": False, "warnings": warnings}
-            upper = trim_segment(points[0], points[1], 0.0, required_clearance)
-            forearm = trim_segment(points[1], points[2], required_clearance, 0.0)
-            if upper and forearm:
-                clearance = segment_distance(upper[0], upper[1], forearm[0], forearm[1])
-                if clearance < required_clearance:
-                    warnings.append(
-                        "link radii overlap: "
-                        f"clearance {clearance:.3f} m is below {required_clearance:.3f} m"
-                    )
+            else:
+                upper = trim_segment(points[0], points[1], 0.0, required_clearance)
+                forearm = trim_segment(points[1], points[2], required_clearance, 0.0)
+                if upper and forearm:
+                    clearance = segment_distance(upper[0], upper[1], forearm[0], forearm[1])
+                    if clearance < required_clearance:
+                        warnings.append(
+                            "link radii overlap: "
+                            f"clearance {clearance:.3f} m is below {required_clearance:.3f} m"
+                        )
+    if joint_angles is not None and twist_limits is not None:
+        warnings.extend(
+            arm_twist_safety_check(
+                joint_count,
+                joint_angles,
+                twist_limits,
+            )
+        )
     return {"ok": not warnings, "warnings": warnings}
 
 
@@ -400,6 +490,7 @@ class DashboardController:
         self.arm_link_1 = 0.25
         self.arm_link_2 = 0.25
         self.arm_link_radii = {"link1": 0.015, "link2": 0.015}
+        self.arm_twist_limits = {axis: ARM_TWIST_DEFAULT_LIMIT_RAD for axis in ARM_AXES}
         self.arm_target = {"x": 0.25, "y": 0.0, "z": 0.10}
         self.arm_elbow_up = False
         self.arm_velocity_limit = DEFAULT_POSITION_VEL_RAD_S
@@ -435,6 +526,15 @@ class DashboardController:
         self.update_thread = threading.Thread(target=self.update_loop, name="motion-update", daemon=True)
         self.update_thread.start()
 
+        self.startup_scan_thread: Optional[threading.Thread] = None
+        if open_can:
+            self.startup_scan_thread = threading.Thread(
+                target=self.startup_scan_loop,
+                name="startup-scan",
+                daemon=True,
+            )
+            self.startup_scan_thread.start()
+
     def log(self, message: str) -> None:
         stamp = time.strftime("%H:%M:%S")
         with self.lock:
@@ -465,6 +565,7 @@ class DashboardController:
         with self.lock:
             self.connected = True
             self.open_error = ""
+        time.sleep(USB_OPEN_SETTLE_S)
         self.log(f"Opened {label}")
         return True
 
@@ -494,10 +595,20 @@ class DashboardController:
             self.bus.close()
 
     def send(self, arbitration_id: int, data: bytes, extended: bool) -> None:
+        error: Optional[Exception] = None
         with self.bus_lock:
             if not self.connected:
                 raise RuntimeError("RobStride USB adapter is not open")
-            self.bus.send(arbitration_id, data, extended=extended)
+            try:
+                self.bus.send(arbitration_id, data, extended=extended)
+            except (OSError, RuntimeError) as exc:
+                error = exc
+        if error is not None:
+            with self.lock:
+                self.connected = False
+                self.open_error = str(error)
+            self.log(f"USB adapter send failed: {error}")
+            raise error
 
     def send_private(self, comm_type: int, extra_data: int, target_id: int, data: bytes) -> None:
         self.send(build_private_ext_id(comm_type, extra_data, target_id), data, extended=True)
@@ -836,14 +947,14 @@ class DashboardController:
                 return {"ok": False, "message": self.open_error or "CAN is not open"}
 
         if command == "scan":
-            self.scan_private()
-            return {"ok": True}
+            motors = self.scan_private()
+            return {"ok": True, "motors": [fmt_id(item) for item in motors]}
         if command == "scan-private":
-            self.scan_private()
-            return {"ok": True}
+            motors = self.scan_private()
+            return {"ok": True, "motors": [fmt_id(item) for item in motors]}
         if command == "id-scan":
-            self.scan_private()
-            return {"ok": True}
+            motors = self.scan_private()
+            return {"ok": True, "motors": [fmt_id(item) for item in motors]}
         if command == "assign-motor-id":
             return self.assign_motor_id(payload)
         if command == "configure":
@@ -978,6 +1089,7 @@ class DashboardController:
                     "link1": self.arm_link_1,
                     "link2": self.arm_link_2,
                     "radii": dict(self.arm_link_radii),
+                    "twistLimits": dict(self.arm_twist_limits),
                     "elbowUp": self.arm_elbow_up,
                     "target": dict(self.arm_target),
                     "velocityLimit": self.arm_velocity_limit,
@@ -1016,6 +1128,9 @@ class DashboardController:
         radii = arm.get("radii")
         if not isinstance(radii, dict):
             radii = {}
+        twist_limits = arm.get("twistLimits")
+        if not isinstance(twist_limits, dict):
+            twist_limits = {}
         directions = arm.get("directions")
         if not isinstance(directions, dict):
             directions = {}
@@ -1057,6 +1172,18 @@ class DashboardController:
             "armLink2Radius": payload.get(
                 "armLink2Radius",
                 radii.get("link2", self.arm_link_radii["link2"]),
+            ),
+            "armBaseTwistLimit": payload.get(
+                "armBaseTwistLimit",
+                twist_limits.get("base", self.arm_twist_limits["base"]),
+            ),
+            "armShoulderTwistLimit": payload.get(
+                "armShoulderTwistLimit",
+                twist_limits.get("shoulder", self.arm_twist_limits["shoulder"]),
+            ),
+            "armElbowTwistLimit": payload.get(
+                "armElbowTwistLimit",
+                twist_limits.get("elbow", self.arm_twist_limits["elbow"]),
             ),
             "armElbowUp": payload.get("armElbowUp", arm.get("elbowUp", self.arm_elbow_up)),
             "armTargetX": payload.get("armTargetX", target.get("x", self.arm_target["x"])),
@@ -1394,6 +1521,11 @@ class DashboardController:
             "link1": nonnegative_float(payload.get("armLink1Radius"), self.arm_link_radii["link1"], 2.0),
             "link2": nonnegative_float(payload.get("armLink2Radius"), self.arm_link_radii["link2"], 2.0),
         }
+        self.arm_twist_limits = {
+            "base": twist_limit_rad(payload.get("armBaseTwistLimit"), self.arm_twist_limits["base"]),
+            "shoulder": twist_limit_rad(payload.get("armShoulderTwistLimit"), self.arm_twist_limits["shoulder"]),
+            "elbow": twist_limit_rad(payload.get("armElbowTwistLimit"), self.arm_twist_limits["elbow"]),
+        }
         self.arm_target = {
             "x": parse_float(payload.get("armTargetX"), self.arm_target["x"]),
             "y": parse_float(payload.get("armTargetY"), self.arm_target["y"]),
@@ -1498,19 +1630,36 @@ class DashboardController:
             self.arm_link_2,
             self.arm_elbow_up,
         )
-        joint_angles = {
+        raw_joint_angles = {
             "base": solution.base,
             "shoulder": solution.shoulder,
             "elbow": solution.elbow,
         }
+        joint_angles = route_arm_joint_angles(
+            self.arm_joint_count,
+            raw_joint_angles,
+            self.arm_twist_limits,
+            self.arm_joint_angles,
+        )
+        routed_solution = ArmIkSolution(
+            base=joint_angles["base"],
+            shoulder=joint_angles["shoulder"],
+            elbow=joint_angles["elbow"],
+        )
         points = arm_solution_points(
             self.arm_joint_count,
-            solution,
+            routed_solution,
             self.arm_target,
             self.arm_link_1,
             self.arm_link_2,
         )
-        safety = arm_safety_check(self.arm_joint_count, points, self.arm_link_radii)
+        safety = arm_safety_check(
+            self.arm_joint_count,
+            points,
+            self.arm_link_radii,
+            joint_angles,
+            self.arm_twist_limits,
+        )
         if not safety["ok"]:
             raise ValueError(f"Unsafe IK target: {'; '.join(safety['warnings'])}")
         motor_targets = {
@@ -1776,7 +1925,7 @@ class DashboardController:
             "saveAck": save_ack,
         }
 
-    def scan_private(self) -> None:
+    def scan_private_once(self) -> List[int]:
         with self.lock:
             self.discovered_private = []
         self.log(f"Scanning private IDs {fmt_id(SCAN_FIRST_PRIVATE_ID)}..{fmt_id(SCAN_LAST_ID)}")
@@ -1791,13 +1940,78 @@ class DashboardController:
                 return comm_type == COMM_GET_ID and (extra & 0xFF) == wanted
 
             self.wait_for_frame(matches, SCAN_PER_ID_TIMEOUT_S, start)
-        if self.discovered_private:
-            self.motor_id = self.discovered_private[0]
+        with self.lock:
+            found = sorted(set(self.discovered_private))
+            self.discovered_private = found
+        return found
+
+    def scan_private(self, recover_on_empty: bool = True) -> List[int]:
+        attempts = PRIVATE_SCAN_RECOVERY_ATTEMPTS if recover_on_empty else 1
+        found: List[int] = []
+        for attempt in range(1, attempts + 1):
+            if attempt > 1:
+                self.log(f"Private scan recovery {attempt}/{attempts}: reopening USB adapter")
+                if not self.reopen_bus():
+                    self.log("Private scan recovery stopped: USB adapter did not reopen")
+                    break
+                time.sleep(PRIVATE_SCAN_RECOVERY_SETTLE_S)
+
+            try:
+                found = self.scan_private_once()
+            except (OSError, RuntimeError) as exc:
+                self.log(f"Private scan attempt {attempt}/{attempts} failed: {exc}")
+                found = []
+                if not recover_on_empty:
+                    raise
+            if found or not recover_on_empty:
+                break
+
+        if found:
+            with self.lock:
+                self.motor_id = found[0]
+                self.discovered_private = found
             self.velocity_configured = False
             self.position_configured = False
-            self.log(f"Private scan found {len(self.discovered_private)} motor(s); selected {fmt_id(self.motor_id)}")
+            self.log(f"Private scan found {len(found)} motor(s); selected {fmt_id(self.motor_id)}")
         else:
             self.log("Private scan found no motors")
+        return found
+
+    def startup_scan_loop(self) -> None:
+        time.sleep(STARTUP_SCAN_DELAY_S)
+        for round_index in range(1, STARTUP_SCAN_ROUNDS + 1):
+            if not self.running:
+                return
+            with self.lock:
+                if self.discovered_private:
+                    return
+
+            if not self.command_lock.acquire(blocking=False):
+                time.sleep(STARTUP_SCAN_RETRY_S)
+                continue
+
+            with self.lock:
+                self.busy = True
+            try:
+                with self.lock:
+                    connected = self.connected
+                if not connected:
+                    self.log(f"Startup motor scan {round_index}/{STARTUP_SCAN_ROUNDS}: opening USB adapter")
+                    opened = self.open_bus()
+                else:
+                    self.log(f"Startup motor scan {round_index}/{STARTUP_SCAN_ROUNDS}")
+                    opened = True
+
+                if opened and self.scan_private(recover_on_empty=True):
+                    return
+            except Exception as exc:
+                self.log(f"Startup motor scan failed: {exc}")
+            finally:
+                with self.lock:
+                    self.busy = False
+                self.command_lock.release()
+
+            time.sleep(STARTUP_SCAN_RETRY_S)
 
     def update_loop(self) -> None:
         while self.running:
@@ -1864,19 +2078,36 @@ class DashboardController:
                 "jointAngles": dict(self.arm_joint_angles),
                 "motorTargets": dict(self.arm_motor_targets),
             }
-        joint_angles = {
+        raw_joint_angles = {
             "base": solution.base,
             "shoulder": solution.shoulder,
             "elbow": solution.elbow,
         }
+        joint_angles = route_arm_joint_angles(
+            self.arm_joint_count,
+            raw_joint_angles,
+            self.arm_twist_limits,
+            self.arm_joint_angles,
+        )
+        routed_solution = ArmIkSolution(
+            base=joint_angles["base"],
+            shoulder=joint_angles["shoulder"],
+            elbow=joint_angles["elbow"],
+        )
         points = arm_solution_points(
             self.arm_joint_count,
-            solution,
+            routed_solution,
             self.arm_target,
             self.arm_link_1,
             self.arm_link_2,
         )
-        safety = arm_safety_check(self.arm_joint_count, points, self.arm_link_radii)
+        safety = arm_safety_check(
+            self.arm_joint_count,
+            points,
+            self.arm_link_radii,
+            joint_angles,
+            self.arm_twist_limits,
+        )
         return {
             "ok": True,
             "message": "",
@@ -1933,6 +2164,7 @@ class DashboardController:
                     "link1": self.arm_link_1,
                     "link2": self.arm_link_2,
                     "radii": dict(self.arm_link_radii),
+                    "twistLimits": dict(self.arm_twist_limits),
                     "target": dict(self.arm_target),
                     "elbowUp": self.arm_elbow_up,
                     "velocityLimit": self.arm_velocity_limit,

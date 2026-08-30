@@ -11,6 +11,13 @@ let targetEditorDrag = null;
 let targetGizmoHitZones = [];
 let wizardStepIndex = 0;
 
+const TAU = Math.PI * 2;
+const DEFAULT_TWIST_LIMIT_DEG = 360;
+const AXIS_LABELS = {
+  base: "Base",
+  shoulder: "Shoulder",
+  elbow: "Elbow",
+};
 const commandButtons = [...document.querySelectorAll("[data-command]")];
 const configControlIds = [
   "serialPortInput",
@@ -49,6 +56,9 @@ const armControlIds = [
   "armShoulderDirectionInput",
   "armElbowOffsetInput",
   "armElbowDirectionInput",
+  "armBaseTwistLimitInput",
+  "armShoulderTwistLimitInput",
+  "armElbowTwistLimitInput",
 ];
 const speedControlIds = ["speedSlider"];
 const valueButtons = [$("saveValuesBtn"), $("downloadValuesBtn"), $("uploadValuesBtn")].filter(Boolean);
@@ -65,6 +75,7 @@ const dirtyControls = new Set();
 const wizardSteps = [
   { key: "joints", title: "Joints", visual: "Base + shoulder, optional elbow" },
   { key: "lengths", title: "Lengths", visual: "Set link lengths and total reach" },
+  { key: "safety", title: "Safety", visual: "Set link radius and wire twist limits" },
   { key: "home", title: "Home", visual: "Straight ahead, level shoulder, straight elbow" },
   { key: "save", title: "Save", visual: "Save, download, or upload the setup" },
 ];
@@ -77,6 +88,68 @@ const idSetupRoleDefaults = {
 function fixed(value, digits, suffix) {
   if (typeof value !== "number" || Number.isNaN(value)) return "--";
   return `${value.toFixed(digits)} ${suffix}`;
+}
+
+function degToRad(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? (numeric * Math.PI) / 180 : TAU;
+}
+
+function radToDeg(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? (numeric * 180) / Math.PI : DEFAULT_TWIST_LIMIT_DEG;
+}
+
+function normalizeTwistLimitRad(value) {
+  const numeric = Math.abs(Number(value));
+  if (!Number.isFinite(numeric) || numeric <= 0) return TAU;
+  return Math.min(numeric, TAU);
+}
+
+function twistLimitInputRad(id) {
+  return normalizeTwistLimitRad(degToRad(numberInput(id) || DEFAULT_TWIST_LIMIT_DEG));
+}
+
+function activeAxesForArm(arm) {
+  return Number(arm.jointCount) === 2 ? ["base", "shoulder"] : ["base", "shoulder", "elbow"];
+}
+
+function routedAngleWithinTwist(angle, reference, twistLimit) {
+  const limit = normalizeTwistLimitRad(twistLimit);
+  const target = Number(angle);
+  const current = Number(reference);
+  if (!Number.isFinite(target)) return 0;
+
+  const referenceAngle = Number.isFinite(current) ? current : 0;
+  const centerTurn = Math.round((referenceAngle - target) / TAU);
+  const candidates = [];
+  for (let turn = centerTurn - 2; turn <= centerTurn + 2; turn += 1) {
+    const candidate = target + turn * TAU;
+    if (Math.abs(candidate) <= limit + 0.000001) candidates.push(candidate);
+  }
+  if (!candidates.length) return target + centerTurn * TAU;
+
+  return candidates.reduce((best, candidate) => {
+    const bestDistance = Math.abs(best - referenceAngle);
+    const candidateDistance = Math.abs(candidate - referenceAngle);
+    if (candidateDistance < bestDistance) return candidate;
+    if (candidateDistance === bestDistance && Math.abs(candidate) < Math.abs(best)) return candidate;
+    return best;
+  });
+}
+
+function routeJointAngles(arm, joints) {
+  const previous = state && state.arm && state.arm.jointAngles ? state.arm.jointAngles : {};
+  const routed = { ...joints };
+  for (const axis of activeAxesForArm(arm)) {
+    routed[axis] = routedAngleWithinTwist(
+      joints[axis],
+      previous[axis],
+      arm.twistLimits && arm.twistLimits[axis],
+    );
+  }
+  if (arm.jointCount === 2) routed.elbow = 0;
+  return routed;
 }
 
 function setControlValue(id, value) {
@@ -175,6 +248,9 @@ function commandPayload(command) {
       armShoulderDirection: $("armShoulderDirectionInput").value,
       armElbowOffset: numberInput("armElbowOffsetInput"),
       armElbowDirection: $("armElbowDirectionInput").value,
+      armBaseTwistLimit: twistLimitInputRad("armBaseTwistLimitInput"),
+      armShoulderTwistLimit: twistLimitInputRad("armShoulderTwistLimitInput"),
+      armElbowTwistLimit: twistLimitInputRad("armElbowTwistLimitInput"),
     };
   }
   return {};
@@ -299,6 +375,11 @@ function collectValues() {
         shoulder: $("armShoulderDirectionInput").value,
         elbow: $("armElbowDirectionInput").value,
       },
+      twistLimits: {
+        base: twistLimitInputRad("armBaseTwistLimitInput"),
+        shoulder: twistLimitInputRad("armShoulderTwistLimitInput"),
+        elbow: twistLimitInputRad("armElbowTwistLimitInput"),
+      },
     },
   };
 }
@@ -312,6 +393,7 @@ function applyValuePayload(payload) {
   const target = objectValue(arm.target);
   const offsets = objectValue(arm.offsets);
   const directions = objectValue(arm.directions);
+  const twistLimits = objectValue(arm.twistLimits);
 
   setDirtyValue("serialPortInput", payload.serialPort);
   setDirtyValue("serialBaudInput", payload.serialBaud);
@@ -379,6 +461,21 @@ function applyValuePayload(payload) {
   );
   setDirtyNumber("armElbowOffsetInput", firstValue(offsets.elbow, payload.armElbowOffset), 3);
   setDirtyValue("armElbowDirectionInput", directionText(firstValue(directions.elbow, payload.armElbowDirection)));
+  setDirtyNumber(
+    "armBaseTwistLimitInput",
+    radToDeg(normalizeTwistLimitRad(firstValue(twistLimits.base, payload.armBaseTwistLimit))),
+    1,
+  );
+  setDirtyNumber(
+    "armShoulderTwistLimitInput",
+    radToDeg(normalizeTwistLimitRad(firstValue(twistLimits.shoulder, payload.armShoulderTwistLimit))),
+    1,
+  );
+  setDirtyNumber(
+    "armElbowTwistLimitInput",
+    radToDeg(normalizeTwistLimitRad(firstValue(twistLimits.elbow, payload.armElbowTwistLimit))),
+    1,
+  );
   renderIkPreview();
 }
 
@@ -490,6 +587,8 @@ async function sendCommand(command, extra = {}) {
       appendLocalLog(`Command failed: ${result.message}`);
     } else if (result && result.message) {
       appendLocalLog(result.message);
+    } else if ((command === "scan" || command === "scan-private") && result && Array.isArray(result.motors)) {
+      appendLocalLog(`Scan found ${result.motors.length} motor(s): ${result.motors.join(", ") || "none"}`);
     }
     clearCommandDirty(command, result);
     if (command === "arm-home-zero" && result && result.ok !== false) {
@@ -688,6 +787,11 @@ function armInputState() {
       shoulder: direction("armShoulderDirectionInput"),
       elbow: direction("armElbowDirectionInput"),
     },
+    twistLimits: {
+      base: twistLimitInputRad("armBaseTwistLimitInput"),
+      shoulder: twistLimitInputRad("armShoulderTwistLimitInput"),
+      elbow: twistLimitInputRad("armElbowTwistLimitInput"),
+    },
   };
 }
 
@@ -786,7 +890,23 @@ function segmentDistance(a0, a1, b0, b1) {
   return Math.min(...distances);
 }
 
-function armSafetyCheck(arm, points) {
+function armTwistWarnings(arm, joints) {
+  const warnings = [];
+  if (!joints) return warnings;
+  for (const axis of activeAxesForArm(arm)) {
+    const angle = Number(joints[axis] || 0);
+    if (!Number.isFinite(angle)) continue;
+    const limit = normalizeTwistLimitRad(arm.twistLimits && arm.twistLimits[axis]);
+    if (Math.abs(angle) > limit + 0.000001) {
+      warnings.push(
+        `${AXIS_LABELS[axis]} twist ${radToDeg(angle).toFixed(1)} deg exceeds +/-${radToDeg(limit).toFixed(1)} deg from home`,
+      );
+    }
+  }
+  return warnings;
+}
+
+function armSafetyCheck(arm, points, joints = null) {
   const warnings = [];
   if (arm.jointCount === 3 && points.length >= 3) {
     const radius1 = Math.max(0, arm.radii.link1 || 0);
@@ -797,25 +917,26 @@ function armSafetyCheck(arm, points) {
       const link2Length = pointLength(pointSub(points[2], points[1]));
       if (required >= Math.min(link1Length, link2Length)) {
         warnings.push(`link radii are too large for the configured lengths: ${required.toFixed(3)} m clearance needed`);
-        return { ok: false, warnings };
-      }
-      const upper = trimSegment(points[0], points[1], 0, required);
-      const forearm = trimSegment(points[1], points[2], required, 0);
-      if (upper && forearm) {
-        const clearance = segmentDistance(upper[0], upper[1], forearm[0], forearm[1]);
-        if (clearance < required) {
-          warnings.push(`link radii overlap: clearance ${clearance.toFixed(3)} m is below ${required.toFixed(3)} m`);
+      } else {
+        const upper = trimSegment(points[0], points[1], 0, required);
+        const forearm = trimSegment(points[1], points[2], required, 0);
+        if (upper && forearm) {
+          const clearance = segmentDistance(upper[0], upper[1], forearm[0], forearm[1]);
+          if (clearance < required) {
+            warnings.push(`link radii overlap: clearance ${clearance.toFixed(3)} m is below ${required.toFixed(3)} m`);
+          }
         }
       }
     }
   }
+  warnings.push(...armTwistWarnings(arm, joints));
   return { ok: warnings.length === 0, warnings };
 }
 
 function armPreview() {
   const arm = armInputState();
   try {
-    const joints = solveArmIk(arm);
+    const joints = routeJointAngles(arm, solveArmIk(arm));
     const motorTargets = {
       base: arm.offsets.base + arm.directions.base * joints.base,
       shoulder: arm.offsets.shoulder + arm.directions.shoulder * joints.shoulder,
@@ -830,7 +951,8 @@ function armPreview() {
         z: arm.target.z,
       };
       const points = [p0, p1];
-      return { ok: true, safe: true, arm, joints, motorTargets, points, safety: armSafetyCheck(arm, points), message: "" };
+      const safety = armSafetyCheck(arm, points, joints);
+      return { ok: true, safe: safety.ok, arm, joints, motorTargets, points, safety, message: "" };
     }
     const p1 = {
       x: arm.link1 * Math.cos(joints.shoulder) * baseDir.x,
@@ -843,7 +965,7 @@ function armPreview() {
       z: p1.z + arm.link2 * Math.sin(joints.shoulder + joints.elbow),
     };
     const points = [p0, p1, p2];
-    const safety = armSafetyCheck(arm, points);
+    const safety = armSafetyCheck(arm, points, joints);
     return { ok: true, safe: safety.ok, arm, joints, motorTargets, points, safety, message: "" };
   } catch (error) {
     const radial = Math.hypot(arm.target.x, arm.target.y);
@@ -865,6 +987,16 @@ function armPreview() {
   }
 }
 
+function twistReadout(preview) {
+  return activeAxesForArm(preview.arm)
+    .map((axis) => {
+      const angle = radToDeg(preview.joints[axis] || 0).toFixed(1);
+      const span = radToDeg(normalizeTwistLimitRad(preview.arm.twistLimits[axis])).toFixed(0);
+      return `${axis}=${angle}/${span}`;
+    })
+    .join(" ");
+}
+
 function renderArmSolution(preview) {
   if (!preview.ok) {
     $("armSolution").textContent = preview.message;
@@ -880,7 +1012,8 @@ function renderArmSolution(preview) {
       `joints rad  base=${joints.base.toFixed(3)} ` +
       `shoulder=${joints.shoulder.toFixed(3)}\n` +
       `motors rad  base=${motorTargets.base.toFixed(3)} ` +
-      `shoulder=${motorTargets.shoulder.toFixed(3)}`;
+      `shoulder=${motorTargets.shoulder.toFixed(3)}\n` +
+      `twist deg  ${twistReadout(preview)}`;
   } else {
     $("armSolution").textContent =
       `joints rad  base=${joints.base.toFixed(3)} ` +
@@ -888,7 +1021,8 @@ function renderArmSolution(preview) {
       `elbow=${joints.elbow.toFixed(3)}\n` +
       `motors rad  base=${motorTargets.base.toFixed(3)} ` +
       `shoulder=${motorTargets.shoulder.toFixed(3)} ` +
-      `elbow=${motorTargets.elbow.toFixed(3)}`;
+      `elbow=${motorTargets.elbow.toFixed(3)}\n` +
+      `twist deg  ${twistReadout(preview)}`;
   }
   $("ikReachValue").textContent = `${joints.reach.toFixed(3)} m`;
   $("ikBaseValue").textContent = `${joints.base.toFixed(3)} rad`;
@@ -1281,8 +1415,13 @@ function updateWizardVisual(preview) {
     }
   } else if (step.key === "lengths") {
     el.textContent =
-      `Reach ${(arm.link1 + arm.link2).toFixed(3)} m from links ${arm.link1.toFixed(3)} + ${arm.link2.toFixed(3)} m. ` +
-      `Radii ${arm.radii.link1.toFixed(3)} / ${arm.radii.link2.toFixed(3)} m`;
+      `Reach ${(arm.link1 + arm.link2).toFixed(3)} m from links ${arm.link1.toFixed(3)} + ${arm.link2.toFixed(3)} m`;
+  } else if (step.key === "safety") {
+    const axes = activeAxesForArm(arm).map((axis) => {
+      const degrees = radToDeg(normalizeTwistLimitRad(arm.twistLimits[axis])).toFixed(0);
+      return `${axis} ${degrees} deg`;
+    });
+    el.textContent = `Link radii ${arm.radii.link1.toFixed(3)} / ${arm.radii.link2.toFixed(3)} m. Max twist ${axes.join(", ")}`;
   } else if (step.key === "home") {
     el.textContent =
       `Home will save offsets from the current motor positions: base ${arm.offsets.base.toFixed(3)}, shoulder ${arm.offsets.shoulder.toFixed(3)}, elbow ${arm.offsets.elbow.toFixed(3)} rad`;
@@ -1594,7 +1733,7 @@ function updateJointModeUi() {
   document.querySelectorAll(".elbow-only").forEach((el) => {
     el.classList.toggle("mode-hidden", twoJoint);
   });
-  ["armElbowMotorIdInput", "armElbowModelInput", "armElbowUpToggle"].forEach((id) => {
+  ["armElbowMotorIdInput", "armElbowModelInput", "armElbowUpToggle", "armElbowTwistLimitInput"].forEach((id) => {
     const el = $(id);
     if (el) el.disabled = twoJoint;
   });
@@ -1642,6 +1781,7 @@ function render(state) {
   const armRadii = arm.radii || {};
   const armOffsets = arm.offsets || {};
   const armDirections = arm.directions || {};
+  const armTwistLimits = arm.twistLimits || {};
   const armTarget = arm.target || {};
   const usedArmMotors = new Set();
   const baseMotor = chooseDetectedMotor(detectedMotors, armIds.base, usedArmMotors);
@@ -1670,6 +1810,18 @@ function render(state) {
   setControlValue("armShoulderDirectionInput", String(armDirections.shoulder || 1));
   setControlValue("armElbowOffsetInput", Number(armOffsets.elbow || 0).toFixed(3));
   setControlValue("armElbowDirectionInput", String(armDirections.elbow || 1));
+  setControlValue(
+    "armBaseTwistLimitInput",
+    radToDeg(normalizeTwistLimitRad(armTwistLimits.base)).toFixed(1),
+  );
+  setControlValue(
+    "armShoulderTwistLimitInput",
+    radToDeg(normalizeTwistLimitRad(armTwistLimits.shoulder)).toFixed(1),
+  );
+  setControlValue(
+    "armElbowTwistLimitInput",
+    radToDeg(normalizeTwistLimitRad(armTwistLimits.elbow)).toFixed(1),
+  );
   $("armConfiguredState").textContent = arm.configured ? "Holding IK" : "Idle";
   renderIkPreview();
 

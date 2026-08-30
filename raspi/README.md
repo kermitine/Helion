@@ -139,6 +139,12 @@ python3 raspi/robstride_usb.py --serial-port auto --command configure
 python3 raspi/robstride_usb.py --serial-port auto --command jog-right
 ```
 
+If the dashboard opens but no motors appear, wait a few seconds and press
+**Scan Private** before rebooting the Pi. The dashboard also runs a delayed
+startup scan automatically. If a scan finds no motors, it reopens the RobStride
+USB-CAN adapter and retries, which usually fixes boot timing races between the
+Pi, adapter, and motor power.
+
 ## Arm IK
 
 The dashboard Arm IK panel solves a three-axis base/shoulder/elbow arm in the
@@ -149,6 +155,13 @@ elbow-up setting, joint offsets, and motor directions that will be sent by
 The setup wizard can split total reach into link lengths, nudge or preset the
 target point, flip joint directions, set offsets from the currently solved pose
 with **Zero Here**, and home the arm with **Home Zero**.
+
+The **Safety** step sets link radii for self-collision checks and per-joint
+maximum twist for wire protection. A `360` degree twist limit allows each joint
+to move up to one full turn in either direction around the homed zero pose. IK
+angles are routed to the nearest equivalent physical angle inside that limit, so
+a solved move from `+179` degrees to `-179` degrees is sent as about `+181`
+degrees instead of unwinding almost a full turn.
 
 For homing, manually move the arm to its mechanical/kinematic zero pose, then
 press **Home Zero**. The dashboard disables the arm motors, reads each motor's
