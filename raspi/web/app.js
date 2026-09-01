@@ -69,6 +69,7 @@ const armControlIds = [
   "armVelocityInput",
   "armAccelerationInput",
   "armKpInput",
+  "armCurrentLimitInput",
   "armBaseOffsetInput",
   "armBaseDirectionInput",
   "armShoulderOffsetInput",
@@ -308,6 +309,7 @@ function commandPayload(command) {
       armVelocityLimit: numberInput("armVelocityInput"),
       armAcceleration: numberInput("armAccelerationInput"),
       armPositionKp: numberInput("armKpInput"),
+      armCurrentLimit: numberInput("armCurrentLimitInput"),
       armBaseOffset: numberInput("armBaseOffsetInput"),
       armBaseDirection: $("armBaseDirectionInput").value,
       armShoulderOffset: numberInput("armShoulderOffsetInput"),
@@ -431,6 +433,7 @@ function collectValues() {
       velocityLimit: numberInput("armVelocityInput"),
       acceleration: numberInput("armAccelerationInput"),
       positionKp: numberInput("armKpInput"),
+      currentLimit: numberInput("armCurrentLimitInput"),
       offsets: {
         base: numberInput("armBaseOffsetInput"),
         shoulder: numberInput("armShoulderOffsetInput"),
@@ -518,6 +521,7 @@ function applyValuePayload(payload) {
   setDirtyNumber("armVelocityInput", firstValue(arm.velocityLimit, payload.armVelocityLimit), 3);
   setDirtyNumber("armAccelerationInput", firstValue(arm.acceleration, payload.armAcceleration), 2);
   setDirtyNumber("armKpInput", firstValue(arm.positionKp, payload.armPositionKp), 2);
+  setDirtyNumber("armCurrentLimitInput", firstValue(arm.currentLimit, payload.armCurrentLimit), 2);
   setDirtyNumber("armBaseOffsetInput", firstValue(offsets.base, payload.armBaseOffset), 3);
   setDirtyValue("armBaseDirectionInput", directionText(firstValue(directions.base, payload.armBaseDirection)));
   setDirtyNumber("armShoulderOffsetInput", firstValue(offsets.shoulder, payload.armShoulderOffset), 3);
@@ -2097,6 +2101,7 @@ function render(state) {
   setControlValue("armVelocityInput", Number(arm.velocityLimit || 1).toFixed(2));
   setControlValue("armAccelerationInput", Number(arm.acceleration || 10).toFixed(1));
   setControlValue("armKpInput", Number(arm.positionKp || 5).toFixed(1));
+  setControlValue("armCurrentLimitInput", Number(arm.currentLimit || 1).toFixed(2));
   setControlValue("armBaseOffsetInput", Number(armOffsets.base || 0).toFixed(3));
   setControlValue("armBaseDirectionInput", String(armDirections.base || 1));
   setControlValue("armShoulderOffsetInput", Number(armOffsets.shoulder || 0).toFixed(3));

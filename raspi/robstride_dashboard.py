@@ -99,6 +99,7 @@ ARM_PRESET_MAX_STEP_RAD = math.radians(12.0)
 ARM_ROUTE_SETTLE_S = 0.08
 ARM_ROUTE_MIN_INTERVAL_S = 0.12
 ARM_MIN_TARGET_REACH = 0.001
+ARM_CURRENT_LIMIT_MAX_A = 10.0
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
     "sweep": "Sweep",
@@ -115,7 +116,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.01.3"
+APP_VERSION = "2026.09.01.4"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -565,6 +566,7 @@ class DashboardController:
         self.arm_velocity_limit = DEFAULT_POSITION_VEL_RAD_S
         self.arm_acceleration = DEFAULT_POSITION_ACCEL_RAD_S2
         self.arm_position_kp = DEFAULT_POSITION_KP
+        self.arm_current_limit = DEFAULT_CURRENT_LIMIT_A
         self.arm_position_configured = False
         self.arm_position_signature: Optional[Tuple[Any, ...]] = None
         self.arm_motor_targets = {axis: 0.0 for axis in ARM_AXES}
@@ -1196,6 +1198,7 @@ class DashboardController:
                     "velocityLimit": self.arm_velocity_limit,
                     "acceleration": self.arm_acceleration,
                     "positionKp": self.arm_position_kp,
+                    "currentLimit": self.arm_current_limit,
                     "offsets": dict(self.arm_offsets),
                     "directions": dict(self.arm_directions),
                 },
@@ -1301,6 +1304,10 @@ class DashboardController:
             "armPositionKp": payload.get(
                 "armPositionKp",
                 arm.get("positionKp", self.arm_position_kp),
+            ),
+            "armCurrentLimit": payload.get(
+                "armCurrentLimit",
+                arm.get("currentLimit", self.arm_current_limit),
             ),
             "armBaseOffset": payload.get(
                 "armBaseOffset",
@@ -1579,6 +1586,7 @@ class DashboardController:
         velocity_limit: float,
         acceleration: float,
         position_kp: float,
+        current_limit: float,
     ) -> bool:
         motor_id &= 0xFF
         self.prepare_private_mode_switch_for(
@@ -1590,7 +1598,7 @@ class DashboardController:
             return False
         self.send_private_enable_to(motor_id)
         self.wait_private_status_for(motor_id, 0.30)
-        self.write_private_param_f32_to(motor_id, PARAM_LIMIT_CUR, DEFAULT_CURRENT_LIMIT_A)
+        self.write_private_param_f32_to(motor_id, PARAM_LIMIT_CUR, current_limit)
         self.write_private_param_f32_to(motor_id, PARAM_PP_VEL_MAX, velocity_limit)
         self.write_private_param_f32_to(motor_id, PARAM_PP_ACC_SET, acceleration)
         self.write_private_param_f32_to(motor_id, PARAM_LOC_KP, position_kp)
@@ -1644,6 +1652,11 @@ class DashboardController:
         self.arm_velocity_limit = positive_float(payload.get("armVelocityLimit"), self.arm_velocity_limit, 20.0)
         self.arm_acceleration = positive_float(payload.get("armAcceleration"), self.arm_acceleration, 200.0)
         self.arm_position_kp = nonnegative_float(payload.get("armPositionKp"), self.arm_position_kp, 200.0)
+        self.arm_current_limit = positive_float(
+            payload.get("armCurrentLimit"),
+            self.arm_current_limit,
+            ARM_CURRENT_LIMIT_MAX_A,
+        )
 
     def arm_motor_target(self, axis: str, joint_angle: float) -> float:
         return self.arm_offsets[axis] + (self.arm_directions[axis] * joint_angle)
@@ -1805,6 +1818,7 @@ class DashboardController:
                     self.arm_velocity_limit,
                     self.arm_acceleration,
                     self.arm_position_kp,
+                    self.arm_current_limit,
                 ):
                     self.stop_arm()
                     return False
@@ -1878,6 +1892,7 @@ class DashboardController:
             round(self.arm_velocity_limit, 6),
             round(self.arm_acceleration, 6),
             round(self.arm_position_kp, 6),
+            round(self.arm_current_limit, 6),
         )
 
     def home_arm_zero(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -2660,6 +2675,7 @@ class DashboardController:
                     "velocityLimit": self.arm_velocity_limit,
                     "acceleration": self.arm_acceleration,
                     "positionKp": self.arm_position_kp,
+                    "currentLimit": self.arm_current_limit,
                     "configured": self.arm_position_configured,
                     "routeRemaining": len(self.arm_route_waypoints),
                     "jointAngles": dict(self.arm_joint_angles),
