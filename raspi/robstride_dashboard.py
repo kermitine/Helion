@@ -99,6 +99,7 @@ ARM_PRESET_MAX_STEP_RAD = math.radians(12.0)
 ARM_ROUTE_SETTLE_S = 0.08
 ARM_ROUTE_MIN_INTERVAL_S = 0.12
 ARM_MIN_TARGET_REACH = 0.001
+ARM_BASE_PLANE_MIN_Z = 0.0
 ARM_CURRENT_LIMIT_MAX_A = 10.0
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
@@ -116,7 +117,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.01.4"
+APP_VERSION = "2026.09.01.5"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -328,6 +329,7 @@ def clamp_arm_target_to_reach(
         y = 0.0
     if not math.isfinite(z):
         z = 0.0
+    z = max(z, ARM_BASE_PLANE_MIN_Z)
     max_reach = max(abs(link_1) + abs(link_2), 0.001)
     min_reach = ARM_MIN_TARGET_REACH if joint_count == 2 else abs(abs(link_1) - abs(link_2))
     min_reach = min(min_reach, max_reach)
@@ -482,6 +484,12 @@ def arm_safety_check(
     twist_limits: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     warnings: List[str] = []
+    min_z = min((float(point.get("z", 0.0)) for point in points), default=0.0)
+    if min_z < ARM_BASE_PLANE_MIN_Z - 0.000001:
+        warnings.append(
+            f"arm dips below base plane: min Z={min_z:.3f} m; "
+            "raise the target or use Elbow Up"
+        )
     if joint_count == 3 and len(points) >= 3:
         radius_1 = max(0.0, link_radii.get("link1", 0.0))
         radius_2 = max(0.0, link_radii.get("link2", 0.0))

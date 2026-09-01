@@ -21,6 +21,7 @@ const TAU = Math.PI * 2;
 const DEFAULT_TWIST_LIMIT_DEG = 180;
 const ARM_LIVE_SEND_INTERVAL_MS = 120;
 const ARM_MIN_TARGET_REACH = 0.001;
+const ARM_BASE_PLANE_MIN_Z = 0;
 const REACH_SOLVE_TOLERANCE = 0.001;
 const AXIS_LABELS = {
   base: "Base",
@@ -152,6 +153,11 @@ function clampArmTarget(target, arm, axis = "") {
   };
   const limits = armReachLimits(arm);
   let clamped = false;
+
+  if (next.z < ARM_BASE_PLANE_MIN_Z) {
+    next.z = ARM_BASE_PLANE_MIN_Z;
+    clamped = true;
+  }
 
   let reach = Math.hypot(next.x, next.y, next.z);
   if (reach > limits.maxReach) {
@@ -1170,8 +1176,15 @@ function armTwistWarnings(arm, joints) {
   return warnings;
 }
 
+function armBasePlaneWarnings(points) {
+  const minZ = points.reduce((lowest, point) => Math.min(lowest, Number(point.z) || 0), 0);
+  if (minZ >= ARM_BASE_PLANE_MIN_Z - 0.000001) return [];
+  return [`arm dips below base plane: min Z=${minZ.toFixed(3)} m; raise the target or switch Elbow Up`];
+}
+
 function armSafetyCheck(arm, points, joints = null) {
   const warnings = [];
+  warnings.push(...armBasePlaneWarnings(points));
   if (arm.jointCount === 3 && points.length >= 3) {
     const radius1 = Math.max(0, arm.radii.link1 || 0);
     const radius2 = Math.max(0, arm.radii.link2 || 0);
