@@ -10,14 +10,33 @@ let targetViewPitch = 0.62;
 let targetEditorDrag = null;
 let targetGizmoHitZones = [];
 let wizardStepIndex = 0;
+let armLiveInFlight = false;
+let armLiveQueued = false;
+let armLiveTimer = null;
+let armLiveLastSentAt = 0;
+let armLiveLastError = "";
+let lastArmValidationMessage = "";
 
 const TAU = Math.PI * 2;
 const DEFAULT_TWIST_LIMIT_DEG = 180;
+const ARM_LIVE_SEND_INTERVAL_MS = 120;
+const ARM_MIN_TARGET_REACH = 0.001;
+const ARM_TARGET_CLAMP_MARGIN = 0.0005;
+const REACH_SOLVE_TOLERANCE = 0.001;
 const AXIS_LABELS = {
   base: "Base",
   shoulder: "Shoulder",
   elbow: "Elbow",
 };
+const TARGET_INPUT_AXES = {
+  armTargetXInput: "x",
+  armTargetYInput: "y",
+  armTargetZInput: "z",
+  targetEditorXInput: "x",
+  targetEditorYInput: "y",
+  targetEditorZInput: "z",
+};
+const ARM_REACH_CONTROL_IDS = new Set(["armLink1Input", "armLink2Input"]);
 const commandButtons = [...document.querySelectorAll("[data-command]")];
 const configControlIds = [
   "serialPortInput",
@@ -63,6 +82,7 @@ const armControlIds = [
 const speedControlIds = ["speedSlider"];
 const valueButtons = [$("saveValuesBtn"), $("downloadValuesBtn"), $("uploadValuesBtn")].filter(Boolean);
 const idSetupButtons = [$("idSetupScanBtn"), $("idSetupAssignBtn")].filter(Boolean);
+const armLiveToggles = [$("armLiveMoveToggle"), $("targetEditorLiveMoveToggle")].filter(Boolean);
 const allValueControlIds = [
   ...configControlIds,
   ...positionControlIds,
@@ -112,6 +132,67 @@ function twistLimitInputRad(id) {
 
 function activeAxesForArm(arm) {
   return Number(arm.jointCount) === 2 ? ["base", "shoulder"] : ["base", "shoulder", "elbow"];
+}
+
+function armReachLimits(arm) {
+  const maxReach = Math.max(Math.abs(arm.link1) + Math.abs(arm.link2), 0.001);
+  const innerReach = Number(arm.jointCount) === 2 ? ARM_MIN_TARGET_REACH : Math.abs(Math.abs(arm.link1) - Math.abs(arm.link2));
+  return {
+    minReach: Math.min(innerReach, maxReach),
+    maxReach,
+  };
+}
+
+function clampArmTarget(target, arm, axis = "") {
+  const next = {
+    x: Number.isFinite(Number(target.x)) ? Number(target.x) : 0,
+    y: Number.isFinite(Number(target.y)) ? Number(target.y) : 0,
+    z: Number.isFinite(Number(target.z)) ? Number(target.z) : 0,
+  };
+  const limits = armReachLimits(arm);
+  const axisName = ["x", "y", "z"].includes(axis) ? axis : "";
+  let clamped = false;
+
+  if (axisName) {
+    const otherAxes = ["x", "y", "z"].filter((item) => item !== axisName);
+    const otherSq = otherAxes.reduce((sum, item) => sum + next[item] * next[item], 0);
+    const maxSq = limits.maxReach * limits.maxReach;
+    if (otherSq < maxSq) {
+      const axisLimit = Math.max(0, Math.sqrt(maxSq - otherSq) - ARM_TARGET_CLAMP_MARGIN);
+      const limited = Math.max(-axisLimit, Math.min(axisLimit, next[axisName]));
+      if (limited !== next[axisName]) {
+        next[axisName] = limited;
+        clamped = true;
+      }
+    }
+  }
+
+  let reach = Math.hypot(next.x, next.y, next.z);
+  if (reach > limits.maxReach) {
+    const clampedReach = Math.max(limits.minReach, limits.maxReach - ARM_TARGET_CLAMP_MARGIN);
+    const scale = clampedReach / reach;
+    next.x *= scale;
+    next.y *= scale;
+    next.z *= scale;
+    reach = clampedReach;
+    clamped = true;
+  }
+
+  if (limits.minReach > 0 && reach < limits.minReach) {
+    if (reach <= 0.0000001) {
+      next.x = limits.minReach;
+      next.y = 0;
+      next.z = 0;
+    } else {
+      const scale = limits.minReach / reach;
+      next.x *= scale;
+      next.y *= scale;
+      next.z *= scale;
+    }
+    clamped = true;
+  }
+
+  return { target: next, clamped, limits };
 }
 
 function routedAngleWithinTwist(angle, reference, twistLimit) {
@@ -528,7 +609,13 @@ async function applyConfig() {
   clearDirty(configControlIds);
 }
 
-function validateArmCommandMotors() {
+function validateArmCommandMotors(options = {}) {
+  lastArmValidationMessage = "";
+  const fail = (message) => {
+    lastArmValidationMessage = message;
+    if (!options.quiet) appendLocalLog(`Arm IK blocked: ${message}`);
+    return false;
+  };
   const inputIds = {
     base: "armBaseMotorIdInput",
     shoulder: "armShoulderMotorIdInput",
@@ -548,19 +635,18 @@ function validateArmCommandMotors() {
       continue;
     }
     if (seen.has(value)) {
-      appendLocalLog(`Arm IK blocked: ${labels[axis]} and ${seen.get(value)} both use ${value}`);
-      return false;
+      return fail(`${labels[axis]} and ${seen.get(value)} both use ${value}`);
     }
     seen.set(value, labels[axis]);
   }
   if (missing.length) {
-    appendLocalLog(`Arm IK blocked: select detected motors for ${missing.join(", ")}`);
-    return false;
+    return fail(`select detected motors for ${missing.join(", ")}`);
   }
   return true;
 }
 
 async function sendCommand(command, extra = {}) {
+  if (["stop", "arm-stop", "arm-clear-fault"].includes(command)) setArmLiveMoveEnabled(false);
   if (busy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault"].includes(command)) return;
   if ((command === "arm-move" || command === "arm-home-zero") && !validateArmCommandMotors()) return;
   if (command === "arm-move") {
@@ -603,6 +689,104 @@ async function sendCommand(command, extra = {}) {
   }
 }
 
+function armLiveMoveEnabled() {
+  return armLiveToggles.some((toggle) => toggle.checked);
+}
+
+function syncArmLiveToggles(enabled) {
+  armLiveToggles.forEach((toggle) => {
+    toggle.checked = enabled;
+  });
+}
+
+function clearArmLiveTimer() {
+  if (armLiveTimer) {
+    window.clearTimeout(armLiveTimer);
+    armLiveTimer = null;
+  }
+}
+
+function appendArmLiveError(message) {
+  if (!message || message === armLiveLastError) return;
+  armLiveLastError = message;
+  appendLocalLog(`Live IK blocked: ${message}`);
+}
+
+async function setArmLiveMoveEnabled(enabled) {
+  syncArmLiveToggles(enabled);
+  armLiveQueued = false;
+  clearArmLiveTimer();
+  if (!enabled) return;
+  if (busy) {
+    syncArmLiveToggles(false);
+    appendArmLiveError("wait for the current command to finish");
+    return;
+  }
+  try {
+    await applyConfig();
+    if (!armLiveMoveEnabled()) return;
+    armLiveLastError = "";
+    queueArmLiveMove({ immediate: true });
+  } catch (error) {
+    syncArmLiveToggles(false);
+    appendArmLiveError(error.message);
+  }
+}
+
+function queueArmLiveMove(options = {}) {
+  if (!armLiveMoveEnabled()) return;
+  armLiveQueued = true;
+  if (armLiveTimer) return;
+  const now = window.performance ? performance.now() : Date.now();
+  const elapsed = now - armLiveLastSentAt;
+  const delay = options.immediate ? 0 : Math.max(0, ARM_LIVE_SEND_INTERVAL_MS - elapsed);
+  armLiveTimer = window.setTimeout(flushArmLiveMove, delay);
+}
+
+async function flushArmLiveMove() {
+  clearArmLiveTimer();
+  if (!armLiveMoveEnabled()) {
+    armLiveQueued = false;
+    return;
+  }
+  if (busy || armLiveInFlight) {
+    armLiveTimer = window.setTimeout(flushArmLiveMove, 50);
+    return;
+  }
+  if (!validateArmCommandMotors({ quiet: true })) {
+    armLiveQueued = false;
+    appendArmLiveError(lastArmValidationMessage || "select detected motors");
+    return;
+  }
+
+  const preview = armPreview();
+  if (!preview.ok || !preview.safe) {
+    armLiveQueued = false;
+    const warnings = preview.safety && preview.safety.warnings ? preview.safety.warnings : [preview.message || "unsafe IK target"];
+    appendArmLiveError(warnings.join("; "));
+    return;
+  }
+
+  armLiveQueued = false;
+  armLiveInFlight = true;
+  armLiveLastSentAt = window.performance ? performance.now() : Date.now();
+  try {
+    const result = await post("/api/command", { command: "arm-live-move", ...commandPayload("arm-move") });
+    if (result && result.ok === false) {
+      const message = result.message || "move rejected";
+      appendArmLiveError(message);
+      if (message.includes("Another command")) armLiveQueued = true;
+    } else {
+      armLiveLastError = "";
+    }
+  } catch (error) {
+    appendArmLiveError(error.message);
+  } finally {
+    armLiveInFlight = false;
+    if (armLiveQueued && armLiveMoveEnabled()) queueArmLiveMove();
+  }
+}
+
 function renderBusy(isBusy) {
   commandButtons.forEach((button) => {
     const command = button.dataset.command;
@@ -621,6 +805,89 @@ function appendLocalLog(line) {
   const output = $("logOutput");
   output.textContent = `${output.textContent}\n${line}`.trim();
   output.scrollTop = output.scrollHeight;
+}
+
+function isFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function telemetryAgeText(ageMs) {
+  if (!isFiniteNumber(ageMs)) return "No feedback";
+  if (ageMs < 1000) return `${Math.max(0, Math.round(ageMs))} ms`;
+  return `${(ageMs / 1000).toFixed(ageMs < 10000 ? 1 : 0)} s`;
+}
+
+function telemetryRowsFromState(payload) {
+  if (Array.isArray(payload.telemetryMotors)) return payload.telemetryMotors;
+  return payload.lastFeedback ? [payload.lastFeedback] : [];
+}
+
+function telemetryFaultText(item, key) {
+  const fault = item.faultFrame || {};
+  const names = key === "fault"
+    ? Array.isArray(fault.faults) ? fault.faults : []
+    : Array.isArray(fault.warnings) ? fault.warnings : [];
+  const raw = key === "fault" ? fault.faultRaw : fault.warningRaw;
+  const rawHex = key === "fault" ? fault.faultRawHex : fault.warningRawHex;
+  if (raw) return names.length ? names.join(", ") : rawHex || "1";
+  return item[key] ? "1" : "--";
+}
+
+function addTelemetryCell(row, text, className = "", title = "") {
+  const cell = document.createElement("td");
+  cell.textContent = text;
+  if (className) cell.className = className;
+  if (title) cell.title = title;
+  row.appendChild(cell);
+  return cell;
+}
+
+function renderTelemetry(payload) {
+  const rows = telemetryRowsFromState(payload);
+  const body = $("telemetryRows");
+  const summary = $("telemetrySummary");
+  body.replaceChildren();
+
+  if (!rows.length) {
+    const row = document.createElement("tr");
+    const cell = addTelemetryCell(row, "No active motor telemetry", "empty");
+    cell.colSpan = 10;
+    body.appendChild(row);
+    summary.textContent = "No feedback";
+    return;
+  }
+
+  const activeCount = rows.filter((item) => item.active !== false).length;
+  const latestAge = rows
+    .map((item) => item.ageMs)
+    .filter(isFiniteNumber)
+    .sort((a, b) => a - b)[0];
+  summary.textContent = `${activeCount || rows.length} motor${(activeCount || rows.length) === 1 ? "" : "s"}`
+    + (isFiniteNumber(latestAge) ? `, latest ${telemetryAgeText(latestAge)}` : "");
+
+  rows.forEach((item) => {
+    const row = document.createElement("tr");
+    if (item.active === false) row.classList.add("stale");
+    const faultText = telemetryFaultText(item, "fault");
+    const warningText = telemetryFaultText(item, "warning");
+    const velocityText = isFiniteNumber(item.velocityRadS)
+      ? fixed(item.velocityRadS, 3, "rad/s")
+      : isFiniteNumber(item.commandedVelocityRadS)
+        ? fixed(item.commandedVelocityRadS, 2, "rad/s cmd")
+        : "--";
+
+    addTelemetryCell(row, item.motorIdHex || idText(item.motorId, "--"), "mono");
+    addTelemetryCell(row, item.role || "--", "telemetry-role");
+    addTelemetryCell(row, telemetryAgeText(item.ageMs));
+    addTelemetryCell(row, fixed(item.positionRad, 3, "rad"));
+    addTelemetryCell(row, fixed(item.targetRad, 3, "rad"));
+    addTelemetryCell(row, velocityText);
+    addTelemetryCell(row, fixed(item.torqueNm, 3, "Nm"));
+    addTelemetryCell(row, fixed(item.temperatureC, 1, "C"));
+    addTelemetryCell(row, faultText, faultText === "--" ? "" : "fault", faultText);
+    addTelemetryCell(row, warningText, warningText === "--" ? "" : "warn", warningText);
+    body.appendChild(row);
+  });
 }
 
 function renderChips(id, items) {
@@ -805,7 +1072,7 @@ function solveArmIk(arm) {
     if (reach <= 0.0001) {
       throw new Error("unreachable: 2-joint target cannot be at the base origin");
     }
-    if (reach > maxReach) {
+    if (reach > maxReach + REACH_SOLVE_TOLERANCE) {
       throw new Error(`unreachable: reach=${reach.toFixed(3)}, allowed=0.000..${maxReach.toFixed(3)}`);
     }
     return {
@@ -817,7 +1084,7 @@ function solveArmIk(arm) {
       maxReach,
     };
   }
-  if (reach > maxReach || reach < minReach) {
+  if (reach > maxReach + REACH_SOLVE_TOLERANCE || reach < minReach - REACH_SOLVE_TOLERANCE) {
     throw new Error(`unreachable: reach=${reach.toFixed(3)}, allowed=${minReach.toFixed(3)}..${maxReach.toFixed(3)}`);
   }
 
@@ -1056,6 +1323,9 @@ function renderArmSafety(preview) {
     moveButton.disabled = busy || unsafe;
     moveButton.title = unsafe && warnings.length ? warnings.join("; ") : "";
   }
+  armLiveToggles.forEach((toggle) => {
+    toggle.title = unsafe && warnings.length ? warnings.join("; ") : "";
+  });
 }
 
 function projectPoint(point, scale, centerX, centerY, yaw, pitch) {
@@ -1393,7 +1663,7 @@ function drawTargetEditor(preview) {
   drawTargetScene(preview, "targetEditorCanvas", { gizmo: true });
 }
 
-function renderIkPreview() {
+function renderIkPreview(options = {}) {
   updateJointModeUi();
   const preview = armPreview();
   $("armConfiguredState").classList.toggle("fault", !preview.ok || !preview.safe);
@@ -1402,7 +1672,7 @@ function renderIkPreview() {
   drawIkCanvas(preview);
   drawTargetPad(preview);
   drawTargetEditor(preview);
-  renderTargetEditorInputs(preview);
+  renderTargetEditorInputs(preview, options);
   updateWizardVisual(preview);
   const reachInput = $("wizardTotalReachInput");
   if (reachInput && document.activeElement !== reachInput) {
@@ -1583,21 +1853,35 @@ function stepWizard(direction) {
   setWizardStep(wizardStepIndex + direction);
 }
 
-function setArmTarget(x, y, z) {
-  setDirtyNumber("armTargetXInput", x, 3);
-  setDirtyNumber("armTargetYInput", y, 3);
-  setDirtyNumber("armTargetZInput", z, 3);
-  renderIkPreview();
+function writeArmTargetInputs(target) {
+  setDirtyNumber("armTargetXInput", target.x, 3);
+  setDirtyNumber("armTargetYInput", target.y, 3);
+  setDirtyNumber("armTargetZInput", target.z, 3);
 }
 
-function syncTargetEditorInputs() {
+function setArmTarget(x, y, z, options = {}) {
+  const result = clampArmTarget({ x, y, z }, armInputState(), options.axis || "");
+  writeArmTargetInputs(result.target);
+  renderIkPreview({ forceTargetEditorInputs: result.clamped });
+  queueArmLiveMove();
+  return result;
+}
+
+function clampCurrentArmTarget(axis = "") {
+  const arm = armInputState();
+  const result = clampArmTarget(arm.target, arm, axis);
+  if (result.clamped) writeArmTargetInputs(result.target);
+  return result;
+}
+
+function syncTargetEditorInputs(axis = "") {
   const x = numberInput("targetEditorXInput");
   const y = numberInput("targetEditorYInput");
   const z = numberInput("targetEditorZInput");
-  setArmTarget(x, y, z);
+  setArmTarget(x, y, z, { axis });
 }
 
-function renderTargetEditorInputs(preview) {
+function renderTargetEditorInputs(preview, options = {}) {
   const target = preview.arm.target;
   const inputMap = [
     ["targetEditorXInput", target.x],
@@ -1606,7 +1890,7 @@ function renderTargetEditorInputs(preview) {
   ];
   inputMap.forEach(([id, value]) => {
     const el = $(id);
-    if (el && document.activeElement !== el) el.value = value.toFixed(3);
+    if (el && (options.forceTargetEditorInputs || document.activeElement !== el)) el.value = value.toFixed(3);
   });
   const readouts = [
     ["targetReadoutX", `${target.x.toFixed(3)} m`],
@@ -1636,10 +1920,11 @@ function applyTargetPreset(name) {
 }
 
 function nudgeTarget(axis, direction) {
-  const id = `armTarget${axis.toUpperCase()}Input`;
   const step = Math.max(0.001, Math.abs(numberInput("wizardNudgeStepInput") || 0.01));
-  setDirtyNumber(id, numberInput(id) + direction * step, 3);
-  renderIkPreview();
+  const arm = armInputState();
+  const next = { ...arm.target };
+  next[axis] += direction * step;
+  setArmTarget(next.x, next.y, next.z, { axis });
 }
 
 function openTargetEditor() {
@@ -1695,7 +1980,7 @@ function moveTargetOnAxis(event) {
   } else {
     next[axis] += meters;
   }
-  setArmTarget(next.x, next.y, next.z);
+  setArmTarget(next.x, next.y, next.z, { axis });
 }
 
 function zeroOffsets() {
@@ -1733,7 +2018,9 @@ function splitLinks() {
   const total = Math.max(0.002, Math.abs(numberInput("wizardTotalReachInput") || 0.5));
   setDirtyNumber("armLink1Input", total / 2, 3);
   setDirtyNumber("armLink2Input", total / 2, 3);
-  renderIkPreview();
+  const result = clampCurrentArmTarget();
+  renderIkPreview({ forceTargetEditorInputs: result.clamped });
+  if (result.clamped) queueArmLiveMove();
 }
 
 function syncReach() {
@@ -1843,42 +2130,7 @@ function render(state) {
   renderIkPreview();
 
   $("activeReportsToggle").checked = state.activeReports;
-
-  const feedback = state.lastFeedback;
-  $("feedbackAge").textContent = feedback ? `${feedback.ageMs} ms ago` : "No feedback";
-  $("positionMetric").textContent = feedback
-    ? fixed(feedback.positionRad, 3, "rad")
-    : "--";
-  $("velocityMetric").textContent = feedback
-    ? fixed(feedback.velocityRadS, 3, "rad/s")
-    : fixed(state.commandedSpeed, 2, "rad/s cmd");
-  $("torqueMetric").textContent = feedback ? fixed(feedback.torqueNm, 3, "Nm") : "--";
-  $("tempMetric").textContent = feedback ? fixed(feedback.temperatureC, 1, "C") : "--";
-  $("modeState").textContent = feedback && feedback.modeState !== null ? `mode ${feedback.modeState}` : "mode --";
-
-  const privateFault = state.lastPrivateFault;
-  const privateFaultNames = privateFault && privateFault.faults && privateFault.faults.length
-    ? privateFault.faults.join(", ")
-    : "";
-  const privateWarningNames = privateFault && privateFault.warnings && privateFault.warnings.length
-    ? privateFault.warnings.join(", ")
-    : "";
-  const hasPrivateFault = Boolean(privateFault && privateFault.faultRaw);
-  const hasPrivateWarning = Boolean(privateFault && privateFault.warningRaw);
-  $("faultState").textContent = privateFault
-    ? `fault ${privateFaultNames || privateFault.faultRawHex}`
-    : feedback
-      ? `fault ${feedback.fault ? 1 : 0}`
-      : "fault --";
-  $("faultState").title = privateFault ? privateFault.faultRawHex : "";
-  $("faultState").classList.toggle("fault", hasPrivateFault || Boolean(feedback && feedback.fault));
-  $("warningState").textContent = privateFault
-    ? `warn ${privateWarningNames || privateFault.warningRawHex}`
-    : feedback
-      ? `warn ${feedback.warning ? 1 : 0}`
-      : "warn --";
-  $("warningState").title = privateFault ? privateFault.warningRawHex : "";
-  $("warningState").classList.toggle("warn", hasPrivateWarning || Boolean(feedback && feedback.warning));
+  renderTelemetry(state);
 
   const stats = state.canStats || {};
   $("rxPackets").textContent = stats.rx_packets || "--";
@@ -1931,6 +2183,13 @@ armControlIds.forEach((id) => {
   const el = $(id);
   const update = () => {
     markDirty(id);
+    const targetAxis = TARGET_INPUT_AXES[id] || "";
+    if (targetAxis || ARM_REACH_CONTROL_IDS.has(id)) {
+      const result = clampCurrentArmTarget(targetAxis);
+      renderIkPreview({ forceTargetEditorInputs: result.clamped });
+      if (targetAxis || result.clamped) queueArmLiveMove();
+      return;
+    }
     renderIkPreview();
   };
   el.addEventListener("input", update);
@@ -1953,7 +2212,9 @@ $("activeReportsToggle").addEventListener("change", () => {
 $("wizardJointCountInput").addEventListener("change", () => {
   markDirty("wizardJointCountInput");
   updateJointModeUi();
-  renderIkPreview();
+  const result = clampCurrentArmTarget();
+  renderIkPreview({ forceTargetEditorInputs: result.clamped });
+  if (result.clamped) queueArmLiveMove();
 });
 
 $("clearLogBtn").addEventListener("click", () => {
@@ -2044,8 +2305,15 @@ $("targetEditorApplyBtn").addEventListener("click", closeTargetEditor);
 $("targetEditorHomeBtn").addEventListener("click", () => applyTargetPreset("home"));
 ["targetEditorXInput", "targetEditorYInput", "targetEditorZInput"].forEach((id) => {
   const el = $(id);
-  el.addEventListener("input", syncTargetEditorInputs);
-  el.addEventListener("change", syncTargetEditorInputs);
+  const sync = () => syncTargetEditorInputs(TARGET_INPUT_AXES[id]);
+  el.addEventListener("input", sync);
+  el.addEventListener("change", sync);
+});
+
+armLiveToggles.forEach((toggle) => {
+  toggle.addEventListener("change", () => {
+    setArmLiveMoveEnabled(toggle.checked);
+  });
 });
 
 const targetEditorCanvas = $("targetEditorCanvas");

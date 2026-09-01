@@ -87,6 +87,7 @@ STARTUP_SCAN_ROUNDS = 1
 MAX_LOG_LINES = 240
 MAX_FRAME_HISTORY = 600
 COMMAND_TIMEOUT_S = 0.6
+TELEMETRY_ACTIVE_WINDOW_S = 5.0
 ARM_AXES = ("base", "shoulder", "elbow")
 ARM_JOINT_COUNTS = (2, 3)
 ARM_ROLE_DEFAULT_IDS = {"base": 0x01, "shoulder": 0x02, "elbow": 0x03}
@@ -96,6 +97,7 @@ ARM_TWIST_MAX_LIMIT_RAD = math.pi
 ARM_ROUTE_MAX_STEP_RAD = math.radians(45.0)
 ARM_ROUTE_SETTLE_S = 0.08
 ARM_ROUTE_MIN_INTERVAL_S = 0.12
+ARM_MIN_TARGET_REACH = 0.001
 
 ROOT_DIR = Path(__file__).resolve().parent
 WEB_DIR = ROOT_DIR / "web"
@@ -105,7 +107,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.08.30.2"
+APP_VERSION = "2026.09.01.2"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -300,6 +302,37 @@ def route_arm_joint_angles(
     if joint_count == 2:
         routed["elbow"] = 0.0
     return routed
+
+
+def clamp_arm_target_to_reach(
+    joint_count: int,
+    target: Dict[str, float],
+    link_1: float,
+    link_2: float,
+) -> Dict[str, float]:
+    x = float(target.get("x", 0.0))
+    y = float(target.get("y", 0.0))
+    z = float(target.get("z", 0.0))
+    if not math.isfinite(x):
+        x = 0.0
+    if not math.isfinite(y):
+        y = 0.0
+    if not math.isfinite(z):
+        z = 0.0
+    max_reach = max(abs(link_1) + abs(link_2), 0.001)
+    min_reach = ARM_MIN_TARGET_REACH if joint_count == 2 else abs(abs(link_1) - abs(link_2))
+    min_reach = min(min_reach, max_reach)
+    reach = math.sqrt(x * x + y * y + z * z)
+
+    if reach > max_reach:
+        scale = max_reach / reach
+        return {"x": x * scale, "y": y * scale, "z": z * scale}
+    if min_reach > 0.0 and reach < min_reach:
+        if reach <= 0.0000001:
+            return {"x": min_reach, "y": 0.0, "z": 0.0}
+        scale = min_reach / reach
+        return {"x": x * scale, "y": y * scale, "z": z * scale}
+    return {"x": x, "y": y, "z": z}
 
 
 def plan_arm_joint_route(
@@ -525,6 +558,7 @@ class DashboardController:
         self.arm_acceleration = DEFAULT_POSITION_ACCEL_RAD_S2
         self.arm_position_kp = DEFAULT_POSITION_KP
         self.arm_position_configured = False
+        self.arm_position_signature: Optional[Tuple[Any, ...]] = None
         self.arm_motor_targets = {axis: 0.0 for axis in ARM_AXES}
         self.arm_joint_angles = {axis: 0.0 for axis in ARM_AXES}
         self.arm_route_waypoints: Deque[Dict[str, Dict[str, float]]] = deque()
@@ -541,7 +575,11 @@ class DashboardController:
         self.last_private_fault_at = 0.0
         self.last_raw_frame: Optional[Dict[str, Any]] = None
         self.last_feedback: Optional[Dict[str, Any]] = None
+        self.feedback_by_motor: Dict[int, Dict[str, Any]] = {}
+        self.feedback_at_by_motor: Dict[int, float] = {}
         self.last_private_fault: Optional[Dict[str, Any]] = None
+        self.private_faults_by_motor: Dict[int, Dict[str, Any]] = {}
+        self.private_faults_at_by_motor: Dict[int, float] = {}
         self.discovered_private: List[int] = []
         self.busy = False
 
@@ -573,6 +611,15 @@ class DashboardController:
     def clear_logs(self) -> None:
         with self.lock:
             self.logs.clear()
+
+    def clear_cached_private_faults_locked(self, motor_ids: List[int]) -> None:
+        target_ids = {motor_id & 0xFF for motor_id in motor_ids}
+        for motor_id in target_ids:
+            self.private_faults_by_motor.pop(motor_id, None)
+            self.private_faults_at_by_motor.pop(motor_id, None)
+        if self.last_private_fault and (int(self.last_private_fault.get("motorId", -1)) & 0xFF) in target_ids:
+            self.last_private_fault = None
+            self.last_private_fault_at = 0.0
 
     def bus_label(self) -> str:
         return self.bus.label()
@@ -758,11 +805,12 @@ class DashboardController:
                 vel_raw = (frame.data[2] << 8) | frame.data[3]
                 torque_raw = (frame.data[4] << 8) | frame.data[5]
                 temp_raw = (frame.data[6] << 8) | frame.data[7]
-                self.last_feedback_at = time.monotonic()
-                self.last_feedback = {
+                now = time.monotonic()
+                feedback = {
                     "protocol": PROTOCOL_PRIVATE,
                     "targetHost": host,
                     "motorId": source_motor,
+                    "motorIdHex": fmt_id(source_motor),
                     "positionRad": uint_to_float(pos_raw, -p_max, p_max, 16),
                     "velocityRadS": uint_to_float(vel_raw, -v_max, v_max, 16),
                     "torqueNm": uint_to_float(torque_raw, -t_max, t_max, 16),
@@ -773,6 +821,10 @@ class DashboardController:
                     "model": model,
                     "ageMs": 0,
                 }
+                self.last_feedback_at = now
+                self.last_feedback = dict(feedback)
+                self.feedback_at_by_motor[source_motor] = now
+                self.feedback_by_motor[source_motor] = feedback
                 return
             if comm_type in (COMM_READ_PARAM, COMM_WRITE_PARAM):
                 index = int.from_bytes(frame.data[0:2], "little")
@@ -782,8 +834,8 @@ class DashboardController:
                 return
             if comm_type == COMM_FAULT:
                 report = decode_private_fault_payload(frame.data)
-                self.last_private_fault_at = time.monotonic()
-                self.last_private_fault = {
+                now = time.monotonic()
+                fault = {
                     "motorId": source_motor,
                     "motorIdHex": fmt_id(source_motor),
                     "faultRaw": report.fault_raw,
@@ -794,6 +846,10 @@ class DashboardController:
                     "warnings": report.warning_names,
                     "ageMs": 0,
                 }
+                self.last_private_fault_at = now
+                self.last_private_fault = dict(fault)
+                self.private_faults_at_by_motor[source_motor] = now
+                self.private_faults_by_motor[source_motor] = fault
                 self.log(
                     f"Private fault frame motor={fmt_id(source_motor)} "
                     f"{private_fault_summary(report)}"
@@ -968,7 +1024,8 @@ class DashboardController:
             self.command_lock.release()
 
     def _run_command(self, command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        self.log(f"Command {command}")
+        if command != "arm-live-move":
+            self.log(f"Command {command}")
         if command == "reopen":
             ok = self.reopen_bus()
             return {"ok": ok}
@@ -1010,6 +1067,8 @@ class DashboardController:
             return {"ok": self.move_position(position, velocity_limit, acceleration, position_kp)}
         if command == "arm-move":
             return {"ok": self.move_arm_ik(payload)}
+        if command == "arm-live-move":
+            return {"ok": self.move_arm_ik(payload, live=True)}
         if command == "arm-home-zero":
             return self.home_arm_zero(payload)
         if command == "arm-stop":
@@ -1381,8 +1440,7 @@ class DashboardController:
         self.send_private_disable(True)
         self.wait_private_status(0.30)
         with self.lock:
-            self.last_private_fault = None
-            self.last_private_fault_at = 0.0
+            self.clear_cached_private_faults_locked([self.motor_id])
         self.log(label)
 
     def prepare_private_mode_switch_for(self, target_id: int, label: str) -> None:
@@ -1395,8 +1453,7 @@ class DashboardController:
         self.send_private_disable_to(target_id, True)
         self.wait_private_status_for(target_id, 0.30)
         with self.lock:
-            self.last_private_fault = None
-            self.last_private_fault_at = 0.0
+            self.clear_cached_private_faults_locked([target_id])
         self.log(label)
         time.sleep(0.08)
 
@@ -1563,11 +1620,16 @@ class DashboardController:
             "shoulder": twist_limit_rad(payload.get("armShoulderTwistLimit"), self.arm_twist_limits["shoulder"]),
             "elbow": twist_limit_rad(payload.get("armElbowTwistLimit"), self.arm_twist_limits["elbow"]),
         }
-        self.arm_target = {
-            "x": parse_float(payload.get("armTargetX"), self.arm_target["x"]),
-            "y": parse_float(payload.get("armTargetY"), self.arm_target["y"]),
-            "z": parse_float(payload.get("armTargetZ"), self.arm_target["z"]),
-        }
+        self.arm_target = clamp_arm_target_to_reach(
+            self.arm_joint_count,
+            {
+                "x": parse_float(payload.get("armTargetX"), self.arm_target["x"]),
+                "y": parse_float(payload.get("armTargetY"), self.arm_target["y"]),
+                "z": parse_float(payload.get("armTargetZ"), self.arm_target["z"]),
+            },
+            self.arm_link_1,
+            self.arm_link_2,
+        )
         self.arm_elbow_up = bool(payload.get("armElbowUp", self.arm_elbow_up))
         self.arm_velocity_limit = positive_float(payload.get("armVelocityLimit"), self.arm_velocity_limit, 20.0)
         self.arm_acceleration = positive_float(payload.get("armAcceleration"), self.arm_acceleration, 200.0)
@@ -1633,6 +1695,23 @@ class DashboardController:
             seen[motor_id] = axis
         return True, ""
 
+    def arm_position_config_signature(self) -> Tuple[Any, ...]:
+        axes = self.active_arm_axes()
+        return (
+            self.arm_joint_count,
+            tuple(
+                (
+                    axis,
+                    self.arm_motor_ids[axis] & 0xFF,
+                    self.arm_motor_models[axis],
+                )
+                for axis in axes
+            ),
+            round(self.arm_velocity_limit, 6),
+            round(self.arm_acceleration, 6),
+            round(self.arm_position_kp, 6),
+        )
+
     def home_arm_zero(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         ok, message = self.validate_arm_command_motors(payload)
         if not ok:
@@ -1682,11 +1761,12 @@ class DashboardController:
             "path": str(VALUES_PATH),
         }
 
-    def move_arm_ik(self, payload: Dict[str, Any]) -> bool:
+    def move_arm_ik(self, payload: Dict[str, Any], live: bool = False) -> bool:
         ok, message = self.validate_arm_command_motors(payload)
         if not ok:
             raise ValueError(message)
         self.apply_arm_payload(payload)
+        config_signature = self.arm_position_config_signature()
         solution = solve_arm_ik(
             self.arm_joint_count,
             self.arm_target["x"],
@@ -1752,31 +1832,47 @@ class DashboardController:
 
         first_waypoint = route_waypoints[0]
         remaining_waypoints = route_waypoints[1:]
+        needs_config = (
+            not live
+            or not self.arm_position_configured
+            or self.arm_position_signature != config_signature
+        )
         self.oscillating = False
         self.jog_active = False
         self.velocity_configured = False
         self.position_configured = False
-        self.arm_position_configured = False
         self.clear_arm_route()
         self.commanded_speed = 0.0
-        self.log(
-            "Arm IK target "
-            f"x={self.arm_target['x']:+.3f} y={self.arm_target['y']:+.3f} z={self.arm_target['z']:+.3f} "
-            f"joints base={joint_angles['base']:+.3f} shoulder={joint_angles['shoulder']:+.3f} elbow={joint_angles['elbow']:+.3f} "
-            f"route_waypoints={len(route_waypoints)}"
-        )
-        for axis in self.active_arm_axes():
-            if not self.configure_private_position_motor(
-                axis,
-                self.arm_motor_ids[axis],
-                first_waypoint["motorTargets"][axis],
-                self.arm_velocity_limit,
-                self.arm_acceleration,
-                self.arm_position_kp,
-            ):
-                self.stop_arm()
-                return False
+        if needs_config:
+            self.arm_position_configured = False
+        should_log = not live or needs_config
+        if should_log:
+            self.log(
+                ("Arm live IK target " if live else "Arm IK target ")
+                + f"x={self.arm_target['x']:+.3f} y={self.arm_target['y']:+.3f} z={self.arm_target['z']:+.3f} "
+                + f"joints base={joint_angles['base']:+.3f} shoulder={joint_angles['shoulder']:+.3f} elbow={joint_angles['elbow']:+.3f} "
+                + f"route_waypoints={len(route_waypoints)}"
+            )
+        if needs_config:
+            for axis in self.active_arm_axes():
+                if not self.configure_private_position_motor(
+                    axis,
+                    self.arm_motor_ids[axis],
+                    first_waypoint["motorTargets"][axis],
+                    self.arm_velocity_limit,
+                    self.arm_acceleration,
+                    self.arm_position_kp,
+                ):
+                    self.stop_arm()
+                    return False
         self.apply_arm_route_waypoint(first_waypoint)
+        if not needs_config:
+            for axis in self.active_arm_axes():
+                self.write_private_param_f32_to(
+                    self.arm_motor_ids[axis],
+                    PARAM_LOC_REF,
+                    self.arm_motor_targets[axis],
+                )
         self.arm_route_waypoints = deque(remaining_waypoints)
         self.arm_route_next_at = (
             time.monotonic() + self.arm_route_interval(self.arm_joint_angles, remaining_waypoints[0]["jointAngles"])
@@ -1784,13 +1880,15 @@ class DashboardController:
             else 0.0
         )
         self.arm_position_configured = True
+        self.arm_position_signature = config_signature
         self.last_arm_position_refresh_at = time.monotonic()
-        active_targets = " ".join(
-            f"{axis}={self.arm_motor_targets[axis]:+.3f}"
-            for axis in self.active_arm_axes()
-        )
-        queued = len(self.arm_route_waypoints)
-        self.log(f"Arm route started {active_targets}; queued={queued}")
+        if should_log:
+            active_targets = " ".join(
+                f"{axis}={self.arm_motor_targets[axis]:+.3f}"
+                for axis in self.active_arm_axes()
+            )
+            queued = len(self.arm_route_waypoints)
+            self.log(f"Arm route started {active_targets}; queued={queued}")
         return True
 
     def send_arm_position_targets(self) -> None:
@@ -1839,8 +1937,10 @@ class DashboardController:
             self.send_private_disable_to(motor_id, True)
             self.wait_private_status_for(motor_id, 0.20)
         with self.lock:
-            self.last_private_fault = None
-            self.last_private_fault_at = 0.0
+            self.clear_cached_private_faults_locked([
+                self.arm_motor_ids[axis]
+                for axis in self.active_arm_axes()
+            ])
         self.log("Arm clear-fault sent")
 
     def private_host_candidates(self) -> List[int]:
@@ -2225,14 +2325,112 @@ class DashboardController:
             },
         }
 
+    def telemetry_roles_for_motor(self, motor_id: int) -> List[str]:
+        motor_id &= 0xFF
+        roles: List[str] = []
+        if motor_id == (self.motor_id & 0xFF):
+            roles.append("Selected")
+        labels = {"base": "Base", "shoulder": "Shoulder", "elbow": "Elbow"}
+        for axis in self.active_arm_axes():
+            if (self.arm_motor_ids[axis] & 0xFF) == motor_id:
+                roles.append(labels[axis])
+        return roles
+
+    def active_command_motor_ids(self) -> List[int]:
+        ids: List[int] = []
+        if self.velocity_configured or self.position_configured or self.jog_active or self.oscillating:
+            ids.append(self.motor_id & 0xFF)
+        if self.arm_position_configured or self.arm_route_waypoints:
+            ids.extend(self.arm_motor_ids[axis] & 0xFF for axis in self.active_arm_axes())
+        out: List[int] = []
+        for motor_id in ids:
+            if motor_id not in out:
+                out.append(motor_id)
+        return out
+
+    def telemetry_target_for_motor(self, motor_id: int) -> Tuple[Optional[float], Optional[float]]:
+        motor_id &= 0xFF
+        for axis in self.active_arm_axes():
+            if (self.arm_motor_ids[axis] & 0xFF) == motor_id:
+                return self.arm_motor_targets.get(axis), None
+        if motor_id == (self.motor_id & 0xFF):
+            if self.position_configured:
+                return self.position_target, None
+            if self.velocity_configured or self.jog_active or self.oscillating:
+                return None, self.commanded_speed
+        return None, None
+
+    def telemetry_motors_snapshot(self, now: float) -> List[Dict[str, Any]]:
+        commanded_ids = self.active_command_motor_ids()
+        commanded_set = set(commanded_ids)
+        ids = set(commanded_ids)
+        for motor_id, seen_at in self.feedback_at_by_motor.items():
+            if motor_id in commanded_set or motor_id == (self.motor_id & 0xFF) or now - seen_at <= TELEMETRY_ACTIVE_WINDOW_S:
+                ids.add(motor_id)
+
+        arm_order = {
+            self.arm_motor_ids[axis] & 0xFF: index
+            for index, axis in enumerate(self.active_arm_axes())
+        }
+
+        def sort_key(motor_id: int) -> Tuple[int, int, int]:
+            return (
+                0 if motor_id in commanded_set else 1,
+                arm_order.get(motor_id, 9),
+                motor_id,
+            )
+
+        rows: List[Dict[str, Any]] = []
+        for motor_id in sorted(ids, key=sort_key):
+            feedback = dict(self.feedback_by_motor.get(motor_id, {}))
+            feedback_seen_at = self.feedback_at_by_motor.get(motor_id)
+            fault = dict(self.private_faults_by_motor.get(motor_id, {}))
+            fault_seen_at = self.private_faults_at_by_motor.get(motor_id)
+            target_rad, commanded_velocity = self.telemetry_target_for_motor(motor_id)
+            age_ms: Optional[int] = None
+            if feedback_seen_at is not None:
+                age_ms = int((now - feedback_seen_at) * 1000)
+            fault_age_ms: Optional[int] = None
+            if fault and fault_seen_at is not None:
+                fault_age_ms = int((now - fault_seen_at) * 1000)
+                fault["ageMs"] = fault_age_ms
+
+            roles = self.telemetry_roles_for_motor(motor_id)
+            active = motor_id in commanded_set or (
+                feedback_seen_at is not None and now - feedback_seen_at <= TELEMETRY_ACTIVE_WINDOW_S
+            )
+            row: Dict[str, Any] = {
+                "protocol": feedback.get("protocol", PROTOCOL_PRIVATE),
+                "motorId": motor_id,
+                "motorIdHex": fmt_id(motor_id),
+                "roles": roles,
+                "role": ", ".join(roles),
+                "model": feedback.get("model", self.model_for_motor(motor_id)),
+                "ageMs": age_ms,
+                "active": active,
+                "targetRad": target_rad,
+                "commandedVelocityRadS": commanded_velocity,
+                "positionRad": feedback.get("positionRad"),
+                "velocityRadS": feedback.get("velocityRadS"),
+                "torqueNm": feedback.get("torqueNm"),
+                "temperatureC": feedback.get("temperatureC"),
+                "modeState": feedback.get("modeState"),
+                "fault": bool(feedback.get("fault")) or bool(fault.get("faultRaw")),
+                "warning": bool(feedback.get("warning")) or bool(fault.get("warningRaw")),
+                "faultFrame": fault or None,
+            }
+            rows.append(row)
+        return rows
+
     def snapshot(self) -> Dict[str, Any]:
         with self.lock:
+            now = time.monotonic()
             feedback = dict(self.last_feedback) if self.last_feedback else None
             if feedback and self.last_feedback_at:
-                feedback["ageMs"] = int((time.monotonic() - self.last_feedback_at) * 1000)
+                feedback["ageMs"] = int((now - self.last_feedback_at) * 1000)
             private_fault = dict(self.last_private_fault) if self.last_private_fault else None
             if private_fault and self.last_private_fault_at:
-                private_fault["ageMs"] = int((time.monotonic() - self.last_private_fault_at) * 1000)
+                private_fault["ageMs"] = int((now - self.last_private_fault_at) * 1000)
             transport = self.bus_transport()
             serial_port = getattr(self.bus, "serial_port", DEFAULT_SERIAL_PORT)
             serial_baud = getattr(self.bus, "serial_baud", DEFAULT_SERIAL_BAUD)
@@ -2287,6 +2485,8 @@ class DashboardController:
                 "jogActive": self.jog_active,
                 "busy": self.busy,
                 "lastFeedback": feedback,
+                "telemetryMotors": self.telemetry_motors_snapshot(now),
+                "telemetryActiveWindowMs": int(TELEMETRY_ACTIVE_WINDOW_S * 1000),
                 "lastPrivateFault": private_fault,
                 "lastRawFrame": self.last_raw_frame,
                 "discoveredPrivate": [fmt_id(item) for item in self.discovered_private],

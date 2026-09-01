@@ -519,7 +519,7 @@ select {
 }
 
 .target-editor-actions {
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr minmax(86px, 0.8fr) 1fr;
 }
 
 .wizard-body {
@@ -736,7 +736,7 @@ select {
 }
 
 .arm-actions {
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: minmax(88px, 0.72fr) repeat(3, minmax(0, 1fr));
   margin-top: 14px;
 }
 
@@ -900,6 +900,58 @@ button.jog-right {
   display: block;
   margin-top: 10px;
   font-size: 1.35rem;
+}
+
+.telemetry-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.telemetry-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.telemetry-table th,
+.telemetry-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.telemetry-table th {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.telemetry-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.telemetry-table .mono {
+  color: var(--accent-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.telemetry-table tr.stale td {
+  color: var(--muted);
+}
+
+.telemetry-table .empty {
+  color: var(--muted);
+  text-align: center;
+}
+
+.telemetry-role {
+  color: var(--muted);
 }
 
 .flag-row {

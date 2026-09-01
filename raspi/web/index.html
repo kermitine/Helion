@@ -255,6 +255,10 @@
                 <button type="button" data-nudge-axis="z" data-nudge-dir="1">Z+</button>
               </div>
               <div class="button-row arm-actions">
+                <label class="switch arm-live-switch">
+                  <input id="armLiveMoveToggle" type="checkbox">
+                  <span>Live</span>
+                </label>
                 <button class="soft" data-command="arm-move">Move IK</button>
                 <button class="danger" data-command="arm-stop">Stop Arm</button>
                 <button class="danger" data-command="arm-clear-fault">Clear Arm Faults</button>
@@ -560,6 +564,10 @@
                   </div>
                   <div class="button-row target-editor-actions">
                     <button id="targetEditorHomeBtn" type="button">Home</button>
+                    <label class="switch target-live-switch">
+                      <input id="targetEditorLiveMoveToggle" type="checkbox">
+                      <span>Live</span>
+                    </label>
                     <button id="targetEditorApplyBtn" type="button" class="soft">Done</button>
                   </div>
                 </div>
@@ -571,30 +579,30 @@
         <div class="panel telemetry-panel">
           <div class="panel-head">
             <h2>Telemetry</h2>
-            <span id="feedbackAge">No feedback</span>
+            <span id="telemetrySummary">No feedback</span>
           </div>
-          <div class="metric-grid">
-            <div class="metric">
-              <span>Position</span>
-              <strong id="positionMetric">--</strong>
-            </div>
-            <div class="metric">
-              <span>Velocity</span>
-              <strong id="velocityMetric">--</strong>
-            </div>
-            <div class="metric">
-              <span>Torque</span>
-              <strong id="torqueMetric">--</strong>
-            </div>
-            <div class="metric">
-              <span>Temp</span>
-              <strong id="tempMetric">--</strong>
-            </div>
-          </div>
-          <div class="flag-row">
-            <span id="modeState">mode --</span>
-            <span id="faultState">fault --</span>
-            <span id="warningState">warn --</span>
+          <div class="telemetry-table-wrap">
+            <table class="telemetry-table">
+              <thead>
+                <tr>
+                  <th>Motor</th>
+                  <th>Role</th>
+                  <th>Age</th>
+                  <th>Position</th>
+                  <th>Target</th>
+                  <th>Velocity</th>
+                  <th>Torque</th>
+                  <th>Temp</th>
+                  <th>Fault</th>
+                  <th>Warn</th>
+                </tr>
+              </thead>
+              <tbody id="telemetryRows">
+                <tr>
+                  <td colspan="10">No active motor telemetry</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
 
