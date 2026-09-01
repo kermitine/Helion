@@ -21,7 +21,6 @@ const TAU = Math.PI * 2;
 const DEFAULT_TWIST_LIMIT_DEG = 180;
 const ARM_LIVE_SEND_INTERVAL_MS = 120;
 const ARM_MIN_TARGET_REACH = 0.001;
-const ARM_TARGET_CLAMP_MARGIN = 0.0005;
 const REACH_SOLVE_TOLERANCE = 0.001;
 const AXIS_LABELS = {
   base: "Base",
@@ -38,6 +37,7 @@ const TARGET_INPUT_AXES = {
 };
 const ARM_REACH_CONTROL_IDS = new Set(["armLink1Input", "armLink2Input"]);
 const commandButtons = [...document.querySelectorAll("[data-command]")];
+const armMotionPresetButtons = [...document.querySelectorAll("[data-arm-motion-preset]")];
 const configControlIds = [
   "serialPortInput",
   "serialBaudInput",
@@ -150,26 +150,11 @@ function clampArmTarget(target, arm, axis = "") {
     z: Number.isFinite(Number(target.z)) ? Number(target.z) : 0,
   };
   const limits = armReachLimits(arm);
-  const axisName = ["x", "y", "z"].includes(axis) ? axis : "";
   let clamped = false;
-
-  if (axisName) {
-    const otherAxes = ["x", "y", "z"].filter((item) => item !== axisName);
-    const otherSq = otherAxes.reduce((sum, item) => sum + next[item] * next[item], 0);
-    const maxSq = limits.maxReach * limits.maxReach;
-    if (otherSq < maxSq) {
-      const axisLimit = Math.max(0, Math.sqrt(maxSq - otherSq) - ARM_TARGET_CLAMP_MARGIN);
-      const limited = Math.max(-axisLimit, Math.min(axisLimit, next[axisName]));
-      if (limited !== next[axisName]) {
-        next[axisName] = limited;
-        clamped = true;
-      }
-    }
-  }
 
   let reach = Math.hypot(next.x, next.y, next.z);
   if (reach > limits.maxReach) {
-    const clampedReach = Math.max(limits.minReach, limits.maxReach - ARM_TARGET_CLAMP_MARGIN);
+    const clampedReach = limits.maxReach;
     const scale = clampedReach / reach;
     next.x *= scale;
     next.y *= scale;
@@ -259,7 +244,7 @@ function clearDirty(ids) {
 function clearCommandDirty(command, result) {
   if (result && result.ok === false) return;
   if (command === "move-position") clearDirty(positionControlIds);
-  if (command === "arm-move" || command === "arm-home-zero") clearDirty(armControlIds);
+  if (command === "arm-move" || command === "arm-home-zero" || command === "arm-preset") clearDirty(armControlIds);
   if (command === "set-speed") clearDirty(speedControlIds);
 }
 
@@ -303,7 +288,7 @@ function commandPayload(command) {
       positionKp: numberInput("positionKpInput"),
     };
   }
-  if (command === "arm-move" || command === "arm-home-zero") {
+  if (command === "arm-move" || command === "arm-home-zero" || command === "arm-preset") {
     return {
       armJointCount: jointCountInput(),
       armBaseMotorId: selectedMotorValue("armBaseMotorIdInput", currentArmMotorValue("base")),
@@ -646,9 +631,9 @@ function validateArmCommandMotors(options = {}) {
 }
 
 async function sendCommand(command, extra = {}) {
-  if (["stop", "arm-stop", "arm-clear-fault"].includes(command)) setArmLiveMoveEnabled(false);
+  if (["stop", "arm-stop", "arm-clear-fault", "arm-preset"].includes(command)) setArmLiveMoveEnabled(false);
   if (busy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault"].includes(command)) return;
-  if ((command === "arm-move" || command === "arm-home-zero") && !validateArmCommandMotors()) return;
+  if ((command === "arm-move" || command === "arm-home-zero" || command === "arm-preset") && !validateArmCommandMotors()) return;
   if (command === "arm-move") {
     const preview = armPreview();
     if (!preview.ok || !preview.safe) {
@@ -687,6 +672,11 @@ async function sendCommand(command, extra = {}) {
     busy = false;
     renderBusy(false);
   }
+}
+
+function sendArmMotionPreset(preset) {
+  if (!preset) return;
+  sendCommand("arm-preset", { ...commandPayload("arm-preset"), armMotionPreset: preset });
 }
 
 function armLiveMoveEnabled() {
@@ -796,6 +786,9 @@ function renderBusy(isBusy) {
     button.disabled = isBusy;
   });
   idSetupButtons.forEach((button) => {
+    button.disabled = isBusy;
+  });
+  armMotionPresetButtons.forEach((button) => {
     button.disabled = isBusy;
   });
   if (!isBusy) renderArmSafety(armPreview());
@@ -2164,6 +2157,12 @@ commandButtons.forEach((button) => {
   button.addEventListener("click", () => {
     const command = button.dataset.command;
     sendCommand(command, commandPayload(command));
+  });
+});
+
+armMotionPresetButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    sendArmMotionPreset(button.dataset.armMotionPreset);
   });
 });
 

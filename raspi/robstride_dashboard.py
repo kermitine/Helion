@@ -95,9 +95,17 @@ ARM_TWIST_DEFAULT_LIMIT_RAD = math.pi
 ARM_TWIST_MIN_LIMIT_RAD = math.radians(1.0)
 ARM_TWIST_MAX_LIMIT_RAD = math.pi
 ARM_ROUTE_MAX_STEP_RAD = math.radians(45.0)
+ARM_PRESET_MAX_STEP_RAD = math.radians(12.0)
 ARM_ROUTE_SETTLE_S = 0.08
 ARM_ROUTE_MIN_INTERVAL_S = 0.12
 ARM_MIN_TARGET_REACH = 0.001
+ARM_MOTION_PRESET_LABELS = {
+    "showcase": "Showcase",
+    "sweep": "Sweep",
+    "lift": "Lift",
+    "orbit": "Orbit",
+    "flex": "Flex",
+}
 
 ROOT_DIR = Path(__file__).resolve().parent
 WEB_DIR = ROOT_DIR / "web"
@@ -107,7 +115,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.01.2"
+APP_VERSION = "2026.09.01.3"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1069,6 +1077,8 @@ class DashboardController:
             return {"ok": self.move_arm_ik(payload)}
         if command == "arm-live-move":
             return {"ok": self.move_arm_ik(payload, live=True)}
+        if command == "arm-preset":
+            return self.move_arm_preset(payload)
         if command == "arm-home-zero":
             return self.home_arm_zero(payload)
         if command == "arm-stop":
@@ -1666,6 +1676,164 @@ class DashboardController:
             for axis in ARM_AXES
         }
 
+    def arm_route_waypoints_to_target(
+        self,
+        target: Dict[str, float],
+        previous_angles: Dict[str, float],
+        max_step_rad: float,
+    ) -> Tuple[List[Dict[str, Dict[str, float]]], Dict[str, float], Dict[str, float]]:
+        clamped_target = clamp_arm_target_to_reach(
+            self.arm_joint_count,
+            target,
+            self.arm_link_1,
+            self.arm_link_2,
+        )
+        solution = solve_arm_ik(
+            self.arm_joint_count,
+            clamped_target["x"],
+            clamped_target["y"],
+            clamped_target["z"],
+            self.arm_link_1,
+            self.arm_link_2,
+            self.arm_elbow_up,
+        )
+        raw_joint_angles = {
+            "base": solution.base,
+            "shoulder": solution.shoulder,
+            "elbow": solution.elbow,
+        }
+        joint_angles = route_arm_joint_angles(
+            self.arm_joint_count,
+            raw_joint_angles,
+            self.arm_twist_limits,
+            previous_angles,
+        )
+        route_angles = plan_arm_joint_route(
+            self.arm_joint_count,
+            previous_angles,
+            joint_angles,
+            max_step_rad,
+        )
+        route_waypoints: List[Dict[str, Dict[str, float]]] = []
+        for waypoint_angles in route_angles:
+            waypoint_solution = ArmIkSolution(
+                base=waypoint_angles["base"],
+                shoulder=waypoint_angles["shoulder"],
+                elbow=waypoint_angles["elbow"],
+            )
+            waypoint_points = arm_solution_points(
+                self.arm_joint_count,
+                waypoint_solution,
+                clamped_target,
+                self.arm_link_1,
+                self.arm_link_2,
+            )
+            waypoint_safety = arm_safety_check(
+                self.arm_joint_count,
+                waypoint_points,
+                self.arm_link_radii,
+                waypoint_angles,
+                self.arm_twist_limits,
+            )
+            if not waypoint_safety["ok"]:
+                raise ValueError(f"Unsafe IK route: {'; '.join(waypoint_safety['warnings'])}")
+            route_waypoints.append(
+                {
+                    "jointAngles": dict(waypoint_angles),
+                    "motorTargets": self.arm_motor_targets_for_joints(waypoint_angles),
+                }
+            )
+        return route_waypoints, clamped_target, joint_angles
+
+    def build_arm_route_for_targets(
+        self,
+        targets: List[Dict[str, float]],
+        max_step_rad: float,
+    ) -> Tuple[List[Dict[str, Dict[str, float]]], Dict[str, float], Dict[str, float]]:
+        previous_angles = dict(self.arm_joint_angles)
+        final_target = dict(self.arm_target)
+        final_joint_angles = dict(previous_angles)
+        route_waypoints: List[Dict[str, Dict[str, float]]] = []
+        for target in targets:
+            segment, final_target, final_joint_angles = self.arm_route_waypoints_to_target(
+                target,
+                previous_angles,
+                max_step_rad,
+            )
+            route_waypoints.extend(segment)
+            previous_angles = final_joint_angles
+        if not route_waypoints:
+            raise ValueError("Arm route has no waypoints")
+        return route_waypoints, final_target, final_joint_angles
+
+    def start_arm_route(
+        self,
+        route_waypoints: List[Dict[str, Dict[str, float]]],
+        config_signature: Tuple[Any, ...],
+        label: str,
+        live: bool = False,
+    ) -> bool:
+        first_waypoint = route_waypoints[0]
+        remaining_waypoints = route_waypoints[1:]
+        needs_config = (
+            not live
+            or not self.arm_position_configured
+            or self.arm_position_signature != config_signature
+        )
+        self.oscillating = False
+        self.jog_active = False
+        self.velocity_configured = False
+        self.position_configured = False
+        self.clear_arm_route()
+        self.commanded_speed = 0.0
+        if needs_config:
+            self.arm_position_configured = False
+        should_log = not live or needs_config
+        if should_log:
+            joint_angles = route_waypoints[-1]["jointAngles"]
+            self.log(
+                f"{label} "
+                f"joints base={joint_angles['base']:+.3f} shoulder={joint_angles['shoulder']:+.3f} elbow={joint_angles['elbow']:+.3f} "
+                f"route_waypoints={len(route_waypoints)}"
+            )
+        if needs_config:
+            for axis in self.active_arm_axes():
+                if not self.configure_private_position_motor(
+                    axis,
+                    self.arm_motor_ids[axis],
+                    first_waypoint["motorTargets"][axis],
+                    self.arm_velocity_limit,
+                    self.arm_acceleration,
+                    self.arm_position_kp,
+                ):
+                    self.stop_arm()
+                    return False
+        self.apply_arm_route_waypoint(first_waypoint)
+        if not needs_config:
+            for axis in self.active_arm_axes():
+                self.write_private_param_f32_to(
+                    self.arm_motor_ids[axis],
+                    PARAM_LOC_REF,
+                    self.arm_motor_targets[axis],
+                )
+        self.arm_route_waypoints = deque(remaining_waypoints)
+        self.arm_route_next_at = (
+            time.monotonic() + self.arm_route_interval(self.arm_joint_angles, remaining_waypoints[0]["jointAngles"])
+            if remaining_waypoints
+            else 0.0
+        )
+        self.arm_position_configured = True
+        self.arm_position_signature = config_signature
+        self.last_arm_position_refresh_at = time.monotonic()
+        if should_log:
+            active_targets = " ".join(
+                f"{axis}={self.arm_motor_targets[axis]:+.3f}"
+                for axis in self.active_arm_axes()
+            )
+            queued = len(self.arm_route_waypoints)
+            self.log(f"Arm route started {active_targets}; queued={queued}")
+        return True
+
     def validate_arm_command_motors(self, payload: Dict[str, Any]) -> Tuple[bool, str]:
         joint_count = arm_joint_count(payload.get("armJointCount"), self.arm_joint_count)
         axes = arm_axes_for_count(joint_count)
@@ -1761,135 +1929,153 @@ class DashboardController:
             "path": str(VALUES_PATH),
         }
 
+    def arm_motion_preset_targets(self, preset: str) -> List[Dict[str, float]]:
+        key = str(preset or "showcase").strip().lower()
+        if key not in ARM_MOTION_PRESET_LABELS:
+            choices = ", ".join(ARM_MOTION_PRESET_LABELS)
+            raise ValueError(f"Unknown arm movement preset '{preset}'. Choose one of: {choices}")
+
+        reach = max(abs(self.arm_link_1) + abs(self.arm_link_2), 0.001)
+
+        def target(radial_scale: float, yaw_deg: float, z_scale: float) -> Dict[str, float]:
+            radial = reach * radial_scale
+            yaw = math.radians(yaw_deg)
+            return clamp_arm_target_to_reach(
+                self.arm_joint_count,
+                {
+                    "x": radial * math.cos(yaw),
+                    "y": radial * math.sin(yaw),
+                    "z": reach * z_scale,
+                },
+                self.arm_link_1,
+                self.arm_link_2,
+            )
+
+        if self.arm_joint_count == 2:
+            presets = {
+                "showcase": [
+                    (0.68, -36, 0.12),
+                    (0.60, -12, 0.38),
+                    (0.74, 30, 0.18),
+                    (0.56, 36, 0.44),
+                    (0.80, 0, 0.12),
+                    (0.58, -28, 0.30),
+                    (0.72, 0, 0.18),
+                ],
+                "sweep": [
+                    (0.70, -42, 0.14),
+                    (0.76, -18, 0.24),
+                    (0.72, 18, 0.20),
+                    (0.66, 42, 0.32),
+                    (0.74, 0, 0.18),
+                ],
+                "lift": [
+                    (0.70, 0, 0.08),
+                    (0.58, 0, 0.42),
+                    (0.74, 0, 0.24),
+                    (0.62, 0, 0.14),
+                ],
+                "orbit": [
+                    (0.68, -30, 0.14),
+                    (0.58, -8, 0.46),
+                    (0.68, 30, 0.14),
+                    (0.78, 8, 0.10),
+                    (0.68, -30, 0.14),
+                ],
+                "flex": [
+                    (0.82, 0, 0.10),
+                    (0.48, 0, 0.38),
+                    (0.72, -24, 0.22),
+                    (0.50, 24, 0.36),
+                    (0.78, 0, 0.16),
+                ],
+            }
+        else:
+            presets = {
+                "showcase": [
+                    (0.74, -34, 0.14),
+                    (0.50, -12, 0.44),
+                    (0.82, 22, 0.16),
+                    (0.46, 34, 0.36),
+                    (0.70, -28, 0.28),
+                    (0.54, 0, 0.50),
+                    (0.84, 0, 0.12),
+                    (0.66, 0, 0.24),
+                ],
+                "sweep": [
+                    (0.72, -42, 0.16),
+                    (0.62, -16, 0.34),
+                    (0.72, 20, 0.18),
+                    (0.58, 42, 0.40),
+                    (0.76, 0, 0.20),
+                ],
+                "lift": [
+                    (0.76, 0, 0.10),
+                    (0.54, 0, 0.48),
+                    (0.84, 0, 0.18),
+                    (0.56, 0, 0.32),
+                    (0.72, 0, 0.16),
+                ],
+                "orbit": [
+                    (0.70, -34, 0.16),
+                    (0.54, -8, 0.46),
+                    (0.70, 34, 0.16),
+                    (0.84, 8, 0.12),
+                    (0.58, -24, 0.34),
+                    (0.70, -34, 0.16),
+                ],
+                "flex": [
+                    (0.86, 0, 0.10),
+                    (0.46, 0, 0.38),
+                    (0.76, -24, 0.18),
+                    (0.44, 22, 0.42),
+                    (0.82, 0, 0.14),
+                ],
+            }
+        return [target(*item) for item in presets[key]]
+
     def move_arm_ik(self, payload: Dict[str, Any], live: bool = False) -> bool:
         ok, message = self.validate_arm_command_motors(payload)
         if not ok:
             raise ValueError(message)
         self.apply_arm_payload(payload)
         config_signature = self.arm_position_config_signature()
-        solution = solve_arm_ik(
-            self.arm_joint_count,
-            self.arm_target["x"],
-            self.arm_target["y"],
-            self.arm_target["z"],
-            self.arm_link_1,
-            self.arm_link_2,
-            self.arm_elbow_up,
+        route_waypoints, final_target, _final_joint_angles = self.build_arm_route_for_targets(
+            [dict(self.arm_target)],
+            ARM_ROUTE_MAX_STEP_RAD,
         )
-        raw_joint_angles = {
-            "base": solution.base,
-            "shoulder": solution.shoulder,
-            "elbow": solution.elbow,
-        }
-        joint_angles = route_arm_joint_angles(
-            self.arm_joint_count,
-            raw_joint_angles,
-            self.arm_twist_limits,
-            self.arm_joint_angles,
+        self.arm_target = final_target
+        label = (
+            ("Arm live IK target " if live else "Arm IK target ")
+            + f"x={self.arm_target['x']:+.3f} y={self.arm_target['y']:+.3f} z={self.arm_target['z']:+.3f}"
         )
-        routed_solution = ArmIkSolution(
-            base=joint_angles["base"],
-            shoulder=joint_angles["shoulder"],
-            elbow=joint_angles["elbow"],
-        )
-        points = arm_solution_points(
-            self.arm_joint_count,
-            routed_solution,
-            self.arm_target,
-            self.arm_link_1,
-            self.arm_link_2,
-        )
-        route_angles = plan_arm_joint_route(self.arm_joint_count, self.arm_joint_angles, joint_angles)
-        route_waypoints: List[Dict[str, Dict[str, float]]] = []
-        for waypoint_angles in route_angles:
-            waypoint_solution = ArmIkSolution(
-                base=waypoint_angles["base"],
-                shoulder=waypoint_angles["shoulder"],
-                elbow=waypoint_angles["elbow"],
-            )
-            waypoint_points = arm_solution_points(
-                self.arm_joint_count,
-                waypoint_solution,
-                self.arm_target,
-                self.arm_link_1,
-                self.arm_link_2,
-            )
-            waypoint_safety = arm_safety_check(
-                self.arm_joint_count,
-                waypoint_points,
-                self.arm_link_radii,
-                waypoint_angles,
-                self.arm_twist_limits,
-            )
-            if not waypoint_safety["ok"]:
-                raise ValueError(f"Unsafe IK route: {'; '.join(waypoint_safety['warnings'])}")
-            route_waypoints.append(
-                {
-                    "jointAngles": dict(waypoint_angles),
-                    "motorTargets": self.arm_motor_targets_for_joints(waypoint_angles),
-                }
-            )
+        return self.start_arm_route(route_waypoints, config_signature, label, live=live)
 
-        first_waypoint = route_waypoints[0]
-        remaining_waypoints = route_waypoints[1:]
-        needs_config = (
-            not live
-            or not self.arm_position_configured
-            or self.arm_position_signature != config_signature
+    def move_arm_preset(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        ok, message = self.validate_arm_command_motors(payload)
+        if not ok:
+            return {"ok": False, "message": message}
+        self.apply_arm_payload(payload)
+        preset = str(payload.get("armMotionPreset", "showcase")).strip().lower()
+        label = ARM_MOTION_PRESET_LABELS.get(preset, preset.title())
+        targets = self.arm_motion_preset_targets(preset)
+        route_waypoints, final_target, _final_joint_angles = self.build_arm_route_for_targets(
+            targets,
+            ARM_PRESET_MAX_STEP_RAD,
         )
-        self.oscillating = False
-        self.jog_active = False
-        self.velocity_configured = False
-        self.position_configured = False
-        self.clear_arm_route()
-        self.commanded_speed = 0.0
-        if needs_config:
-            self.arm_position_configured = False
-        should_log = not live or needs_config
-        if should_log:
-            self.log(
-                ("Arm live IK target " if live else "Arm IK target ")
-                + f"x={self.arm_target['x']:+.3f} y={self.arm_target['y']:+.3f} z={self.arm_target['z']:+.3f} "
-                + f"joints base={joint_angles['base']:+.3f} shoulder={joint_angles['shoulder']:+.3f} elbow={joint_angles['elbow']:+.3f} "
-                + f"route_waypoints={len(route_waypoints)}"
-            )
-        if needs_config:
-            for axis in self.active_arm_axes():
-                if not self.configure_private_position_motor(
-                    axis,
-                    self.arm_motor_ids[axis],
-                    first_waypoint["motorTargets"][axis],
-                    self.arm_velocity_limit,
-                    self.arm_acceleration,
-                    self.arm_position_kp,
-                ):
-                    self.stop_arm()
-                    return False
-        self.apply_arm_route_waypoint(first_waypoint)
-        if not needs_config:
-            for axis in self.active_arm_axes():
-                self.write_private_param_f32_to(
-                    self.arm_motor_ids[axis],
-                    PARAM_LOC_REF,
-                    self.arm_motor_targets[axis],
-                )
-        self.arm_route_waypoints = deque(remaining_waypoints)
-        self.arm_route_next_at = (
-            time.monotonic() + self.arm_route_interval(self.arm_joint_angles, remaining_waypoints[0]["jointAngles"])
-            if remaining_waypoints
-            else 0.0
+        self.arm_target = final_target
+        ok = self.start_arm_route(
+            route_waypoints,
+            self.arm_position_config_signature(),
+            f"Arm preset {label} ({self.arm_joint_count}-joint)",
         )
-        self.arm_position_configured = True
-        self.arm_position_signature = config_signature
-        self.last_arm_position_refresh_at = time.monotonic()
-        if should_log:
-            active_targets = " ".join(
-                f"{axis}={self.arm_motor_targets[axis]:+.3f}"
-                for axis in self.active_arm_axes()
-            )
-            queued = len(self.arm_route_waypoints)
-            self.log(f"Arm route started {active_targets}; queued={queued}")
-        return True
+        return {
+            "ok": ok,
+            "message": (
+                f"Arm preset {label} started with {len(targets)} poses "
+                f"and {len(route_waypoints)} route waypoints"
+            ) if ok else f"Arm preset {label} failed to start",
+        }
 
     def send_arm_position_targets(self) -> None:
         now = time.monotonic()
