@@ -114,6 +114,9 @@ ARM_POSITION_ACCEL_MAX_RAD_S2 = 8.0
 ARM_POSITION_KP_MAX = 10.0
 ARM_DAMPING_KD_MAX = 5.0
 ARM_TORQUE_BIAS_MAX_NM = 5.0
+ARM_ASSIST_FADE_BAND_RAD = math.radians(7.0)
+ARM_ASSIST_TARGET_SCALE = 0.20
+ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD = math.radians(3.0)
 ARM_FEEDBACK_START_MAX_AGE_S = 1.0
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
@@ -131,7 +134,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.01.8"
+APP_VERSION = "2026.09.01.10"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1680,7 +1683,7 @@ class DashboardController:
             0.0,
             self.arm_position_kp,
             self.arm_damping_kd,
-            self.arm_torque_biases[axis],
+            self.arm_effective_torque_bias(axis, position),
         )
         return True
 
@@ -1796,6 +1799,36 @@ class DashboardController:
                 direction = self.arm_directions[axis]
                 angles[axis] = (float(position) - self.arm_offsets[axis]) / direction
         return angles
+
+    def arm_effective_torque_bias(self, axis: str, target_position: float) -> float:
+        bias = self.arm_torque_biases.get(axis, 0.0)
+        if abs(bias) <= 0.000001:
+            return 0.0
+
+        motor_id = self.arm_motor_ids[axis] & 0xFF
+        now = time.monotonic()
+        with self.lock:
+            feedback = self.feedback_by_motor.get(motor_id)
+            seen_at = self.feedback_at_by_motor.get(motor_id)
+            if feedback is None or seen_at is None or now - seen_at > ARM_FEEDBACK_START_MAX_AGE_S:
+                return 0.0
+            position = feedback.get("positionRad")
+            if not isinstance(position, (int, float)) or not math.isfinite(float(position)):
+                return 0.0
+
+        assist_direction = 1.0 if bias > 0.0 else -1.0
+        lag_toward_target = (target_position - float(position)) * assist_direction
+        if lag_toward_target >= ARM_ASSIST_FADE_BAND_RAD:
+            scale = 1.0
+        elif lag_toward_target >= 0.0:
+            fade = lag_toward_target / ARM_ASSIST_FADE_BAND_RAD
+            scale = ARM_ASSIST_TARGET_SCALE + ((1.0 - ARM_ASSIST_TARGET_SCALE) * fade)
+        else:
+            overshoot = -lag_toward_target
+            if overshoot >= ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD:
+                return 0.0
+            scale = ARM_ASSIST_TARGET_SCALE * (1.0 - (overshoot / ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD))
+        return bias * scale
 
     def clear_arm_route(self) -> None:
         self.arm_route_waypoints.clear()
@@ -1959,7 +1992,7 @@ class DashboardController:
                     0.0,
                     self.arm_position_kp,
                     self.arm_damping_kd,
-                    self.arm_torque_biases[axis],
+                    self.arm_effective_torque_bias(axis, self.arm_motor_targets[axis]),
                 )
         self.arm_route_waypoints = deque(remaining_waypoints)
         self.arm_route_next_at = (
@@ -2248,7 +2281,7 @@ class DashboardController:
                 0.0,
                 self.arm_position_kp,
                 self.arm_damping_kd,
-                self.arm_torque_biases[axis],
+                self.arm_effective_torque_bias(axis, self.arm_motor_targets[axis]),
             )
         self.last_arm_position_refresh_at = time.monotonic()
 
