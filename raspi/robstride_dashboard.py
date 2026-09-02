@@ -108,10 +108,12 @@ ARM_DEFAULT_POSITION_VEL_RAD_S = 0.35
 ARM_DEFAULT_POSITION_ACCEL_RAD_S2 = 2.5
 ARM_DEFAULT_POSITION_KP = 0.8
 ARM_DEFAULT_DAMPING_KD = 1.2
+ARM_DEFAULT_CURRENT_LIMIT_A = 3.0
 ARM_POSITION_VEL_MAX_RAD_S = 1.5
 ARM_POSITION_ACCEL_MAX_RAD_S2 = 8.0
-ARM_POSITION_KP_MAX = 2.0
+ARM_POSITION_KP_MAX = 10.0
 ARM_DAMPING_KD_MAX = 5.0
+ARM_TORQUE_BIAS_MAX_NM = 5.0
 ARM_FEEDBACK_START_MAX_AGE_S = 1.0
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
@@ -129,7 +131,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.01.7"
+APP_VERSION = "2026.09.01.8"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -175,6 +177,17 @@ def nonnegative_float(value: Any, default: float, maximum: float) -> float:
     if not math.isfinite(parsed) or parsed < 0.0:
         parsed = default
     return min(parsed, maximum)
+
+
+def limited_float(value: Any, default: float, maximum_abs: float) -> float:
+    try:
+        parsed = parse_float(value, default)
+    except (TypeError, ValueError):
+        parsed = default
+    if not math.isfinite(parsed):
+        parsed = default
+    limit = abs(maximum_abs)
+    return min(max(parsed, -limit), limit)
 
 
 def twist_limit_rad(value: Any, default: float = ARM_TWIST_DEFAULT_LIMIT_RAD) -> float:
@@ -587,7 +600,8 @@ class DashboardController:
         self.arm_acceleration = ARM_DEFAULT_POSITION_ACCEL_RAD_S2
         self.arm_position_kp = ARM_DEFAULT_POSITION_KP
         self.arm_damping_kd = ARM_DEFAULT_DAMPING_KD
-        self.arm_current_limit = DEFAULT_CURRENT_LIMIT_A
+        self.arm_current_limit = ARM_DEFAULT_CURRENT_LIMIT_A
+        self.arm_torque_biases = {axis: 0.0 for axis in ARM_AXES}
         self.arm_position_configured = False
         self.arm_position_signature: Optional[Tuple[Any, ...]] = None
         self.arm_motor_targets = {axis: 0.0 for axis in ARM_AXES}
@@ -1221,6 +1235,7 @@ class DashboardController:
                     "positionKp": self.arm_position_kp,
                     "dampingKd": self.arm_damping_kd,
                     "currentLimit": self.arm_current_limit,
+                    "torqueBiases": dict(self.arm_torque_biases),
                     "offsets": dict(self.arm_offsets),
                     "directions": dict(self.arm_directions),
                 },
@@ -1260,6 +1275,9 @@ class DashboardController:
         directions = arm.get("directions")
         if not isinstance(directions, dict):
             directions = {}
+        torque_biases = arm.get("torqueBiases")
+        if not isinstance(torque_biases, dict):
+            torque_biases = {}
         target = arm.get("target")
         if not isinstance(target, dict):
             target = {}
@@ -1334,6 +1352,18 @@ class DashboardController:
             "armCurrentLimit": payload.get(
                 "armCurrentLimit",
                 arm.get("currentLimit", self.arm_current_limit),
+            ),
+            "armBaseTorqueBias": payload.get(
+                "armBaseTorqueBias",
+                torque_biases.get("base", self.arm_torque_biases["base"]),
+            ),
+            "armShoulderTorqueBias": payload.get(
+                "armShoulderTorqueBias",
+                torque_biases.get("shoulder", self.arm_torque_biases["shoulder"]),
+            ),
+            "armElbowTorqueBias": payload.get(
+                "armElbowTorqueBias",
+                torque_biases.get("elbow", self.arm_torque_biases["elbow"]),
             ),
             "armBaseOffset": payload.get(
                 "armBaseOffset",
@@ -1650,6 +1680,7 @@ class DashboardController:
             0.0,
             self.arm_position_kp,
             self.arm_damping_kd,
+            self.arm_torque_biases[axis],
         )
         return True
 
@@ -1722,6 +1753,23 @@ class DashboardController:
             self.arm_current_limit,
             ARM_CURRENT_LIMIT_MAX_A,
         )
+        self.arm_torque_biases = {
+            "base": limited_float(
+                payload.get("armBaseTorqueBias"),
+                self.arm_torque_biases["base"],
+                ARM_TORQUE_BIAS_MAX_NM,
+            ),
+            "shoulder": limited_float(
+                payload.get("armShoulderTorqueBias"),
+                self.arm_torque_biases["shoulder"],
+                ARM_TORQUE_BIAS_MAX_NM,
+            ),
+            "elbow": limited_float(
+                payload.get("armElbowTorqueBias"),
+                self.arm_torque_biases["elbow"],
+                ARM_TORQUE_BIAS_MAX_NM,
+            ),
+        }
 
     def arm_motor_target(self, axis: str, joint_angle: float) -> float:
         return self.arm_offsets[axis] + (self.arm_directions[axis] * joint_angle)
@@ -1889,7 +1937,8 @@ class DashboardController:
             self.log(
                 f"{label} "
                 f"joints base={joint_angles['base']:+.3f} shoulder={joint_angles['shoulder']:+.3f} elbow={joint_angles['elbow']:+.3f} "
-                f"route_waypoints={len(route_waypoints)} kp={self.arm_position_kp:.2f} kd={self.arm_damping_kd:.2f}"
+                f"route_waypoints={len(route_waypoints)} kp={self.arm_position_kp:.2f} kd={self.arm_damping_kd:.2f} "
+                f"assist shoulder={self.arm_torque_biases['shoulder']:+.2f}Nm elbow={self.arm_torque_biases['elbow']:+.2f}Nm"
             )
         if needs_config:
             for axis in self.active_arm_axes():
@@ -1910,6 +1959,7 @@ class DashboardController:
                     0.0,
                     self.arm_position_kp,
                     self.arm_damping_kd,
+                    self.arm_torque_biases[axis],
                 )
         self.arm_route_waypoints = deque(remaining_waypoints)
         self.arm_route_next_at = (
@@ -1975,6 +2025,10 @@ class DashboardController:
             round(self.arm_position_kp, 6),
             round(self.arm_damping_kd, 6),
             round(self.arm_current_limit, 6),
+            tuple(
+                (axis, round(self.arm_torque_biases[axis], 6))
+                for axis in axes
+            ),
         )
 
     def home_arm_zero(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -2194,6 +2248,7 @@ class DashboardController:
                 0.0,
                 self.arm_position_kp,
                 self.arm_damping_kd,
+                self.arm_torque_biases[axis],
             )
         self.last_arm_position_refresh_at = time.monotonic()
 
@@ -2760,6 +2815,7 @@ class DashboardController:
                     "positionKp": self.arm_position_kp,
                     "dampingKd": self.arm_damping_kd,
                     "currentLimit": self.arm_current_limit,
+                    "torqueBiases": dict(self.arm_torque_biases),
                     "configured": self.arm_position_configured,
                     "routeRemaining": len(self.arm_route_waypoints),
                     "jointAngles": dict(self.arm_joint_angles),

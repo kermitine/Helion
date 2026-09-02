@@ -186,12 +186,13 @@ Those motor targets are sent as private-protocol operation-control targets to
 the base, shoulder, and elbow motor IDs.
 
 Loaded arms use RobStride operation-control frames for IK moves so the hold loop
-has explicit damping. The dashboard defaults to a softer IK arm profile
-(`0.35 rad/s`, `2.5 rad/s^2`, `Kp=0.8`, `Kd=1.2`) and caps saved arm values at
-`1.5 rad/s`, `8 rad/s^2`, `Kp=2.0`, and `Kd=5.0` to reduce load-induced
-oscillation. If the arm starts bouncing, press **Stop Arm**, support the load,
-raise `Damping Kd`, then adjust `Position Kp` upward only as needed for hold
-stiffness.
+has explicit damping and feed-forward torque. The dashboard defaults to a softer
+IK arm profile (`0.35 rad/s`, `2.5 rad/s^2`, `Kp=0.8`, `Kd=1.2`, `3 A`) and caps
+saved arm values at `1.5 rad/s`, `8 rad/s^2`, `Kp=10.0`, `Kd=5.0`, and
+`+/-5 Nm` assist torque. If the arm starts bouncing, press **Stop Arm**, support
+the load, raise `Damping Kd`, then adjust `Position Kp` upward only as needed
+for hold stiffness. If the arm slowly falls even when stable, raise current
+limit and add signed shoulder or elbow assist torque.
 
 Interactive command keys for `robstride_usb.py`: `p`, `v`, `f`, `b`, `<`, `>`,
 `g`, `0`, `s`, `+`, `-`, `e`, `r`, `a`, `x`, `d`, `c`, `h`, `t`, `?`, and `q`.

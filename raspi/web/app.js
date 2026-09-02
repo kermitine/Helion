@@ -26,6 +26,7 @@ const DEFAULT_ARM_VELOCITY_LIMIT = 0.35;
 const DEFAULT_ARM_ACCELERATION = 2.5;
 const DEFAULT_ARM_POSITION_KP = 0.8;
 const DEFAULT_ARM_DAMPING_KD = 1.2;
+const DEFAULT_ARM_CURRENT_LIMIT = 3.0;
 const REACH_SOLVE_TOLERANCE = 0.001;
 const AXIS_LABELS = {
   base: "Base",
@@ -76,6 +77,8 @@ const armControlIds = [
   "armKpInput",
   "armKdInput",
   "armCurrentLimitInput",
+  "armShoulderTorqueInput",
+  "armElbowTorqueInput",
   "armBaseOffsetInput",
   "armBaseDirectionInput",
   "armShoulderOffsetInput",
@@ -327,6 +330,9 @@ function commandPayload(command) {
       armPositionKp: numberInput("armKpInput"),
       armDampingKd: numberInput("armKdInput"),
       armCurrentLimit: numberInput("armCurrentLimitInput"),
+      armBaseTorqueBias: 0,
+      armShoulderTorqueBias: numberInput("armShoulderTorqueInput"),
+      armElbowTorqueBias: numberInput("armElbowTorqueInput"),
       armBaseOffset: numberInput("armBaseOffsetInput"),
       armBaseDirection: $("armBaseDirectionInput").value,
       armShoulderOffset: numberInput("armShoulderOffsetInput"),
@@ -452,6 +458,11 @@ function collectValues() {
       positionKp: numberInput("armKpInput"),
       dampingKd: numberInput("armKdInput"),
       currentLimit: numberInput("armCurrentLimitInput"),
+      torqueBiases: {
+        base: 0,
+        shoulder: numberInput("armShoulderTorqueInput"),
+        elbow: numberInput("armElbowTorqueInput"),
+      },
       offsets: {
         base: numberInput("armBaseOffsetInput"),
         shoulder: numberInput("armShoulderOffsetInput"),
@@ -481,6 +492,7 @@ function applyValuePayload(payload) {
   const offsets = objectValue(arm.offsets);
   const directions = objectValue(arm.directions);
   const twistLimits = objectValue(arm.twistLimits);
+  const torqueBiases = objectValue(arm.torqueBiases);
 
   setDirtyValue("serialPortInput", payload.serialPort);
   setDirtyValue("serialBaudInput", payload.serialBaud);
@@ -541,6 +553,12 @@ function applyValuePayload(payload) {
   setDirtyNumber("armKpInput", firstValue(arm.positionKp, payload.armPositionKp), 2);
   setDirtyNumber("armKdInput", firstValue(arm.dampingKd, payload.armDampingKd), 2);
   setDirtyNumber("armCurrentLimitInput", firstValue(arm.currentLimit, payload.armCurrentLimit), 2);
+  setDirtyNumber(
+    "armShoulderTorqueInput",
+    firstValue(torqueBiases.shoulder, payload.armShoulderTorqueBias),
+    2,
+  );
+  setDirtyNumber("armElbowTorqueInput", firstValue(torqueBiases.elbow, payload.armElbowTorqueBias), 2);
   setDirtyNumber("armBaseOffsetInput", firstValue(offsets.base, payload.armBaseOffset), 3);
   setDirtyValue("armBaseDirectionInput", directionText(firstValue(directions.base, payload.armBaseDirection)));
   setDirtyNumber("armShoulderOffsetInput", firstValue(offsets.shoulder, payload.armShoulderOffset), 3);
@@ -2105,6 +2123,7 @@ function render(state) {
   const armOffsets = arm.offsets || {};
   const armDirections = arm.directions || {};
   const armTwistLimits = arm.twistLimits || {};
+  const armTorqueBiases = arm.torqueBiases || {};
   const armTarget = arm.target || {};
   const usedArmMotors = new Set();
   const baseMotor = chooseDetectedMotor(detectedMotors, armIds.base, usedArmMotors);
@@ -2128,7 +2147,9 @@ function render(state) {
   setControlValue("armAccelerationInput", numberOr(arm.acceleration, DEFAULT_ARM_ACCELERATION).toFixed(1));
   setControlValue("armKpInput", numberOr(arm.positionKp, DEFAULT_ARM_POSITION_KP).toFixed(1));
   setControlValue("armKdInput", numberOr(arm.dampingKd, DEFAULT_ARM_DAMPING_KD).toFixed(1));
-  setControlValue("armCurrentLimitInput", numberOr(arm.currentLimit, 1).toFixed(2));
+  setControlValue("armCurrentLimitInput", numberOr(arm.currentLimit, DEFAULT_ARM_CURRENT_LIMIT).toFixed(2));
+  setControlValue("armShoulderTorqueInput", numberOr(armTorqueBiases.shoulder, 0).toFixed(2));
+  setControlValue("armElbowTorqueInput", numberOr(armTorqueBiases.elbow, 0).toFixed(2));
   setControlValue("armBaseOffsetInput", Number(armOffsets.base || 0).toFixed(3));
   setControlValue("armBaseDirectionInput", String(armDirections.base || 1));
   setControlValue("armShoulderOffsetInput", Number(armOffsets.shoulder || 0).toFixed(3));
