@@ -77,7 +77,7 @@ MOTOR_STUDIO_JOG_S = 0.75
 OSCILLATION_PERIOD_S = 2.5
 VELOCITY_REFRESH_S = 0.10
 POSITION_REFRESH_S = 0.10
-ARM_POSITION_REFRESH_S = 0.10
+ARM_HOLD_REFRESH_S = 1.00
 USB_OPEN_SETTLE_S = 0.20
 PRIVATE_SCAN_RECOVERY_ATTEMPTS = 3
 PRIVATE_SCAN_RECOVERY_SETTLE_S = 0.35
@@ -101,6 +101,13 @@ ARM_ROUTE_MIN_INTERVAL_S = 0.12
 ARM_MIN_TARGET_REACH = 0.001
 ARM_BASE_PLANE_MIN_Z = 0.0
 ARM_CURRENT_LIMIT_MAX_A = 10.0
+ARM_DEFAULT_POSITION_VEL_RAD_S = 0.35
+ARM_DEFAULT_POSITION_ACCEL_RAD_S2 = 2.5
+ARM_DEFAULT_POSITION_KP = 1.2
+ARM_POSITION_VEL_MAX_RAD_S = 1.5
+ARM_POSITION_ACCEL_MAX_RAD_S2 = 8.0
+ARM_POSITION_KP_MAX = 2.0
+ARM_FEEDBACK_START_MAX_AGE_S = 1.0
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
     "sweep": "Sweep",
@@ -117,7 +124,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.01.5"
+APP_VERSION = "2026.09.01.6"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -571,9 +578,9 @@ class DashboardController:
         self.arm_twist_limits = {axis: ARM_TWIST_DEFAULT_LIMIT_RAD for axis in ARM_AXES}
         self.arm_target = {"x": 0.25, "y": 0.0, "z": 0.10}
         self.arm_elbow_up = False
-        self.arm_velocity_limit = DEFAULT_POSITION_VEL_RAD_S
-        self.arm_acceleration = DEFAULT_POSITION_ACCEL_RAD_S2
-        self.arm_position_kp = DEFAULT_POSITION_KP
+        self.arm_velocity_limit = ARM_DEFAULT_POSITION_VEL_RAD_S
+        self.arm_acceleration = ARM_DEFAULT_POSITION_ACCEL_RAD_S2
+        self.arm_position_kp = ARM_DEFAULT_POSITION_KP
         self.arm_current_limit = DEFAULT_CURRENT_LIMIT_A
         self.arm_position_configured = False
         self.arm_position_signature: Optional[Tuple[Any, ...]] = None
@@ -1657,9 +1664,21 @@ class DashboardController:
             self.arm_link_2,
         )
         self.arm_elbow_up = bool(payload.get("armElbowUp", self.arm_elbow_up))
-        self.arm_velocity_limit = positive_float(payload.get("armVelocityLimit"), self.arm_velocity_limit, 20.0)
-        self.arm_acceleration = positive_float(payload.get("armAcceleration"), self.arm_acceleration, 200.0)
-        self.arm_position_kp = nonnegative_float(payload.get("armPositionKp"), self.arm_position_kp, 200.0)
+        self.arm_velocity_limit = positive_float(
+            payload.get("armVelocityLimit"),
+            self.arm_velocity_limit,
+            ARM_POSITION_VEL_MAX_RAD_S,
+        )
+        self.arm_acceleration = positive_float(
+            payload.get("armAcceleration"),
+            self.arm_acceleration,
+            ARM_POSITION_ACCEL_MAX_RAD_S2,
+        )
+        self.arm_position_kp = nonnegative_float(
+            payload.get("armPositionKp"),
+            self.arm_position_kp,
+            ARM_POSITION_KP_MAX,
+        )
         self.arm_current_limit = positive_float(
             payload.get("armCurrentLimit"),
             self.arm_current_limit,
@@ -1674,6 +1693,23 @@ class DashboardController:
             axis: self.arm_motor_target(axis, joint_angles[axis])
             for axis in self.active_arm_axes()
         }
+
+    def arm_feedback_joint_angles(self) -> Optional[Dict[str, float]]:
+        now = time.monotonic()
+        with self.lock:
+            angles = {axis: self.arm_joint_angles.get(axis, 0.0) for axis in ARM_AXES}
+            for axis in self.active_arm_axes():
+                motor_id = self.arm_motor_ids[axis] & 0xFF
+                feedback = self.feedback_by_motor.get(motor_id)
+                seen_at = self.feedback_at_by_motor.get(motor_id)
+                if feedback is None or seen_at is None or now - seen_at > ARM_FEEDBACK_START_MAX_AGE_S:
+                    return None
+                position = feedback.get("positionRad")
+                if not isinstance(position, (int, float)) or not math.isfinite(float(position)):
+                    return None
+                direction = self.arm_directions[axis]
+                angles[axis] = (float(position) - self.arm_offsets[axis]) / direction
+        return angles
 
     def clear_arm_route(self) -> None:
         self.arm_route_waypoints.clear()
@@ -1771,7 +1807,7 @@ class DashboardController:
         targets: List[Dict[str, float]],
         max_step_rad: float,
     ) -> Tuple[List[Dict[str, Dict[str, float]]], Dict[str, float], Dict[str, float]]:
-        previous_angles = dict(self.arm_joint_angles)
+        previous_angles = self.arm_feedback_joint_angles() or dict(self.arm_joint_angles)
         final_target = dict(self.arm_target)
         final_joint_angles = dict(previous_angles)
         route_waypoints: List[Dict[str, Dict[str, float]]] = []
@@ -2454,12 +2490,11 @@ class DashboardController:
                     and not self.command_lock.locked()
                 ):
                     self.send_position_target()
-                if (
-                    self.arm_position_configured
-                    and now - self.last_arm_position_refresh_at >= ARM_POSITION_REFRESH_S
-                    and not self.command_lock.locked()
-                ):
-                    self.send_arm_position_targets()
+                if self.arm_position_configured and not self.command_lock.locked():
+                    arm_route_due = bool(self.arm_route_waypoints) and now >= self.arm_route_next_at
+                    arm_refresh_due = now - self.last_arm_position_refresh_at >= ARM_HOLD_REFRESH_S
+                    if arm_route_due or arm_refresh_due:
+                        self.send_arm_position_targets()
             except Exception as exc:
                 self.log(f"motion update failed: {exc}")
             time.sleep(0.03)

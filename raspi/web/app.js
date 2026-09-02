@@ -22,6 +22,9 @@ const DEFAULT_TWIST_LIMIT_DEG = 180;
 const ARM_LIVE_SEND_INTERVAL_MS = 120;
 const ARM_MIN_TARGET_REACH = 0.001;
 const ARM_BASE_PLANE_MIN_Z = 0;
+const DEFAULT_ARM_VELOCITY_LIMIT = 0.35;
+const DEFAULT_ARM_ACCELERATION = 2.5;
+const DEFAULT_ARM_POSITION_KP = 1.2;
 const REACH_SOLVE_TOLERANCE = 0.001;
 const AXIS_LABELS = {
   base: "Base",
@@ -2111,9 +2114,9 @@ function render(state) {
   setControlValue("armTargetXInput", Number(armTarget.x || 0).toFixed(3));
   setControlValue("armTargetYInput", Number(armTarget.y || 0).toFixed(3));
   setControlValue("armTargetZInput", Number(armTarget.z || 0).toFixed(3));
-  setControlValue("armVelocityInput", Number(arm.velocityLimit || 1).toFixed(2));
-  setControlValue("armAccelerationInput", Number(arm.acceleration || 10).toFixed(1));
-  setControlValue("armKpInput", Number(arm.positionKp || 5).toFixed(1));
+  setControlValue("armVelocityInput", Number(arm.velocityLimit || DEFAULT_ARM_VELOCITY_LIMIT).toFixed(2));
+  setControlValue("armAccelerationInput", Number(arm.acceleration || DEFAULT_ARM_ACCELERATION).toFixed(1));
+  setControlValue("armKpInput", Number(arm.positionKp || DEFAULT_ARM_POSITION_KP).toFixed(1));
   setControlValue("armCurrentLimitInput", Number(arm.currentLimit || 1).toFixed(2));
   setControlValue("armBaseOffsetInput", Number(armOffsets.base || 0).toFixed(3));
   setControlValue("armBaseDirectionInput", String(armDirections.base || 1));
