@@ -42,6 +42,7 @@ from robstride_usb import (
     PRIVATE_HOST_CANDIDATES,
     PRIVATE_MODEL_LIMITS,
     PROTOCOL_PRIVATE,
+    RUN_MODE_OPERATION,
     RUN_MODE_POSITION,
     RUN_MODE_VELOCITY,
     SCAN_FIRST_PRIVATE_ID,
@@ -53,6 +54,7 @@ from robstride_usb import (
     create_bus,
     decode_private_fault_payload,
     f32_le,
+    float_to_uint,
     fmt_id,
     private_fault_summary,
     read_f32_le,
@@ -62,6 +64,7 @@ from robstride_usb import (
 
 
 COMM_GET_ID = 0x00
+COMM_OPERATION_CONTROL = 0x01
 COMM_OPERATION_STATUS = 0x02
 COMM_ENABLE = 0x03
 COMM_DISABLE = 0x04
@@ -77,7 +80,7 @@ MOTOR_STUDIO_JOG_S = 0.75
 OSCILLATION_PERIOD_S = 2.5
 VELOCITY_REFRESH_S = 0.10
 POSITION_REFRESH_S = 0.10
-ARM_HOLD_REFRESH_S = 1.00
+ARM_OPERATION_REFRESH_S = 0.03
 USB_OPEN_SETTLE_S = 0.20
 PRIVATE_SCAN_RECOVERY_ATTEMPTS = 3
 PRIVATE_SCAN_RECOVERY_SETTLE_S = 0.35
@@ -103,10 +106,12 @@ ARM_BASE_PLANE_MIN_Z = 0.0
 ARM_CURRENT_LIMIT_MAX_A = 10.0
 ARM_DEFAULT_POSITION_VEL_RAD_S = 0.35
 ARM_DEFAULT_POSITION_ACCEL_RAD_S2 = 2.5
-ARM_DEFAULT_POSITION_KP = 1.2
+ARM_DEFAULT_POSITION_KP = 0.8
+ARM_DEFAULT_DAMPING_KD = 1.2
 ARM_POSITION_VEL_MAX_RAD_S = 1.5
 ARM_POSITION_ACCEL_MAX_RAD_S2 = 8.0
 ARM_POSITION_KP_MAX = 2.0
+ARM_DAMPING_KD_MAX = 5.0
 ARM_FEEDBACK_START_MAX_AGE_S = 1.0
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
@@ -124,7 +129,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.01.6"
+APP_VERSION = "2026.09.01.7"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -581,6 +586,7 @@ class DashboardController:
         self.arm_velocity_limit = ARM_DEFAULT_POSITION_VEL_RAD_S
         self.arm_acceleration = ARM_DEFAULT_POSITION_ACCEL_RAD_S2
         self.arm_position_kp = ARM_DEFAULT_POSITION_KP
+        self.arm_damping_kd = ARM_DEFAULT_DAMPING_KD
         self.arm_current_limit = DEFAULT_CURRENT_LIMIT_A
         self.arm_position_configured = False
         self.arm_position_signature: Optional[Tuple[Any, ...]] = None
@@ -1213,6 +1219,7 @@ class DashboardController:
                     "velocityLimit": self.arm_velocity_limit,
                     "acceleration": self.arm_acceleration,
                     "positionKp": self.arm_position_kp,
+                    "dampingKd": self.arm_damping_kd,
                     "currentLimit": self.arm_current_limit,
                     "offsets": dict(self.arm_offsets),
                     "directions": dict(self.arm_directions),
@@ -1319,6 +1326,10 @@ class DashboardController:
             "armPositionKp": payload.get(
                 "armPositionKp",
                 arm.get("positionKp", self.arm_position_kp),
+            ),
+            "armDampingKd": payload.get(
+                "armDampingKd",
+                arm.get("dampingKd", self.arm_damping_kd),
             ),
             "armCurrentLimit": payload.get(
                 "armCurrentLimit",
@@ -1593,31 +1604,53 @@ class DashboardController:
         )
         return True
 
-    def configure_private_position_motor(
+    def send_private_operation_control_to(
+        self,
+        target_id: int,
+        position: float,
+        velocity: float,
+        kp: float,
+        kd: float,
+        torque_ff: float = 0.0,
+    ) -> None:
+        model = self.model_for_motor(target_id)
+        p_max, v_max, t_max = PRIVATE_MODEL_LIMITS.get(
+            model,
+            PRIVATE_MODEL_LIMITS[DEFAULT_MODEL],
+        )
+        payload = bytearray(8)
+        payload[0:2] = float_to_uint(position, -p_max, p_max, 16).to_bytes(2, "big")
+        payload[2:4] = float_to_uint(velocity, -v_max, v_max, 16).to_bytes(2, "big")
+        payload[4:6] = float_to_uint(kp, 0.0, 500.0, 16).to_bytes(2, "big")
+        payload[6:8] = float_to_uint(kd, 0.0, 5.0, 16).to_bytes(2, "big")
+        torque = float_to_uint(torque_ff, -t_max, t_max, 16)
+        self.send_private(COMM_OPERATION_CONTROL, torque, target_id & 0xFF, bytes(payload))
+
+    def configure_private_operation_motor(
         self,
         axis: str,
         motor_id: int,
         position: float,
-        velocity_limit: float,
-        acceleration: float,
-        position_kp: float,
         current_limit: float,
     ) -> bool:
         motor_id &= 0xFF
         self.prepare_private_mode_switch_for(
             motor_id,
-            f"{axis} {fmt_id(motor_id)} disabled/clear-error before position configure",
+            f"{axis} {fmt_id(motor_id)} disabled/clear-error before damped arm configure",
         )
-        if not self.write_private_run_mode_verified_for(motor_id, RUN_MODE_POSITION):
-            self.log(f"{axis} {fmt_id(motor_id)} position setup failed: run_mode did not verify")
+        if not self.write_private_run_mode_verified_for(motor_id, RUN_MODE_OPERATION):
+            self.log(f"{axis} {fmt_id(motor_id)} damped arm setup failed: run_mode did not verify")
             return False
         self.send_private_enable_to(motor_id)
         self.wait_private_status_for(motor_id, 0.30)
         self.write_private_param_f32_to(motor_id, PARAM_LIMIT_CUR, current_limit)
-        self.write_private_param_f32_to(motor_id, PARAM_PP_VEL_MAX, velocity_limit)
-        self.write_private_param_f32_to(motor_id, PARAM_PP_ACC_SET, acceleration)
-        self.write_private_param_f32_to(motor_id, PARAM_LOC_KP, position_kp)
-        self.write_private_param_f32_to(motor_id, PARAM_LOC_REF, position)
+        self.send_private_operation_control_to(
+            motor_id,
+            position,
+            0.0,
+            self.arm_position_kp,
+            self.arm_damping_kd,
+        )
         return True
 
     def apply_arm_payload(self, payload: Dict[str, Any]) -> None:
@@ -1678,6 +1711,11 @@ class DashboardController:
             payload.get("armPositionKp"),
             self.arm_position_kp,
             ARM_POSITION_KP_MAX,
+        )
+        self.arm_damping_kd = nonnegative_float(
+            payload.get("armDampingKd"),
+            self.arm_damping_kd,
+            ARM_DAMPING_KD_MAX,
         )
         self.arm_current_limit = positive_float(
             payload.get("armCurrentLimit"),
@@ -1851,17 +1889,14 @@ class DashboardController:
             self.log(
                 f"{label} "
                 f"joints base={joint_angles['base']:+.3f} shoulder={joint_angles['shoulder']:+.3f} elbow={joint_angles['elbow']:+.3f} "
-                f"route_waypoints={len(route_waypoints)}"
+                f"route_waypoints={len(route_waypoints)} kp={self.arm_position_kp:.2f} kd={self.arm_damping_kd:.2f}"
             )
         if needs_config:
             for axis in self.active_arm_axes():
-                if not self.configure_private_position_motor(
+                if not self.configure_private_operation_motor(
                     axis,
                     self.arm_motor_ids[axis],
                     first_waypoint["motorTargets"][axis],
-                    self.arm_velocity_limit,
-                    self.arm_acceleration,
-                    self.arm_position_kp,
                     self.arm_current_limit,
                 ):
                     self.stop_arm()
@@ -1869,10 +1904,12 @@ class DashboardController:
         self.apply_arm_route_waypoint(first_waypoint)
         if not needs_config:
             for axis in self.active_arm_axes():
-                self.write_private_param_f32_to(
+                self.send_private_operation_control_to(
                     self.arm_motor_ids[axis],
-                    PARAM_LOC_REF,
                     self.arm_motor_targets[axis],
+                    0.0,
+                    self.arm_position_kp,
+                    self.arm_damping_kd,
                 )
         self.arm_route_waypoints = deque(remaining_waypoints)
         self.arm_route_next_at = (
@@ -1936,6 +1973,7 @@ class DashboardController:
             round(self.arm_velocity_limit, 6),
             round(self.arm_acceleration, 6),
             round(self.arm_position_kp, 6),
+            round(self.arm_damping_kd, 6),
             round(self.arm_current_limit, 6),
         )
 
@@ -2150,10 +2188,12 @@ class DashboardController:
                 self.arm_route_next_at = 0.0
                 self.log("Arm route complete")
         for axis in self.active_arm_axes():
-            self.write_private_param_f32_to(
+            self.send_private_operation_control_to(
                 self.arm_motor_ids[axis],
-                PARAM_LOC_REF,
                 self.arm_motor_targets[axis],
+                0.0,
+                self.arm_position_kp,
+                self.arm_damping_kd,
             )
         self.last_arm_position_refresh_at = time.monotonic()
 
@@ -2492,7 +2532,7 @@ class DashboardController:
                     self.send_position_target()
                 if self.arm_position_configured and not self.command_lock.locked():
                     arm_route_due = bool(self.arm_route_waypoints) and now >= self.arm_route_next_at
-                    arm_refresh_due = now - self.last_arm_position_refresh_at >= ARM_HOLD_REFRESH_S
+                    arm_refresh_due = now - self.last_arm_position_refresh_at >= ARM_OPERATION_REFRESH_S
                     if arm_route_due or arm_refresh_due:
                         self.send_arm_position_targets()
             except Exception as exc:
@@ -2718,6 +2758,7 @@ class DashboardController:
                     "velocityLimit": self.arm_velocity_limit,
                     "acceleration": self.arm_acceleration,
                     "positionKp": self.arm_position_kp,
+                    "dampingKd": self.arm_damping_kd,
                     "currentLimit": self.arm_current_limit,
                     "configured": self.arm_position_configured,
                     "routeRemaining": len(self.arm_route_waypoints),

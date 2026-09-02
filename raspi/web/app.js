@@ -24,7 +24,8 @@ const ARM_MIN_TARGET_REACH = 0.001;
 const ARM_BASE_PLANE_MIN_Z = 0;
 const DEFAULT_ARM_VELOCITY_LIMIT = 0.35;
 const DEFAULT_ARM_ACCELERATION = 2.5;
-const DEFAULT_ARM_POSITION_KP = 1.2;
+const DEFAULT_ARM_POSITION_KP = 0.8;
+const DEFAULT_ARM_DAMPING_KD = 1.2;
 const REACH_SOLVE_TOLERANCE = 0.001;
 const AXIS_LABELS = {
   base: "Base",
@@ -73,6 +74,7 @@ const armControlIds = [
   "armVelocityInput",
   "armAccelerationInput",
   "armKpInput",
+  "armKdInput",
   "armCurrentLimitInput",
   "armBaseOffsetInput",
   "armBaseDirectionInput",
@@ -113,6 +115,11 @@ const idSetupRoleDefaults = {
 function fixed(value, digits, suffix) {
   if (typeof value !== "number" || Number.isNaN(value)) return "--";
   return `${value.toFixed(digits)} ${suffix}`;
+}
+
+function numberOr(value, fallback) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
 }
 
 function degToRad(value) {
@@ -318,6 +325,7 @@ function commandPayload(command) {
       armVelocityLimit: numberInput("armVelocityInput"),
       armAcceleration: numberInput("armAccelerationInput"),
       armPositionKp: numberInput("armKpInput"),
+      armDampingKd: numberInput("armKdInput"),
       armCurrentLimit: numberInput("armCurrentLimitInput"),
       armBaseOffset: numberInput("armBaseOffsetInput"),
       armBaseDirection: $("armBaseDirectionInput").value,
@@ -442,6 +450,7 @@ function collectValues() {
       velocityLimit: numberInput("armVelocityInput"),
       acceleration: numberInput("armAccelerationInput"),
       positionKp: numberInput("armKpInput"),
+      dampingKd: numberInput("armKdInput"),
       currentLimit: numberInput("armCurrentLimitInput"),
       offsets: {
         base: numberInput("armBaseOffsetInput"),
@@ -530,6 +539,7 @@ function applyValuePayload(payload) {
   setDirtyNumber("armVelocityInput", firstValue(arm.velocityLimit, payload.armVelocityLimit), 3);
   setDirtyNumber("armAccelerationInput", firstValue(arm.acceleration, payload.armAcceleration), 2);
   setDirtyNumber("armKpInput", firstValue(arm.positionKp, payload.armPositionKp), 2);
+  setDirtyNumber("armKdInput", firstValue(arm.dampingKd, payload.armDampingKd), 2);
   setDirtyNumber("armCurrentLimitInput", firstValue(arm.currentLimit, payload.armCurrentLimit), 2);
   setDirtyNumber("armBaseOffsetInput", firstValue(offsets.base, payload.armBaseOffset), 3);
   setDirtyValue("armBaseDirectionInput", directionText(firstValue(directions.base, payload.armBaseDirection)));
@@ -2114,10 +2124,11 @@ function render(state) {
   setControlValue("armTargetXInput", Number(armTarget.x || 0).toFixed(3));
   setControlValue("armTargetYInput", Number(armTarget.y || 0).toFixed(3));
   setControlValue("armTargetZInput", Number(armTarget.z || 0).toFixed(3));
-  setControlValue("armVelocityInput", Number(arm.velocityLimit || DEFAULT_ARM_VELOCITY_LIMIT).toFixed(2));
-  setControlValue("armAccelerationInput", Number(arm.acceleration || DEFAULT_ARM_ACCELERATION).toFixed(1));
-  setControlValue("armKpInput", Number(arm.positionKp || DEFAULT_ARM_POSITION_KP).toFixed(1));
-  setControlValue("armCurrentLimitInput", Number(arm.currentLimit || 1).toFixed(2));
+  setControlValue("armVelocityInput", numberOr(arm.velocityLimit, DEFAULT_ARM_VELOCITY_LIMIT).toFixed(2));
+  setControlValue("armAccelerationInput", numberOr(arm.acceleration, DEFAULT_ARM_ACCELERATION).toFixed(1));
+  setControlValue("armKpInput", numberOr(arm.positionKp, DEFAULT_ARM_POSITION_KP).toFixed(1));
+  setControlValue("armKdInput", numberOr(arm.dampingKd, DEFAULT_ARM_DAMPING_KD).toFixed(1));
+  setControlValue("armCurrentLimitInput", numberOr(arm.currentLimit, 1).toFixed(2));
   setControlValue("armBaseOffsetInput", Number(armOffsets.base || 0).toFixed(3));
   setControlValue("armBaseDirectionInput", String(armDirections.base || 1));
   setControlValue("armShoulderOffsetInput", Number(armOffsets.shoulder || 0).toFixed(3));

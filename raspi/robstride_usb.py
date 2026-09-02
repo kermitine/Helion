@@ -36,6 +36,7 @@ SCAN_LAST_ID = 0x7F
 SCAN_PER_ID_TIMEOUT_S = 0.040
 
 COMM_GET_ID = 0x00
+COMM_OPERATION_CONTROL = 0x01
 COMM_OPERATION_STATUS = 0x02
 COMM_ENABLE = 0x03
 COMM_DISABLE = 0x04
@@ -52,10 +53,15 @@ PARAM_MECH_POS = 0x7019
 PARAM_MECH_VEL = 0x701B
 PARAM_VBUS = 0x701C
 PARAM_LOC_KP = 0x701E
+PARAM_SPD_KP = 0x701F
+PARAM_SPD_KI = 0x7020
+PARAM_SPD_FILT_GAIN = 0x7021
 PARAM_ACC_RAD = 0x7022
 PARAM_PP_VEL_MAX = 0x7024
 PARAM_PP_ACC_SET = 0x7025
+PARAM_DAMPER = 0x702A
 
+RUN_MODE_OPERATION = 0
 RUN_MODE_POSITION = 1
 RUN_MODE_VELOCITY = 2
 
@@ -169,6 +175,14 @@ def read_f32_le(data: bytes) -> float:
 
 def uint_to_float(value: int, min_value: float, max_value: float, bits: int) -> float:
     return float(value) * (max_value - min_value) / float((1 << bits) - 1) + min_value
+
+
+def float_to_uint(value: float, min_value: float, max_value: float, bits: int) -> int:
+    if max_value <= min_value:
+        return 0
+    clamped = max(min(float(value), max_value), min_value)
+    scaled = (clamped - min_value) * float((1 << bits) - 1) / (max_value - min_value)
+    return max(0, min((1 << bits) - 1, int(round(scaled))))
 
 
 def build_private_ext_id(comm_type: int, extra_data: int, node_id: int) -> int:
