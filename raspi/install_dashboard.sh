@@ -64,16 +64,28 @@ EOF
 sudo tee /usr/local/sbin/helion-poweroff >/dev/null <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-exec systemctl poweroff
+if [[ -x /usr/bin/systemctl ]]; then
+  exec /usr/bin/systemctl poweroff
+fi
+if [[ -x /bin/systemctl ]]; then
+  exec /bin/systemctl poweroff
+fi
+if [[ -x /usr/sbin/shutdown ]]; then
+  exec /usr/sbin/shutdown -h now
+fi
+exec /sbin/shutdown -h now
 EOF
 sudo chmod +x /usr/local/sbin/helion-restart-dashboard /usr/local/sbin/helion-poweroff
 
 if [[ "$SERVICE_USER" != "root" ]]; then
   sudo tee /etc/sudoers.d/helion-dashboard >/dev/null <<EOF
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/local/sbin/helion-restart-dashboard, /usr/local/sbin/helion-poweroff
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/local/sbin/helion-restart-dashboard, /usr/local/sbin/helion-poweroff, /usr/bin/systemctl poweroff, /bin/systemctl poweroff, /usr/sbin/shutdown -h now, /sbin/shutdown -h now
 EOF
   sudo chmod 440 /etc/sudoers.d/helion-dashboard
   sudo visudo -cf /etc/sudoers.d/helion-dashboard >/dev/null
+  if ! sudo -u "$SERVICE_USER" sudo -n -l /usr/local/sbin/helion-poweroff >/dev/null; then
+    echo "Warning: $SERVICE_USER could not validate passwordless /usr/local/sbin/helion-poweroff." >&2
+  fi
 fi
 
 sudo systemctl disable --now robstride-can.service 2>/dev/null || true
@@ -101,7 +113,8 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now robstride-dashboard.service
+sudo systemctl enable robstride-dashboard.service
+sudo systemctl restart robstride-dashboard.service
 
 PI_IP="$(hostname -I | awk '{print $1}')"
 if [[ "$DASHBOARD_PORT" == "80" ]]; then

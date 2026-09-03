@@ -108,9 +108,9 @@ ARM_BASE_PLANE_MIN_Z = 0.0
 ARM_CURRENT_LIMIT_MAX_A = 10.0
 ARM_DEFAULT_POSITION_VEL_RAD_S = 0.35
 ARM_DEFAULT_POSITION_ACCEL_RAD_S2 = 2.5
-ARM_DEFAULT_POSITION_KP = 0.8
-ARM_DEFAULT_DAMPING_KD = 1.2
-ARM_DEFAULT_CURRENT_LIMIT_A = 3.0
+ARM_DEFAULT_POSITION_KP = 4.0
+ARM_DEFAULT_DAMPING_KD = 2.0
+ARM_DEFAULT_CURRENT_LIMIT_A = 4.0
 ARM_POSITION_VEL_MAX_RAD_S = 1.5
 ARM_POSITION_ACCEL_MAX_RAD_S2 = 8.0
 ARM_POSITION_KP_MAX = 10.0
@@ -131,6 +131,15 @@ ARM_MOTION_PRESET_LABELS = {
 }
 SHUTDOWN_COMMANDS = (
     ("/usr/bin/sudo", "-n", "/usr/local/sbin/helion-poweroff"),
+    ("/bin/sudo", "-n", "/usr/local/sbin/helion-poweroff"),
+    ("/usr/bin/sudo", "-n", "/usr/bin/systemctl", "poweroff"),
+    ("/bin/sudo", "-n", "/usr/bin/systemctl", "poweroff"),
+    ("/usr/bin/sudo", "-n", "/bin/systemctl", "poweroff"),
+    ("/bin/sudo", "-n", "/bin/systemctl", "poweroff"),
+    ("/usr/bin/sudo", "-n", "/usr/sbin/shutdown", "-h", "now"),
+    ("/bin/sudo", "-n", "/usr/sbin/shutdown", "-h", "now"),
+    ("/usr/bin/sudo", "-n", "/sbin/shutdown", "-h", "now"),
+    ("/bin/sudo", "-n", "/sbin/shutdown", "-h", "now"),
     ("/usr/local/sbin/helion-poweroff",),
     ("/usr/bin/systemctl", "poweroff"),
     ("/bin/systemctl", "poweroff"),
@@ -146,7 +155,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.2"
+APP_VERSION = "2026.09.03.4"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -777,6 +786,17 @@ class DashboardController:
             self.log(f"sync before shutdown skipped: {exc}")
 
         last_error = ""
+        attempt_errors: List[str] = []
+        identity = []
+        if hasattr(os, "getuid"):
+            identity.append(f"uid={os.getuid()}")
+        if hasattr(os, "geteuid"):
+            identity.append(f"euid={os.geteuid()}")
+        user = os.environ.get("USER") or os.environ.get("LOGNAME")
+        if user:
+            identity.append(f"user={user}")
+        if identity:
+            self.log(f"Safe shutdown process identity: {' '.join(identity)}")
         for command in SHUTDOWN_COMMANDS:
             try:
                 completed = subprocess.run(
@@ -788,12 +808,19 @@ class DashboardController:
                 )
             except FileNotFoundError:
                 last_error = f"{command[0]} not found"
+                attempt_errors.append(f"{' '.join(command)}: {last_error}")
+                self.log(f"Shutdown attempt failed: {attempt_errors[-1]}")
                 continue
             except subprocess.CalledProcessError as exc:
-                last_error = (exc.stderr or exc.stdout or str(exc)).strip()
+                detail = (exc.stderr or exc.stdout or "").strip()
+                last_error = detail or f"exit {exc.returncode}"
+                attempt_errors.append(f"{' '.join(command)}: {last_error}")
+                self.log(f"Shutdown attempt failed: {attempt_errors[-1]}")
                 continue
             except subprocess.SubprocessError as exc:
                 last_error = str(exc)
+                attempt_errors.append(f"{' '.join(command)}: {last_error}")
+                self.log(f"Shutdown attempt failed: {attempt_errors[-1]}")
                 continue
 
             message = "Safe shutdown requested; wait for the Pi activity LED to stop before cutting power."
@@ -808,8 +835,15 @@ class DashboardController:
         )
         if last_error:
             message += f" Last error: {last_error}"
+        if attempt_errors:
+            message += f" Attempts: {' | '.join(attempt_errors)}"
         self.log(message)
-        return {"ok": False, "message": message, "cleanupErrors": cleanup_errors}
+        return {
+            "ok": False,
+            "message": message,
+            "cleanupErrors": cleanup_errors,
+            "attemptErrors": attempt_errors,
+        }
 
     def send(self, arbitration_id: int, data: bytes, extended: bool) -> None:
         error: Optional[Exception] = None
@@ -1770,15 +1804,6 @@ class DashboardController:
             self.log(f"{axis} {fmt_id(motor_id)} damped arm setup failed: run_mode did not verify")
             return False
         torque_ff = self.arm_effective_torque_bias(axis, position)
-        self.write_private_param_f32_to(motor_id, PARAM_LIMIT_CUR, current_limit)
-        self.send_private_operation_control_to(
-            motor_id,
-            position,
-            0.0,
-            self.arm_position_kp,
-            self.arm_damping_kd,
-            torque_ff,
-        )
         self.send_private_enable_to(motor_id)
         self.send_private_operation_control_to(
             motor_id,
@@ -1789,6 +1814,7 @@ class DashboardController:
             torque_ff,
         )
         self.wait_private_status_for(motor_id, 0.30)
+        self.write_private_param_f32_to(motor_id, PARAM_LIMIT_CUR, current_limit)
         self.send_private_operation_control_to(
             motor_id,
             position,
@@ -1796,6 +1822,11 @@ class DashboardController:
             self.arm_position_kp,
             self.arm_damping_kd,
             torque_ff,
+        )
+        self.log(
+            f"{axis} {fmt_id(motor_id)} operation hold pos={position:+.3f} "
+            f"kp={self.arm_position_kp:.2f} kd={self.arm_damping_kd:.2f} "
+            f"assist={torque_ff:+.2f}Nm current={current_limit:.2f}A"
         )
         return True
 
@@ -2088,6 +2119,11 @@ class DashboardController:
                 f"route_waypoints={len(route_waypoints)} kp={self.arm_position_kp:.2f} kd={self.arm_damping_kd:.2f} "
                 f"assist shoulder={self.arm_torque_biases['shoulder']:+.2f}Nm elbow={self.arm_torque_biases['elbow']:+.2f}Nm"
             )
+            if 0.0 < self.arm_position_kp < 2.0:
+                self.log(
+                    "Arm operation Kp is very soft for a loaded arm; "
+                    "try Position Kp around 4.0 with Damping Kd around 2.0."
+                )
         if needs_config:
             for axis in self.active_arm_axes():
                 if not self.configure_private_operation_motor(

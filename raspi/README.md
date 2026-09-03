@@ -98,8 +98,10 @@ Use **Shutdown Pi** in the dashboard before removing Raspberry Pi power. The
 button stops the arm motors, saves dashboard values, flushes the filesystem, and
 then requests Linux poweroff. Wait for the Pi activity LED to stop blinking
 before cutting power. The installer grants the dashboard user passwordless sudo
-only for `/usr/local/sbin/helion-poweroff`; rerun `raspi/install_dashboard.sh`
-after updating if the button reports a permission error.
+for `/usr/local/sbin/helion-poweroff` and restarts the dashboard service so the
+new sudo rule is used. If the button reports interactive authentication, update
+again and rerun `bash raspi/install_dashboard.sh`; the dashboard log will list
+the Linux user and every shutdown command it tried.
 
 Use SSH for the initial install, service-level changes such as port, Linux
 permissions or systemd edits, and code updates.
@@ -210,7 +212,7 @@ Beginner loaded-arm tuning:
 Velocity Limit: 0.20 rad/s
 Acceleration: 0.50 rad/s^2
 Current Limit: 4.00 A
-Position Kp: 0.8
+Position Kp: 4.0
 Damping Kd: 2.0
 Shoulder Assist Nm: 0.3, then add 0.2 Nm at a time
 Elbow Assist Nm: 0.0, then add only if the forearm sags
