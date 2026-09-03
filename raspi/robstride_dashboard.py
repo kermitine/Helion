@@ -164,7 +164,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.7"
+APP_VERSION = "2026.09.03.8"
 
 
 def parse_int(value: Any, default: int) -> int:

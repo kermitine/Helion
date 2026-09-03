@@ -177,6 +177,10 @@ press **Home Zero**. The dashboard disables the arm motors, reads each motor's
 current private-protocol position, stores those positions as the IK offsets, and
 saves them for the next dashboard start.
 
+The quick **Home** target preset is separate from **Home Zero**: **Home** points
+the arm vertically up at `x=0`, `y=0`, `z=link1+link2`, while **Home Zero** keeps
+the flat-forward zero pose.
+
 The **Files** step can save the current dashboard values on the Pi, download
 them as JSON, or upload a JSON values file. Saved values are loaded on dashboard
 startup from:

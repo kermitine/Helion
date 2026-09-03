@@ -1975,7 +1975,7 @@ function applyTargetPreset(name) {
   } else if (name === "high") {
     next = target(0.50, 0, 0.48);
   } else {
-    next = target(0.58, 0, 0.24);
+    next = { x: 0, y: 0, z: reach };
   }
   setArmTarget(next.x, next.y, next.z);
 }
