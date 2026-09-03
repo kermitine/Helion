@@ -128,8 +128,9 @@ ARM_DAMPING_KD_MAX = 5.0
 ARM_TORQUE_BIAS_MAX_NM = 5.0
 ARM_ASSIST_FADE_BAND_RAD = math.radians(7.0)
 ARM_ASSIST_TARGET_SCALE = 0.65
+ARM_ASSIST_OVERSHOOT_SETTLE_BAND_RAD = math.radians(0.75)
 ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD = math.radians(3.0)
-ARM_ASSIST_OVERSHOOT_SCALE = 0.35
+ARM_ASSIST_OVERSHOOT_SCALE = -0.20
 ARM_ASSIST_FEEDBACK_MISSING_SCALE = 0.65
 ARM_ASSIST_MOVING_WITH_LOAD_SCALE = 0.90
 ARM_ADAPTIVE_ASSIST_AXES = ("shoulder", "elbow")
@@ -177,7 +178,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.13"
+APP_VERSION = "2026.09.03.14"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -2256,14 +2257,22 @@ class DashboardController:
             scale = target_scale + ((1.0 - target_scale) * fade)
         else:
             overshoot = -lag_toward_target
-            if overshoot >= ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD:
+            if overshoot <= ARM_ASSIST_OVERSHOOT_SETTLE_BAND_RAD:
+                fade = overshoot / ARM_ASSIST_OVERSHOOT_SETTLE_BAND_RAD
+                scale = target_scale * (1.0 - fade)
+            elif overshoot >= ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD:
                 scale = overshoot_scale
             else:
-                fade = overshoot / ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD
-                scale = target_scale - ((target_scale - overshoot_scale) * fade)
-        if boost_moving_with_load and moving_with_load:
+                band = ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD - ARM_ASSIST_OVERSHOOT_SETTLE_BAND_RAD
+                fade = (overshoot - ARM_ASSIST_OVERSHOOT_SETTLE_BAND_RAD) / max(band, 0.000001)
+                scale = overshoot_scale * fade
+        if (
+            boost_moving_with_load
+            and moving_with_load
+            and lag_toward_target >= -ARM_ASSIST_OVERSHOOT_SETTLE_BAND_RAD
+        ):
             scale = max(scale, ARM_ASSIST_MOVING_WITH_LOAD_SCALE)
-        return bias * max(0.0, scale)
+        return bias * max(-1.0, min(1.0, scale))
 
     def arm_effective_torque_bias(
         self,
