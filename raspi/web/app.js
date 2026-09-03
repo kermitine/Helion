@@ -1954,16 +1954,30 @@ function renderTargetEditorInputs(preview, options = {}) {
 function applyTargetPreset(name) {
   const arm = armInputState();
   const reach = Math.max(arm.link1 + arm.link2, 0.002);
-  const safe = reach * 0.68;
+  const elbowDownThreeJoint = arm.jointCount === 3 && !arm.elbowUp;
+  const minRadialScale = elbowDownThreeJoint ? 0.66 : 0.42;
+  const minZScale = elbowDownThreeJoint ? 0.50 : 0.16;
+  const maxZScale = elbowDownThreeJoint ? 0.60 : 0.52;
+  const target = (radialScale, yawDeg, zScale) => {
+    const radial = reach * Math.max(minRadialScale, Math.min(0.72, radialScale));
+    const yaw = degToRad(yawDeg);
+    return {
+      x: radial * Math.cos(yaw),
+      y: radial * Math.sin(yaw),
+      z: reach * Math.max(minZScale, Math.min(maxZScale, zScale)),
+    };
+  };
+  let next;
   if (name === "forward") {
-    setArmTarget(safe * 0.95, 0, reach * 0.16);
+    next = target(0.66, 0, 0.18);
   } else if (name === "left") {
-    setArmTarget(safe * 0.68, safe * 0.46, reach * 0.18);
+    next = target(0.58, 28, 0.24);
   } else if (name === "high") {
-    setArmTarget(safe * 0.48, 0, reach * 0.56);
+    next = target(0.50, 0, 0.48);
   } else {
-    setArmTarget(safe * 0.82, 0, reach * 0.22);
+    next = target(0.58, 0, 0.24);
   }
+  setArmTarget(next.x, next.y, next.z);
 }
 
 function nudgeTarget(axis, direction) {

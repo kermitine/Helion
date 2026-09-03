@@ -195,16 +195,18 @@ Those motor targets are sent as private-protocol operation-control targets to
 the base, shoulder, and elbow motor IDs.
 
 Loaded arms use RobStride operation-control frames for IK moves so the hold loop
-has explicit damping and feed-forward torque. The dashboard defaults to a softer
-IK arm profile (`0.35 rad/s`, `2.5 rad/s^2`, `Kp=0.8`, `Kd=1.2`, `3 A`) and caps
-saved arm values at `1.5 rad/s`, `8 rad/s^2`, `Kp=10.0`, `Kd=5.0`, and
-`+/-5 Nm` assist torque. Assist torque fades over the last 7 degrees before the
-target, stays at 20 percent at the target, then quickly fades to zero over the
-first 3 degrees of overshoot in the assist direction. If the arm starts
-bouncing, press **Stop Arm**, support the load, raise `Damping Kd`, then adjust
-`Position Kp` upward only as needed for hold stiffness. If the arm slowly falls
-even when stable, raise current limit and add signed shoulder or elbow assist
-torque.
+has explicit damping and feed-forward torque. IK targets are streamed as
+small smootherstep waypoints with velocity feed-forward; `Velocity Limit` and
+`Acceleration` control the planned route duration. The dashboard defaults to
+`0.35 rad/s`, `2.5 rad/s^2`, `Kp=4.0`, `Kd=2.0`, and `4 A`, and caps saved arm
+values at `1.5 rad/s`, `8 rad/s^2`, `Kp=10.0`, `Kd=5.0`, and `+/-5 Nm` assist
+torque. Motion presets use those same controls and adaptive loaded-arm target
+envelopes, so lower `Velocity Limit`/`Acceleration` values make presets slower
+and smoother too. Assist torque keeps a partial floor near and past the target
+so gravity compensation does not suddenly disappear. If the arm starts bouncing,
+press **Stop Arm**, support the load, raise `Damping Kd`, then adjust
+`Position Kp` only as needed for hold stiffness. If the arm slowly falls even
+when stable, raise current limit and add signed shoulder or elbow assist torque.
 
 Beginner loaded-arm tuning:
 

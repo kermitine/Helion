@@ -99,10 +99,17 @@ ARM_ROLE_DEFAULT_IDS = {"base": 0x01, "shoulder": 0x02, "elbow": 0x03}
 ARM_TWIST_DEFAULT_LIMIT_RAD = math.pi
 ARM_TWIST_MIN_LIMIT_RAD = math.radians(1.0)
 ARM_TWIST_MAX_LIMIT_RAD = math.pi
-ARM_ROUTE_MAX_STEP_RAD = math.radians(45.0)
-ARM_PRESET_MAX_STEP_RAD = math.radians(12.0)
-ARM_ROUTE_SETTLE_S = 0.08
-ARM_ROUTE_MIN_INTERVAL_S = 0.12
+ARM_ROUTE_MAX_STEP_RAD = math.radians(6.0)
+ARM_PRESET_MAX_STEP_RAD = math.radians(6.0)
+ARM_ROUTE_SAMPLE_S = ARM_OPERATION_REFRESH_S
+ARM_ROUTE_MIN_DURATION_S = 0.18
+ARM_PRESET_MIN_RADIAL_SCALE = 0.42
+ARM_PRESET_MAX_RADIAL_SCALE = 0.72
+ARM_PRESET_MIN_Z_SCALE = 0.16
+ARM_PRESET_MAX_Z_SCALE = 0.52
+ARM_PRESET_ELBOW_DOWN_MIN_RADIAL_SCALE = 0.66
+ARM_PRESET_ELBOW_DOWN_MIN_Z_SCALE = 0.50
+ARM_PRESET_ELBOW_DOWN_MAX_Z_SCALE = 0.60
 ARM_MIN_TARGET_REACH = 0.001
 ARM_BASE_PLANE_MIN_Z = 0.0
 ARM_CURRENT_LIMIT_MAX_A = 10.0
@@ -155,7 +162,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.4"
+APP_VERSION = "2026.09.03.6"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -395,28 +402,71 @@ def clamp_arm_target_to_reach(
     return {"x": x, "y": y, "z": z}
 
 
+def smootherstep(value: float) -> float:
+    u = max(0.0, min(1.0, float(value)))
+    return (u * u * u) * (u * (u * 6.0 - 15.0) + 10.0)
+
+
+def smootherstep_derivative(value: float) -> float:
+    u = max(0.0, min(1.0, float(value)))
+    return 30.0 * u * u * (1.0 - u) * (1.0 - u)
+
+
 def plan_arm_joint_route(
     joint_count: int,
     start_angles: Dict[str, float],
     target_angles: Dict[str, float],
     max_step_rad: float = ARM_ROUTE_MAX_STEP_RAD,
-) -> List[Dict[str, float]]:
+    velocity_limit_rad_s: float = ARM_DEFAULT_POSITION_VEL_RAD_S,
+    acceleration_limit_rad_s2: float = ARM_DEFAULT_POSITION_ACCEL_RAD_S2,
+    sample_interval_s: float = ARM_ROUTE_SAMPLE_S,
+) -> List[Dict[str, Any]]:
     axes = arm_axes_for_count(joint_count)
     deltas = {
         axis: float(target_angles.get(axis, 0.0)) - float(start_angles.get(axis, 0.0))
         for axis in axes
     }
     largest_delta = max((abs(delta) for delta in deltas.values()), default=0.0)
-    steps = max(1, int(math.ceil(largest_delta / max(max_step_rad, 0.001))))
-    waypoints: List[Dict[str, float]] = []
+    velocity_limit = max(abs(float(velocity_limit_rad_s)), 0.05)
+    acceleration_limit = max(abs(float(acceleration_limit_rad_s2)), 0.10)
+    sample_interval = max(0.01, min(0.10, abs(float(sample_interval_s))))
+
+    duration = ARM_ROUTE_MIN_DURATION_S
+    for delta in deltas.values():
+        distance = abs(delta)
+        if distance <= 0.000001:
+            continue
+        duration = max(
+            duration,
+            1.875 * distance / velocity_limit,
+            math.sqrt(5.8 * distance / acceleration_limit),
+        )
+
+    steps = max(1, int(math.ceil(duration / sample_interval)))
+    if largest_delta > 0.0:
+        steps = max(steps, int(math.ceil(largest_delta / max(max_step_rad, 0.001))))
+    interval = max(0.005, duration / steps)
+
+    waypoints: List[Dict[str, Any]] = []
     for step in range(1, steps + 1):
-        blend = step / steps
-        waypoint = dict(start_angles)
+        u = step / steps
+        blend = smootherstep(u)
+        blend_rate = smootherstep_derivative(u) / duration if duration > 0.0 else 0.0
+        joint_angles = dict(start_angles)
+        joint_velocities = {axis: 0.0 for axis in ARM_AXES}
         for axis in axes:
-            waypoint[axis] = float(start_angles.get(axis, 0.0)) + (deltas[axis] * blend)
+            joint_angles[axis] = float(start_angles.get(axis, 0.0)) + (deltas[axis] * blend)
+            joint_velocities[axis] = deltas[axis] * blend_rate
         if joint_count == 2:
-            waypoint["elbow"] = 0.0
-        waypoints.append(waypoint)
+            joint_angles["elbow"] = 0.0
+            joint_velocities["elbow"] = 0.0
+        waypoints.append(
+            {
+                "jointAngles": joint_angles,
+                "jointVelocities": joint_velocities,
+                "interval": interval,
+            }
+        )
     return waypoints
 
 
@@ -631,7 +681,8 @@ class DashboardController:
         self.arm_current_limit_signature: Optional[Tuple[Any, ...]] = None
         self.arm_motor_targets = {axis: 0.0 for axis in ARM_AXES}
         self.arm_joint_angles = {axis: 0.0 for axis in ARM_AXES}
-        self.arm_route_waypoints: Deque[Dict[str, Dict[str, float]]] = deque()
+        self.arm_motor_velocities = {axis: 0.0 for axis in ARM_AXES}
+        self.arm_route_waypoints: Deque[Dict[str, Any]] = deque()
         self.arm_route_next_at = 0.0
         self.active_reports = False
         self.oscillating = False
@@ -1926,6 +1977,12 @@ class DashboardController:
             for axis in self.active_arm_axes()
         }
 
+    def arm_motor_velocities_for_joints(self, joint_velocities: Dict[str, float]) -> Dict[str, float]:
+        return {
+            axis: self.arm_directions[axis] * float(joint_velocities.get(axis, 0.0))
+            for axis in self.active_arm_axes()
+        }
+
     def arm_feedback_joint_angles(self) -> Optional[Dict[str, float]]:
         now = time.monotonic()
         with self.lock:
@@ -1980,22 +2037,26 @@ class DashboardController:
     def clear_arm_route(self) -> None:
         self.arm_route_waypoints.clear()
         self.arm_route_next_at = 0.0
+        self.arm_motor_velocities = {axis: 0.0 for axis in ARM_AXES}
 
-    def arm_route_interval(self, previous: Dict[str, float], next_angles: Dict[str, float]) -> float:
-        max_delta = max(
-            (
-                abs(float(next_angles.get(axis, 0.0)) - float(previous.get(axis, 0.0)))
-                for axis in self.active_arm_axes()
-            ),
-            default=0.0,
-        )
-        velocity = max(abs(self.arm_velocity_limit), 0.05)
-        return max(ARM_ROUTE_MIN_INTERVAL_S, (max_delta / velocity) + ARM_ROUTE_SETTLE_S)
+    def arm_route_waypoint_interval(self, waypoint: Dict[str, Any]) -> float:
+        try:
+            interval = float(waypoint.get("interval", ARM_ROUTE_SAMPLE_S))
+        except (TypeError, ValueError):
+            interval = ARM_ROUTE_SAMPLE_S
+        return max(0.005, min(0.20, interval))
 
-    def apply_arm_route_waypoint(self, waypoint: Dict[str, Dict[str, float]]) -> None:
+    def apply_arm_route_waypoint(self, waypoint: Dict[str, Any]) -> None:
         self.arm_joint_angles = dict(waypoint["jointAngles"])
         self.arm_motor_targets = {
             axis: waypoint["motorTargets"].get(axis, self.arm_motor_targets.get(axis, 0.0))
+            for axis in ARM_AXES
+        }
+        motor_velocities = waypoint.get("motorVelocities")
+        if not isinstance(motor_velocities, dict):
+            motor_velocities = {}
+        self.arm_motor_velocities = {
+            axis: float(motor_velocities.get(axis, 0.0))
             for axis in ARM_AXES
         }
 
@@ -2004,7 +2065,7 @@ class DashboardController:
         target: Dict[str, float],
         previous_angles: Dict[str, float],
         max_step_rad: float,
-    ) -> Tuple[List[Dict[str, Dict[str, float]]], Dict[str, float], Dict[str, float]]:
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, float], Dict[str, float]]:
         clamped_target = clamp_arm_target_to_reach(
             self.arm_joint_count,
             target,
@@ -2031,14 +2092,18 @@ class DashboardController:
             self.arm_twist_limits,
             previous_angles,
         )
-        route_angles = plan_arm_joint_route(
+        route_samples = plan_arm_joint_route(
             self.arm_joint_count,
             previous_angles,
             joint_angles,
             max_step_rad,
+            self.arm_velocity_limit,
+            self.arm_acceleration,
         )
-        route_waypoints: List[Dict[str, Dict[str, float]]] = []
-        for waypoint_angles in route_angles:
+        route_waypoints: List[Dict[str, Any]] = []
+        for sample in route_samples:
+            waypoint_angles = sample["jointAngles"]
+            waypoint_velocities = sample["jointVelocities"]
             waypoint_solution = ArmIkSolution(
                 base=waypoint_angles["base"],
                 shoulder=waypoint_angles["shoulder"],
@@ -2063,7 +2128,10 @@ class DashboardController:
             route_waypoints.append(
                 {
                     "jointAngles": dict(waypoint_angles),
+                    "jointVelocities": dict(waypoint_velocities),
                     "motorTargets": self.arm_motor_targets_for_joints(waypoint_angles),
+                    "motorVelocities": self.arm_motor_velocities_for_joints(waypoint_velocities),
+                    "interval": sample.get("interval", ARM_ROUTE_SAMPLE_S),
                 }
             )
         return route_waypoints, clamped_target, joint_angles
@@ -2072,11 +2140,11 @@ class DashboardController:
         self,
         targets: List[Dict[str, float]],
         max_step_rad: float,
-    ) -> Tuple[List[Dict[str, Dict[str, float]]], Dict[str, float], Dict[str, float]]:
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, float], Dict[str, float]]:
         previous_angles = self.arm_feedback_joint_angles() or dict(self.arm_joint_angles)
         final_target = dict(self.arm_target)
         final_joint_angles = dict(previous_angles)
-        route_waypoints: List[Dict[str, Dict[str, float]]] = []
+        route_waypoints: List[Dict[str, Any]] = []
         for target in targets:
             segment, final_target, final_joint_angles = self.arm_route_waypoints_to_target(
                 target,
@@ -2091,7 +2159,7 @@ class DashboardController:
 
     def start_arm_route(
         self,
-        route_waypoints: List[Dict[str, Dict[str, float]]],
+        route_waypoints: List[Dict[str, Any]],
         config_signature: Tuple[Any, ...],
         label: str,
         live: bool = False,
@@ -2113,10 +2181,13 @@ class DashboardController:
         should_log = not live or needs_config
         if should_log:
             joint_angles = route_waypoints[-1]["jointAngles"]
+            route_duration = sum(self.arm_route_waypoint_interval(item) for item in route_waypoints)
             self.log(
                 f"{label} "
                 f"joints base={joint_angles['base']:+.3f} shoulder={joint_angles['shoulder']:+.3f} elbow={joint_angles['elbow']:+.3f} "
-                f"route_waypoints={len(route_waypoints)} kp={self.arm_position_kp:.2f} kd={self.arm_damping_kd:.2f} "
+                f"route_waypoints={len(route_waypoints)} route_s={route_duration:.2f} "
+                f"vlim={self.arm_velocity_limit:.2f} acc={self.arm_acceleration:.2f} "
+                f"kp={self.arm_position_kp:.2f} kd={self.arm_damping_kd:.2f} "
                 f"assist shoulder={self.arm_torque_biases['shoulder']:+.2f}Nm elbow={self.arm_torque_biases['elbow']:+.2f}Nm"
             )
             if 0.0 < self.arm_position_kp < 2.0:
@@ -2138,19 +2209,18 @@ class DashboardController:
         else:
             self.refresh_arm_current_limits_if_needed()
         self.apply_arm_route_waypoint(first_waypoint)
-        if not needs_config:
-            for axis in self.active_arm_axes():
-                self.send_private_operation_control_to(
-                    self.arm_motor_ids[axis],
-                    self.arm_motor_targets[axis],
-                    0.0,
-                    self.arm_position_kp,
-                    self.arm_damping_kd,
-                    self.arm_effective_torque_bias(axis, self.arm_motor_targets[axis]),
-                )
+        for axis in self.active_arm_axes():
+            self.send_private_operation_control_to(
+                self.arm_motor_ids[axis],
+                self.arm_motor_targets[axis],
+                self.arm_motor_velocities.get(axis, 0.0),
+                self.arm_position_kp,
+                self.arm_damping_kd,
+                self.arm_effective_torque_bias(axis, self.arm_motor_targets[axis]),
+            )
         self.arm_route_waypoints = deque(remaining_waypoints)
         self.arm_route_next_at = (
-            time.monotonic() + self.arm_route_interval(self.arm_joint_angles, remaining_waypoints[0]["jointAngles"])
+            time.monotonic() + self.arm_route_waypoint_interval(first_waypoint)
             if remaining_waypoints
             else 0.0
         )
@@ -2288,14 +2358,28 @@ class DashboardController:
         reach = max(abs(self.arm_link_1) + abs(self.arm_link_2), 0.001)
 
         def target(radial_scale: float, yaw_deg: float, z_scale: float) -> Dict[str, float]:
-            radial = reach * radial_scale
+            min_radial_scale = ARM_PRESET_MIN_RADIAL_SCALE
+            min_z_scale = ARM_PRESET_MIN_Z_SCALE
+            max_z_scale = ARM_PRESET_MAX_Z_SCALE
+            if self.arm_joint_count == 3 and not self.arm_elbow_up:
+                min_radial_scale = ARM_PRESET_ELBOW_DOWN_MIN_RADIAL_SCALE
+                min_z_scale = ARM_PRESET_ELBOW_DOWN_MIN_Z_SCALE
+                max_z_scale = ARM_PRESET_ELBOW_DOWN_MAX_Z_SCALE
+            radial = reach * max(
+                min_radial_scale,
+                min(ARM_PRESET_MAX_RADIAL_SCALE, radial_scale),
+            )
             yaw = math.radians(yaw_deg)
+            z = reach * max(
+                min_z_scale,
+                min(max_z_scale, z_scale),
+            )
             return clamp_arm_target_to_reach(
                 self.arm_joint_count,
                 {
                     "x": radial * math.cos(yaw),
                     "y": radial * math.sin(yaw),
-                    "z": reach * z_scale,
+                    "z": z,
                 },
                 self.arm_link_1,
                 self.arm_link_2,
@@ -2304,82 +2388,95 @@ class DashboardController:
         if self.arm_joint_count == 2:
             presets = {
                 "showcase": [
-                    (0.68, -36, 0.12),
-                    (0.60, -12, 0.38),
-                    (0.74, 30, 0.18),
-                    (0.56, 36, 0.44),
-                    (0.80, 0, 0.12),
-                    (0.58, -28, 0.30),
-                    (0.72, 0, 0.18),
+                    (0.58, 0, 0.24),
+                    (0.56, -18, 0.30),
+                    (0.62, -32, 0.22),
+                    (0.58, -12, 0.38),
+                    (0.58, 12, 0.34),
+                    (0.62, 32, 0.22),
+                    (0.58, 18, 0.30),
+                    (0.58, 0, 0.24),
                 ],
                 "sweep": [
-                    (0.70, -42, 0.14),
-                    (0.76, -18, 0.24),
-                    (0.72, 18, 0.20),
-                    (0.66, 42, 0.32),
-                    (0.74, 0, 0.18),
+                    (0.58, -36, 0.24),
+                    (0.62, -18, 0.24),
+                    (0.64, 0, 0.24),
+                    (0.62, 18, 0.24),
+                    (0.58, 36, 0.24),
+                    (0.62, 0, 0.24),
                 ],
                 "lift": [
-                    (0.70, 0, 0.08),
-                    (0.58, 0, 0.42),
-                    (0.74, 0, 0.24),
-                    (0.62, 0, 0.14),
+                    (0.64, 0, 0.18),
+                    (0.62, 0, 0.28),
+                    (0.56, 0, 0.42),
+                    (0.60, 0, 0.32),
+                    (0.64, 0, 0.20),
                 ],
                 "orbit": [
-                    (0.68, -30, 0.14),
-                    (0.58, -8, 0.46),
-                    (0.68, 30, 0.14),
-                    (0.78, 8, 0.10),
-                    (0.68, -30, 0.14),
+                    (0.58, -30, 0.24),
+                    (0.54, -16, 0.34),
+                    (0.52, 0, 0.40),
+                    (0.54, 16, 0.34),
+                    (0.58, 30, 0.24),
+                    (0.62, 16, 0.20),
+                    (0.62, -16, 0.20),
+                    (0.58, -30, 0.24),
                 ],
                 "flex": [
-                    (0.82, 0, 0.10),
-                    (0.48, 0, 0.38),
-                    (0.72, -24, 0.22),
-                    (0.50, 24, 0.36),
-                    (0.78, 0, 0.16),
+                    (0.64, 0, 0.20),
+                    (0.54, 0, 0.36),
+                    (0.46, 0, 0.32),
+                    (0.56, -18, 0.34),
+                    (0.64, 0, 0.22),
+                    (0.56, 18, 0.34),
+                    (0.62, 0, 0.24),
                 ],
             }
         else:
             presets = {
                 "showcase": [
-                    (0.74, -34, 0.14),
-                    (0.50, -12, 0.44),
-                    (0.82, 22, 0.16),
-                    (0.46, 34, 0.36),
-                    (0.70, -28, 0.28),
-                    (0.54, 0, 0.50),
-                    (0.84, 0, 0.12),
-                    (0.66, 0, 0.24),
+                    (0.58, 0, 0.26),
+                    (0.54, -16, 0.34),
+                    (0.62, -30, 0.24),
+                    (0.56, -10, 0.42),
+                    (0.56, 10, 0.38),
+                    (0.62, 30, 0.24),
+                    (0.54, 16, 0.34),
+                    (0.58, 0, 0.26),
                 ],
                 "sweep": [
-                    (0.72, -42, 0.16),
-                    (0.62, -16, 0.34),
-                    (0.72, 20, 0.18),
-                    (0.58, 42, 0.40),
-                    (0.76, 0, 0.20),
+                    (0.58, -34, 0.26),
+                    (0.62, -17, 0.26),
+                    (0.64, 0, 0.26),
+                    (0.62, 17, 0.26),
+                    (0.58, 34, 0.26),
+                    (0.62, 0, 0.26),
                 ],
                 "lift": [
-                    (0.76, 0, 0.10),
-                    (0.54, 0, 0.48),
-                    (0.84, 0, 0.18),
-                    (0.56, 0, 0.32),
-                    (0.72, 0, 0.16),
+                    (0.64, 0, 0.18),
+                    (0.60, 0, 0.30),
+                    (0.54, 0, 0.46),
+                    (0.58, 0, 0.34),
+                    (0.64, 0, 0.20),
                 ],
                 "orbit": [
-                    (0.70, -34, 0.16),
-                    (0.54, -8, 0.46),
-                    (0.70, 34, 0.16),
-                    (0.84, 8, 0.12),
-                    (0.58, -24, 0.34),
-                    (0.70, -34, 0.16),
+                    (0.58, -30, 0.26),
+                    (0.52, -16, 0.38),
+                    (0.50, 0, 0.44),
+                    (0.52, 16, 0.38),
+                    (0.58, 30, 0.26),
+                    (0.62, 16, 0.22),
+                    (0.62, -16, 0.22),
+                    (0.58, -30, 0.26),
                 ],
                 "flex": [
-                    (0.86, 0, 0.10),
-                    (0.46, 0, 0.38),
-                    (0.76, -24, 0.18),
-                    (0.44, 22, 0.42),
-                    (0.82, 0, 0.14),
+                    (0.64, 0, 0.22),
+                    (0.54, 0, 0.38),
+                    (0.46, 0, 0.32),
+                    (0.56, -18, 0.36),
+                    (0.64, 0, 0.24),
+                    (0.56, 18, 0.36),
+                    (0.62, 0, 0.26),
                 ],
             }
         return [target(*item) for item in presets[key]]
@@ -2414,6 +2511,7 @@ class DashboardController:
             ARM_PRESET_MAX_STEP_RAD,
         )
         self.arm_target = final_target
+        route_duration = sum(self.arm_route_waypoint_interval(item) for item in route_waypoints)
         ok = self.start_arm_route(
             route_waypoints,
             self.arm_position_config_signature(),
@@ -2423,7 +2521,7 @@ class DashboardController:
             "ok": ok,
             "message": (
                 f"Arm preset {label} started with {len(targets)} poses "
-                f"and {len(route_waypoints)} route waypoints"
+                f"and {len(route_waypoints)} smooth waypoints over {route_duration:.1f}s"
             ) if ok else f"Arm preset {label} failed to start",
         }
 
@@ -2433,10 +2531,7 @@ class DashboardController:
             waypoint = self.arm_route_waypoints.popleft()
             self.apply_arm_route_waypoint(waypoint)
             if self.arm_route_waypoints:
-                self.arm_route_next_at = now + self.arm_route_interval(
-                    self.arm_joint_angles,
-                    self.arm_route_waypoints[0]["jointAngles"],
-                )
+                self.arm_route_next_at = now + self.arm_route_waypoint_interval(waypoint)
             else:
                 self.arm_route_next_at = 0.0
                 self.log("Arm route complete")
@@ -2444,7 +2539,7 @@ class DashboardController:
             self.send_private_operation_control_to(
                 self.arm_motor_ids[axis],
                 self.arm_motor_targets[axis],
-                0.0,
+                self.arm_motor_velocities.get(axis, 0.0),
                 self.arm_position_kp,
                 self.arm_damping_kd,
                 self.arm_effective_torque_bias(axis, self.arm_motor_targets[axis]),
@@ -3019,6 +3114,7 @@ class DashboardController:
                     "routeRemaining": len(self.arm_route_waypoints),
                     "jointAngles": dict(self.arm_joint_angles),
                     "motorTargets": dict(self.arm_motor_targets),
+                    "motorVelocities": dict(self.arm_motor_velocities),
                     "solution": self.arm_solution_snapshot(),
                 },
                 "activeReports": self.active_reports,
