@@ -104,6 +104,8 @@ ARM_ROUTE_MAX_STEP_RAD = math.radians(6.0)
 ARM_PRESET_MAX_STEP_RAD = math.radians(6.0)
 ARM_ROUTE_SAMPLE_S = ARM_OPERATION_REFRESH_S
 ARM_ROUTE_MIN_DURATION_S = 0.18
+ARM_ROUTE_VELOCITY_DURATION_FACTOR = 2.6
+ARM_ROUTE_ACCEL_DURATION_FACTOR = 8.5
 ARM_ROUTE_FEEDBACK_RESEED_RAD = math.radians(18.0)
 ARM_PRESET_MIN_RADIAL_SCALE = 0.42
 ARM_PRESET_MAX_RADIAL_SCALE = 0.72
@@ -133,10 +135,16 @@ ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD = math.radians(3.0)
 ARM_ASSIST_OVERSHOOT_SCALE = -0.20
 ARM_ASSIST_FEEDBACK_MISSING_SCALE = 0.65
 ARM_ASSIST_MOVING_WITH_LOAD_SCALE = 0.90
+ARM_HOLD_ERROR_DEADBAND_RAD = math.radians(1.5)
+ARM_HOLD_ERROR_FULL_RAD = math.radians(12.0)
+ARM_HOLD_ERROR_MAX_NM = 0.65
+ARM_HOLD_ERROR_MAX_TARGET_VEL_RAD_S = 0.03
+ARM_HOLD_ERROR_MAX_FEEDBACK_VEL_RAD_S = 0.20
+ARM_HOLD_ERROR_RAMP_S = 0.90
 ARM_ADAPTIVE_ASSIST_AXES = ("shoulder", "elbow")
 ARM_ADAPTIVE_ASSIST_MAX_NM = 1.5
 ARM_ADAPTIVE_ASSIST_DEADBAND_RAD = math.radians(1.2)
-ARM_ADAPTIVE_ASSIST_LEARN_WINDOW_RAD = math.radians(10.0)
+ARM_ADAPTIVE_ASSIST_LEARN_WINDOW_RAD = math.radians(25.0)
 ARM_ADAPTIVE_ASSIST_MAX_FEEDBACK_VEL_RAD_S = 0.06
 ARM_ADAPTIVE_ASSIST_MAX_TARGET_VEL_RAD_S = 0.02
 ARM_ADAPTIVE_ASSIST_LEARN_RATE_NM_PER_RAD_S = 0.35
@@ -178,7 +186,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.14"
+APP_VERSION = "2026.09.03.16"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -436,12 +444,13 @@ def clamp_arm_target_to_reach(
 
 def smootherstep(value: float) -> float:
     u = max(0.0, min(1.0, float(value)))
-    return (u * u * u) * (u * (u * 6.0 - 15.0) + 10.0)
+    return (u * u * u * u) * (35.0 + u * (-84.0 + u * (70.0 - (20.0 * u))))
 
 
 def smootherstep_derivative(value: float) -> float:
     u = max(0.0, min(1.0, float(value)))
-    return 30.0 * u * u * (1.0 - u) * (1.0 - u)
+    one_minus = 1.0 - u
+    return 140.0 * u * u * u * one_minus * one_minus * one_minus
 
 
 def plan_arm_joint_route(
@@ -470,8 +479,8 @@ def plan_arm_joint_route(
             continue
         duration = max(
             duration,
-            1.875 * distance / velocity_limit,
-            math.sqrt(5.8 * distance / acceleration_limit),
+            ARM_ROUTE_VELOCITY_DURATION_FACTOR * distance / velocity_limit,
+            math.sqrt(ARM_ROUTE_ACCEL_DURATION_FACTOR * distance / acceleration_limit),
         )
 
     steps = max(1, int(math.ceil(duration / sample_interval)))
@@ -731,6 +740,7 @@ class DashboardController:
         self.arm_motor_velocities = {axis: 0.0 for axis in ARM_AXES}
         self.arm_route_waypoints: Deque[Dict[str, Any]] = deque()
         self.arm_route_next_at = 0.0
+        self.arm_hold_correction_ramp_until = 0.0
         self.active_reports = False
         self.oscillating = False
         self.jog_active = False
@@ -2274,6 +2284,12 @@ class DashboardController:
             scale = max(scale, ARM_ASSIST_MOVING_WITH_LOAD_SCALE)
         return bias * max(-1.0, min(1.0, scale))
 
+    def arm_hold_error_correction_scale(self, now: float) -> float:
+        ramp_until = getattr(self, "arm_hold_correction_ramp_until", 0.0)
+        if ramp_until <= 0.0 or now >= ramp_until:
+            return 1.0
+        return max(0.0, 1.0 - ((ramp_until - now) / ARM_HOLD_ERROR_RAMP_S))
+
     def arm_effective_torque_bias(
         self,
         axis: str,
@@ -2303,12 +2319,37 @@ class DashboardController:
                 0.0,
                 boost_moving_with_load=False,
             )
+        torque_ff += self.arm_hold_error_correction(axis, target_position, target_velocity)
         return max(-ARM_TORQUE_BIAS_MAX_NM, min(ARM_TORQUE_BIAS_MAX_NM, torque_ff))
+
+    def arm_hold_error_correction(
+        self,
+        axis: str,
+        target_position: float,
+        target_velocity: float = 0.0,
+    ) -> float:
+        if abs(target_velocity) > ARM_HOLD_ERROR_MAX_TARGET_VEL_RAD_S or self.arm_route_waypoints:
+            return 0.0
+        now = time.monotonic()
+        position, feedback_velocity = self.arm_feedback_for_axis(axis, now)
+        if position is None:
+            return 0.0
+        if feedback_velocity is not None and abs(feedback_velocity) > ARM_HOLD_ERROR_MAX_FEEDBACK_VEL_RAD_S:
+            return 0.0
+        error = target_position - position
+        abs_error = abs(error)
+        if abs_error <= ARM_HOLD_ERROR_DEADBAND_RAD:
+            return 0.0
+        span = max(ARM_HOLD_ERROR_FULL_RAD - ARM_HOLD_ERROR_DEADBAND_RAD, 0.000001)
+        scale = min(1.0, (abs_error - ARM_HOLD_ERROR_DEADBAND_RAD) / span)
+        scale *= self.arm_hold_error_correction_scale(now)
+        return math.copysign(ARM_HOLD_ERROR_MAX_NM * scale, error)
 
     def clear_arm_route(self) -> None:
         self.arm_route_waypoints.clear()
         self.arm_route_next_at = 0.0
         self.arm_motor_velocities = {axis: 0.0 for axis in ARM_AXES}
+        self.arm_hold_correction_ramp_until = 0.0
 
     def arm_route_waypoint_interval(self, waypoint: Dict[str, Any]) -> float:
         try:
@@ -2537,16 +2578,22 @@ class DashboardController:
                     self.arm_motor_velocities.get(axis, 0.0),
                 ),
             )
+        route_now = time.monotonic()
         self.arm_route_waypoints = deque(remaining_waypoints)
         self.arm_route_next_at = (
-            time.monotonic() + self.arm_route_waypoint_interval(first_waypoint)
+            route_now + self.arm_route_waypoint_interval(first_waypoint)
             if remaining_waypoints
             else 0.0
         )
-        self.arm_adaptive_assist_pause_until = time.monotonic() + ARM_ADAPTIVE_ASSIST_SETTLE_S
+        self.arm_adaptive_assist_pause_until = route_now + ARM_ADAPTIVE_ASSIST_SETTLE_S
+        self.arm_hold_correction_ramp_until = (
+            route_now + ARM_HOLD_ERROR_RAMP_S
+            if not remaining_waypoints
+            else 0.0
+        )
         self.arm_position_configured = True
         self.arm_position_signature = config_signature
-        self.last_arm_position_refresh_at = time.monotonic()
+        self.last_arm_position_refresh_at = route_now
         if should_log:
             active_targets = " ".join(
                 f"{axis}={self.arm_motor_targets[axis]:+.3f}"
@@ -2882,6 +2929,7 @@ class DashboardController:
             else:
                 self.arm_route_next_at = 0.0
                 self.arm_adaptive_assist_pause_until = now + ARM_ADAPTIVE_ASSIST_SETTLE_S
+                self.arm_hold_correction_ramp_until = now + ARM_HOLD_ERROR_RAMP_S
                 self.log("Arm route complete")
         self.update_arm_adaptive_assist(now)
         for axis in self.active_arm_axes():
