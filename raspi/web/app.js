@@ -168,11 +168,6 @@ function clampArmTarget(target, arm, axis = "") {
   const limits = armReachLimits(arm);
   let clamped = false;
 
-  if (next.z < ARM_BASE_PLANE_MIN_Z) {
-    next.z = ARM_BASE_PLANE_MIN_Z;
-    clamped = true;
-  }
-
   let reach = Math.hypot(next.x, next.y, next.z);
   if (reach > limits.maxReach) {
     const clampedReach = limits.maxReach;

@@ -198,6 +198,12 @@ motor_target = joint_offset + direction * solved_joint_angle
 Those motor targets are sent as private-protocol operation-control targets to
 the base, shoulder, and elbow motor IDs.
 
+Target editing does not silently clamp negative `z` values; the IK preview will
+show them and report safety warnings. Move commands still require the solved arm
+geometry to stay at or above the base plane, so a `180` degree shoulder twist
+limit allows horizontal-forward through vertical to horizontal-backward motion
+without allowing the arm to route underneath the horizontal plane.
+
 Loaded arms use RobStride operation-control frames for IK moves so the hold loop
 has explicit damping and feed-forward torque. IK targets are streamed as
 small smootherstep waypoints with velocity feed-forward; `Velocity Limit` and

@@ -174,7 +174,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.10"
+APP_VERSION = "2026.09.03.11"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -414,7 +414,6 @@ def clamp_arm_target_to_reach(
         y = 0.0
     if not math.isfinite(z):
         z = 0.0
-    z = max(z, ARM_BASE_PLANE_MIN_Z)
     max_reach = max(abs(link_1) + abs(link_2), 0.001)
     min_reach = ARM_MIN_TARGET_REACH if joint_count == 2 else abs(abs(link_1) - abs(link_2))
     min_reach = min(min_reach, max_reach)
