@@ -202,11 +202,13 @@ small smootherstep waypoints with velocity feed-forward; `Velocity Limit` and
 values at `1.5 rad/s`, `8 rad/s^2`, `Kp=10.0`, `Kd=5.0`, and `+/-5 Nm` assist
 torque. Motion presets use those same controls and adaptive loaded-arm target
 envelopes, so lower `Velocity Limit`/`Acceleration` values make presets slower
-and smoother too. Assist torque keeps a partial floor near and past the target
-so gravity compensation does not suddenly disappear. If the arm starts bouncing,
-press **Stop Arm**, support the load, raise `Damping Kd`, then adjust
-`Position Kp` only as needed for hold stiffness. If the arm slowly falls even
-when stable, raise current limit and add signed shoulder or elbow assist torque.
+and smoother too. Active routes start from the current commanded hold target and
+keep stronger assist while moving in the load-bearing direction, so gravity
+compensation does not suddenly disappear at the start of a move. If the arm
+starts bouncing, press **Stop Arm**, support the load, raise `Damping Kd`, then
+adjust `Position Kp` only as needed for hold stiffness. If the arm slowly falls
+even when stable, raise current limit and add signed shoulder or elbow assist
+torque.
 
 Beginner loaded-arm tuning:
 

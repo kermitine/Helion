@@ -103,6 +103,7 @@ ARM_ROUTE_MAX_STEP_RAD = math.radians(6.0)
 ARM_PRESET_MAX_STEP_RAD = math.radians(6.0)
 ARM_ROUTE_SAMPLE_S = ARM_OPERATION_REFRESH_S
 ARM_ROUTE_MIN_DURATION_S = 0.18
+ARM_ROUTE_FEEDBACK_RESEED_RAD = math.radians(18.0)
 ARM_PRESET_MIN_RADIAL_SCALE = 0.42
 ARM_PRESET_MAX_RADIAL_SCALE = 0.72
 ARM_PRESET_MIN_Z_SCALE = 0.16
@@ -128,6 +129,7 @@ ARM_ASSIST_TARGET_SCALE = 0.65
 ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD = math.radians(3.0)
 ARM_ASSIST_OVERSHOOT_SCALE = 0.35
 ARM_ASSIST_FEEDBACK_MISSING_SCALE = 0.65
+ARM_ASSIST_MOVING_WITH_LOAD_SCALE = 0.90
 ARM_FEEDBACK_START_MAX_AGE_S = 1.0
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
@@ -162,7 +164,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.6"
+APP_VERSION = "2026.09.03.7"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1844,6 +1846,7 @@ class DashboardController:
         axis: str,
         motor_id: int,
         position: float,
+        velocity: float,
         current_limit: float,
     ) -> bool:
         motor_id &= 0xFF
@@ -1854,12 +1857,12 @@ class DashboardController:
         if not self.write_private_run_mode_verified_for(motor_id, RUN_MODE_OPERATION):
             self.log(f"{axis} {fmt_id(motor_id)} damped arm setup failed: run_mode did not verify")
             return False
-        torque_ff = self.arm_effective_torque_bias(axis, position)
+        torque_ff = self.arm_effective_torque_bias(axis, position, velocity)
         self.send_private_enable_to(motor_id)
         self.send_private_operation_control_to(
             motor_id,
             position,
-            0.0,
+            velocity,
             self.arm_position_kp,
             self.arm_damping_kd,
             torque_ff,
@@ -1869,14 +1872,14 @@ class DashboardController:
         self.send_private_operation_control_to(
             motor_id,
             position,
-            0.0,
+            velocity,
             self.arm_position_kp,
             self.arm_damping_kd,
             torque_ff,
         )
         self.log(
             f"{axis} {fmt_id(motor_id)} operation hold pos={position:+.3f} "
-            f"kp={self.arm_position_kp:.2f} kd={self.arm_damping_kd:.2f} "
+            f"vel={velocity:+.3f} kp={self.arm_position_kp:.2f} kd={self.arm_damping_kd:.2f} "
             f"assist={torque_ff:+.2f}Nm current={current_limit:.2f}A"
         )
         return True
@@ -2000,10 +2003,40 @@ class DashboardController:
                 angles[axis] = (float(position) - self.arm_offsets[axis]) / direction
         return angles
 
-    def arm_effective_torque_bias(self, axis: str, target_position: float) -> float:
+    def arm_route_start_joint_angles(self) -> Dict[str, float]:
+        commanded = {axis: self.arm_joint_angles.get(axis, 0.0) for axis in ARM_AXES}
+        feedback = self.arm_feedback_joint_angles()
+        if not self.arm_position_configured:
+            return feedback or commanded
+        if feedback is None:
+            return commanded
+        max_error = max(
+            (
+                abs(float(feedback.get(axis, 0.0)) - float(commanded.get(axis, 0.0)))
+                for axis in self.active_arm_axes()
+            ),
+            default=0.0,
+        )
+        if max_error > ARM_ROUTE_FEEDBACK_RESEED_RAD:
+            self.log(
+                "Arm feedback is far from the active hold target; "
+                f"reseeded route from feedback error={math.degrees(max_error):.1f}deg"
+            )
+            return feedback
+        return commanded
+
+    def arm_effective_torque_bias(
+        self,
+        axis: str,
+        target_position: float,
+        target_velocity: float = 0.0,
+    ) -> float:
         bias = self.arm_torque_biases.get(axis, 0.0)
         if abs(bias) <= 0.000001:
             return 0.0
+
+        assist_direction = 1.0 if bias > 0.0 else -1.0
+        moving_with_load = target_velocity * assist_direction > 0.0001
 
         motor_id = self.arm_motor_ids[axis] & 0xFF
         now = time.monotonic()
@@ -2011,12 +2044,17 @@ class DashboardController:
             feedback = self.feedback_by_motor.get(motor_id)
             seen_at = self.feedback_at_by_motor.get(motor_id)
             if feedback is None or seen_at is None or now - seen_at > ARM_FEEDBACK_START_MAX_AGE_S:
-                return bias * ARM_ASSIST_FEEDBACK_MISSING_SCALE
+                scale = ARM_ASSIST_FEEDBACK_MISSING_SCALE
+                if moving_with_load:
+                    scale = max(scale, ARM_ASSIST_MOVING_WITH_LOAD_SCALE)
+                return bias * scale
             position = feedback.get("positionRad")
             if not isinstance(position, (int, float)) or not math.isfinite(float(position)):
-                return bias * ARM_ASSIST_FEEDBACK_MISSING_SCALE
+                scale = ARM_ASSIST_FEEDBACK_MISSING_SCALE
+                if moving_with_load:
+                    scale = max(scale, ARM_ASSIST_MOVING_WITH_LOAD_SCALE)
+                return bias * scale
 
-        assist_direction = 1.0 if bias > 0.0 else -1.0
         lag_toward_target = (target_position - float(position)) * assist_direction
         if lag_toward_target >= ARM_ASSIST_FADE_BAND_RAD:
             scale = 1.0
@@ -2032,6 +2070,8 @@ class DashboardController:
                 scale = ARM_ASSIST_TARGET_SCALE - (
                     (ARM_ASSIST_TARGET_SCALE - ARM_ASSIST_OVERSHOOT_SCALE) * fade
                 )
+        if moving_with_load:
+            scale = max(scale, ARM_ASSIST_MOVING_WITH_LOAD_SCALE)
         return bias * scale
 
     def clear_arm_route(self) -> None:
@@ -2141,7 +2181,7 @@ class DashboardController:
         targets: List[Dict[str, float]],
         max_step_rad: float,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, float], Dict[str, float]]:
-        previous_angles = self.arm_feedback_joint_angles() or dict(self.arm_joint_angles)
+        previous_angles = self.arm_route_start_joint_angles()
         final_target = dict(self.arm_target)
         final_joint_angles = dict(previous_angles)
         route_waypoints: List[Dict[str, Any]] = []
@@ -2201,6 +2241,7 @@ class DashboardController:
                     axis,
                     self.arm_motor_ids[axis],
                     first_waypoint["motorTargets"][axis],
+                    first_waypoint.get("motorVelocities", {}).get(axis, 0.0),
                     self.arm_current_limit,
                 ):
                     self.stop_arm()
@@ -2212,12 +2253,16 @@ class DashboardController:
         for axis in self.active_arm_axes():
             self.send_private_operation_control_to(
                 self.arm_motor_ids[axis],
+            self.arm_motor_targets[axis],
+            self.arm_motor_velocities.get(axis, 0.0),
+            self.arm_position_kp,
+            self.arm_damping_kd,
+            self.arm_effective_torque_bias(
+                axis,
                 self.arm_motor_targets[axis],
                 self.arm_motor_velocities.get(axis, 0.0),
-                self.arm_position_kp,
-                self.arm_damping_kd,
-                self.arm_effective_torque_bias(axis, self.arm_motor_targets[axis]),
-            )
+            ),
+        )
         self.arm_route_waypoints = deque(remaining_waypoints)
         self.arm_route_next_at = (
             time.monotonic() + self.arm_route_waypoint_interval(first_waypoint)
@@ -2538,12 +2583,16 @@ class DashboardController:
         for axis in self.active_arm_axes():
             self.send_private_operation_control_to(
                 self.arm_motor_ids[axis],
+            self.arm_motor_targets[axis],
+            self.arm_motor_velocities.get(axis, 0.0),
+            self.arm_position_kp,
+            self.arm_damping_kd,
+            self.arm_effective_torque_bias(
+                axis,
                 self.arm_motor_targets[axis],
                 self.arm_motor_velocities.get(axis, 0.0),
-                self.arm_position_kp,
-                self.arm_damping_kd,
-                self.arm_effective_torque_bias(axis, self.arm_motor_targets[axis]),
-            )
+            ),
+        )
         self.last_arm_position_refresh_at = time.monotonic()
 
     def stop_arm(self) -> None:
