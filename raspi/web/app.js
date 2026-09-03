@@ -1223,7 +1223,7 @@ function armTwistWarnings(arm, joints) {
 function armBasePlaneWarnings(points) {
   const minZ = points.reduce((lowest, point) => Math.min(lowest, Number(point.z) || 0), 0);
   if (minZ >= ARM_BASE_PLANE_MIN_Z - 0.000001) return [];
-  return [`arm dips below base plane: min Z=${minZ.toFixed(3)} m; raise the target or switch Elbow Up`];
+  return [`arm dips below base plane: min Z=${minZ.toFixed(3)} m; raise the target or switch elbow bend direction`];
 }
 
 function armSafetyCheck(arm, points, joints = null) {

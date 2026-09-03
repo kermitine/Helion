@@ -212,7 +212,9 @@ compensation does not suddenly disappear at the start of a move. If the arm
 starts bouncing, press **Stop Arm**, support the load, raise `Damping Kd`, then
 adjust `Position Kp` only as needed for hold stiffness. If the arm slowly falls
 even when stable, raise current limit and add signed shoulder or elbow assist
-torque.
+torque. If feedback reseeding finds the arm already slightly below the base
+plane, the route planner allows a limited recovery path back to a safe target
+instead of blocking the move at the first below-plane waypoint.
 
 **Adaptive Assist** adds a slow learned shoulder/elbow trim on top of the manual
 assist values. It learns only while the arm is holding still near the target,

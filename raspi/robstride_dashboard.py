@@ -113,6 +113,7 @@ ARM_PRESET_ELBOW_DOWN_MIN_Z_SCALE = 0.50
 ARM_PRESET_ELBOW_DOWN_MAX_Z_SCALE = 0.60
 ARM_MIN_TARGET_REACH = 0.001
 ARM_BASE_PLANE_MIN_Z = 0.0
+ARM_BASE_PLANE_RECOVERY_TOLERANCE_M = 0.010
 ARM_CURRENT_LIMIT_MAX_A = 10.0
 ARM_DEFAULT_POSITION_VEL_RAD_S = 0.35
 ARM_DEFAULT_POSITION_ACCEL_RAD_S2 = 2.5
@@ -173,7 +174,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.9"
+APP_VERSION = "2026.09.03.10"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -603,19 +604,26 @@ def arm_solution_points(
     return [p0, p1, p2]
 
 
+def arm_points_min_z(points: List[Dict[str, float]]) -> float:
+    return min((float(point.get("z", 0.0)) for point in points), default=0.0)
+
+
 def arm_safety_check(
     joint_count: int,
     points: List[Dict[str, float]],
     link_radii: Dict[str, float],
     joint_angles: Optional[Dict[str, float]] = None,
     twist_limits: Optional[Dict[str, float]] = None,
+    base_plane_min_z: float = ARM_BASE_PLANE_MIN_Z,
 ) -> Dict[str, Any]:
     warnings: List[str] = []
-    min_z = min((float(point.get("z", 0.0)) for point in points), default=0.0)
-    if min_z < ARM_BASE_PLANE_MIN_Z - 0.000001:
+    min_z = arm_points_min_z(points)
+    if not math.isfinite(base_plane_min_z):
+        base_plane_min_z = ARM_BASE_PLANE_MIN_Z
+    if min_z < base_plane_min_z - 0.000001:
         warnings.append(
             f"arm dips below base plane: min Z={min_z:.3f} m; "
-            "raise the target or use Elbow Up"
+            "raise the target or switch elbow bend direction"
         )
     if joint_count == 3 and len(points) >= 3:
         radius_1 = max(0.0, link_radii.get("link1", 0.0))
@@ -2279,6 +2287,48 @@ class DashboardController:
             self.arm_twist_limits,
             previous_angles,
         )
+        final_points = arm_solution_points(
+            self.arm_joint_count,
+            ArmIkSolution(
+                base=joint_angles["base"],
+                shoulder=joint_angles["shoulder"],
+                elbow=joint_angles["elbow"],
+            ),
+            clamped_target,
+            self.arm_link_1,
+            self.arm_link_2,
+        )
+        final_safety = arm_safety_check(
+            self.arm_joint_count,
+            final_points,
+            self.arm_link_radii,
+            joint_angles,
+            self.arm_twist_limits,
+        )
+        if not final_safety["ok"]:
+            raise ValueError(f"Unsafe IK target: {'; '.join(final_safety['warnings'])}")
+
+        route_base_plane_min_z = ARM_BASE_PLANE_MIN_Z
+        if self.arm_joint_count == 3:
+            start_points = arm_solution_points(
+                self.arm_joint_count,
+                ArmIkSolution(
+                    base=previous_angles.get("base", 0.0),
+                    shoulder=previous_angles.get("shoulder", 0.0),
+                    elbow=previous_angles.get("elbow", 0.0),
+                ),
+                clamped_target,
+                self.arm_link_1,
+                self.arm_link_2,
+            )
+            start_min_z = arm_points_min_z(start_points)
+            final_min_z = arm_points_min_z(final_points)
+            if start_min_z < ARM_BASE_PLANE_MIN_Z - 0.000001 <= final_min_z + 0.000001:
+                route_base_plane_min_z = start_min_z - ARM_BASE_PLANE_RECOVERY_TOLERANCE_M
+                self.log(
+                    "Arm route starts below base plane; allowing recovery "
+                    f"from min Z={start_min_z:.3f} m"
+                )
         route_samples = plan_arm_joint_route(
             self.arm_joint_count,
             previous_angles,
@@ -2309,6 +2359,7 @@ class DashboardController:
                 self.arm_link_radii,
                 waypoint_angles,
                 self.arm_twist_limits,
+                base_plane_min_z=route_base_plane_min_z,
             )
             if not waypoint_safety["ok"]:
                 raise ValueError(f"Unsafe IK route: {'; '.join(waypoint_safety['warnings'])}")
