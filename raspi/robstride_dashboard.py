@@ -94,6 +94,7 @@ COMMAND_TIMEOUT_S = 0.6
 TELEMETRY_ACTIVE_WINDOW_S = 5.0
 SHUTDOWN_COMMAND_TIMEOUT_S = 2.0
 ARM_AXES = ("base", "shoulder", "elbow")
+ARM_TWIST_LIMIT_AXES = ARM_AXES
 ARM_JOINT_COUNTS = (2, 3)
 ARM_ROLE_DEFAULT_IDS = {"base": 0x01, "shoulder": 0x02, "elbow": 0x03}
 ARM_TWIST_DEFAULT_LIMIT_RAD = math.pi
@@ -132,14 +133,16 @@ ARM_ASSIST_OVERSHOOT_SCALE = 0.35
 ARM_ASSIST_FEEDBACK_MISSING_SCALE = 0.65
 ARM_ASSIST_MOVING_WITH_LOAD_SCALE = 0.90
 ARM_ADAPTIVE_ASSIST_AXES = ("shoulder", "elbow")
-ARM_ADAPTIVE_ASSIST_MAX_NM = 2.0
-ARM_ADAPTIVE_ASSIST_DEADBAND_RAD = math.radians(0.8)
-ARM_ADAPTIVE_ASSIST_LEARN_WINDOW_RAD = math.radians(18.0)
-ARM_ADAPTIVE_ASSIST_MAX_FEEDBACK_VEL_RAD_S = 0.12
-ARM_ADAPTIVE_ASSIST_MAX_TARGET_VEL_RAD_S = 0.03
-ARM_ADAPTIVE_ASSIST_LEARN_RATE_NM_PER_RAD_S = 0.85
-ARM_ADAPTIVE_ASSIST_MAX_STEP_NM = 0.006
-ARM_ADAPTIVE_ASSIST_SETTLE_S = 0.35
+ARM_ADAPTIVE_ASSIST_MAX_NM = 1.5
+ARM_ADAPTIVE_ASSIST_DEADBAND_RAD = math.radians(1.2)
+ARM_ADAPTIVE_ASSIST_LEARN_WINDOW_RAD = math.radians(10.0)
+ARM_ADAPTIVE_ASSIST_MAX_FEEDBACK_VEL_RAD_S = 0.06
+ARM_ADAPTIVE_ASSIST_MAX_TARGET_VEL_RAD_S = 0.02
+ARM_ADAPTIVE_ASSIST_LEARN_RATE_NM_PER_RAD_S = 0.35
+ARM_ADAPTIVE_ASSIST_MAX_STEP_NM = 0.003
+ARM_ADAPTIVE_ASSIST_SETTLE_S = 0.75
+ARM_ADAPTIVE_ASSIST_CONFIRM_S = 0.30
+ARM_ADAPTIVE_ASSIST_OVERSHOOT_BLEED_NM_S = 0.75
 ARM_FEEDBACK_START_MAX_AGE_S = 1.0
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
@@ -174,7 +177,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.11"
+APP_VERSION = "2026.09.03.13"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -506,6 +509,8 @@ def arm_twist_safety_check(
     warnings: List[str] = []
     labels = {"base": "Base", "shoulder": "Shoulder", "elbow": "Elbow"}
     for axis in arm_axes_for_count(joint_count):
+        if axis not in ARM_TWIST_LIMIT_AXES:
+            continue
         angle = float(joint_angles.get(axis, 0.0))
         limit = twist_limit_rad(twist_limits.get(axis, ARM_TWIST_DEFAULT_LIMIT_RAD))
         if abs(angle) > limit + 0.000001:
@@ -713,6 +718,8 @@ class DashboardController:
         self.arm_torque_biases = {axis: 0.0 for axis in ARM_AXES}
         self.arm_adaptive_assist_enabled = False
         self.arm_adaptive_assist_trims = {axis: 0.0 for axis in ARM_AXES}
+        self.arm_adaptive_assist_error_signs = {axis: 0 for axis in ARM_AXES}
+        self.arm_adaptive_assist_error_since = {axis: 0.0 for axis in ARM_AXES}
         self.arm_adaptive_assist_last_update_at = time.monotonic()
         self.arm_adaptive_assist_pause_until = 0.0
         self.arm_position_configured = False
@@ -1453,7 +1460,10 @@ class DashboardController:
                     "link1": self.arm_link_1,
                     "link2": self.arm_link_2,
                     "radii": dict(self.arm_link_radii),
-                    "twistLimits": dict(self.arm_twist_limits),
+                    "twistLimits": {
+                        axis: self.arm_twist_limits[axis]
+                        for axis in ARM_TWIST_LIMIT_AXES
+                    },
                     "elbowUp": self.arm_elbow_up,
                     "target": dict(self.arm_target),
                     "velocityLimit": self.arm_velocity_limit,
@@ -1961,6 +1971,8 @@ class DashboardController:
 
     def reset_arm_adaptive_assist_trims(self) -> None:
         self.arm_adaptive_assist_trims = {axis: 0.0 for axis in ARM_AXES}
+        self.arm_adaptive_assist_error_signs = {axis: 0 for axis in ARM_AXES}
+        self.arm_adaptive_assist_error_since = {axis: 0.0 for axis in ARM_AXES}
         self.arm_adaptive_assist_last_update_at = time.monotonic()
         self.arm_adaptive_assist_pause_until = 0.0
 
@@ -2117,6 +2129,23 @@ class DashboardController:
             return feedback
         return commanded
 
+    def arm_feedback_for_axis(self, axis: str, now: Optional[float] = None) -> Tuple[Optional[float], Optional[float]]:
+        if now is None:
+            now = time.monotonic()
+        motor_id = self.arm_motor_ids[axis] & 0xFF
+        with self.lock:
+            feedback = self.feedback_by_motor.get(motor_id)
+            seen_at = self.feedback_at_by_motor.get(motor_id)
+        if feedback is None or seen_at is None or now - seen_at > ARM_FEEDBACK_START_MAX_AGE_S:
+            return None, None
+        position = feedback.get("positionRad")
+        if not isinstance(position, (int, float)) or not math.isfinite(float(position)):
+            return None, None
+        velocity = feedback.get("velocityRadS")
+        if not isinstance(velocity, (int, float)) or not math.isfinite(float(velocity)):
+            velocity = None
+        return float(position), None if velocity is None else float(velocity)
+
     def update_arm_adaptive_assist(self, now: Optional[float] = None) -> None:
         if not self.arm_adaptive_assist_enabled:
             return
@@ -2136,6 +2165,8 @@ class DashboardController:
         for axis in ARM_ADAPTIVE_ASSIST_AXES:
             if axis not in active_axes:
                 self.arm_adaptive_assist_trims[axis] = 0.0
+                self.arm_adaptive_assist_error_signs[axis] = 0
+                self.arm_adaptive_assist_error_since[axis] = 0.0
 
         for axis in learn_axes:
             try:
@@ -2144,37 +2175,95 @@ class DashboardController:
             except (TypeError, ValueError):
                 continue
             if target_velocity > ARM_ADAPTIVE_ASSIST_MAX_TARGET_VEL_RAD_S:
+                self.arm_adaptive_assist_error_signs[axis] = 0
                 continue
 
-            motor_id = self.arm_motor_ids[axis] & 0xFF
-            with self.lock:
-                feedback = self.feedback_by_motor.get(motor_id)
-                seen_at = self.feedback_at_by_motor.get(motor_id)
-            if feedback is None or seen_at is None or now - seen_at > ARM_FEEDBACK_START_MAX_AGE_S:
+            position, feedback_velocity = self.arm_feedback_for_axis(axis, now)
+            if position is None:
+                self.arm_adaptive_assist_error_signs[axis] = 0
+                continue
+            velocity = feedback_velocity or 0.0
+            if abs(velocity) > ARM_ADAPTIVE_ASSIST_MAX_FEEDBACK_VEL_RAD_S:
+                self.arm_adaptive_assist_error_signs[axis] = 0
                 continue
 
-            position = feedback.get("positionRad")
-            velocity = feedback.get("velocityRadS")
-            if not isinstance(position, (int, float)) or not math.isfinite(float(position)):
-                continue
-            if isinstance(velocity, (int, float)) and abs(float(velocity)) > ARM_ADAPTIVE_ASSIST_MAX_FEEDBACK_VEL_RAD_S:
-                continue
-
-            error = target_position - float(position)
+            error = target_position - position
             abs_error = abs(error)
+            current = self.arm_adaptive_assist_trims.get(axis, 0.0)
+            if current * error < 0.0 and abs_error > ARM_ADAPTIVE_ASSIST_DEADBAND_RAD:
+                bleed = min(abs(current), ARM_ADAPTIVE_ASSIST_OVERSHOOT_BLEED_NM_S * dt)
+                self.arm_adaptive_assist_trims[axis] = current - math.copysign(bleed, current)
+                current = self.arm_adaptive_assist_trims[axis]
+
             if abs_error <= ARM_ADAPTIVE_ASSIST_DEADBAND_RAD:
+                self.arm_adaptive_assist_error_signs[axis] = 0
+                self.arm_adaptive_assist_error_since[axis] = 0.0
                 continue
             if abs_error > ARM_ADAPTIVE_ASSIST_LEARN_WINDOW_RAD:
+                self.arm_adaptive_assist_error_signs[axis] = 0
+                self.arm_adaptive_assist_error_since[axis] = 0.0
+                continue
+            if abs(velocity) > 0.0001 and velocity * error > 0.0:
+                self.arm_adaptive_assist_error_signs[axis] = 0
+                self.arm_adaptive_assist_error_since[axis] = 0.0
+                continue
+
+            error_sign = 1 if error > 0.0 else -1
+            if self.arm_adaptive_assist_error_signs.get(axis, 0) != error_sign:
+                self.arm_adaptive_assist_error_signs[axis] = error_sign
+                self.arm_adaptive_assist_error_since[axis] = now
+                continue
+            if now - self.arm_adaptive_assist_error_since.get(axis, now) < ARM_ADAPTIVE_ASSIST_CONFIRM_S:
                 continue
 
             learn_error = error - math.copysign(ARM_ADAPTIVE_ASSIST_DEADBAND_RAD, error)
             delta = learn_error * ARM_ADAPTIVE_ASSIST_LEARN_RATE_NM_PER_RAD_S * dt
             delta = max(-ARM_ADAPTIVE_ASSIST_MAX_STEP_NM, min(ARM_ADAPTIVE_ASSIST_MAX_STEP_NM, delta))
-            current = self.arm_adaptive_assist_trims.get(axis, 0.0)
             self.arm_adaptive_assist_trims[axis] = max(
                 -ARM_ADAPTIVE_ASSIST_MAX_NM,
                 min(ARM_ADAPTIVE_ASSIST_MAX_NM, current + delta),
             )
+
+    def arm_scaled_torque_bias(
+        self,
+        axis: str,
+        bias: float,
+        target_position: float,
+        target_velocity: float,
+        feedback_missing_scale: float,
+        target_scale: float,
+        overshoot_scale: float,
+        boost_moving_with_load: bool = True,
+    ) -> float:
+        bias = max(-ARM_TORQUE_BIAS_MAX_NM, min(ARM_TORQUE_BIAS_MAX_NM, bias))
+        if abs(bias) <= 0.000001:
+            return 0.0
+
+        assist_direction = 1.0 if bias > 0.0 else -1.0
+        moving_with_load = target_velocity * assist_direction > 0.0001
+        position, _velocity = self.arm_feedback_for_axis(axis)
+        if position is None:
+            scale = max(0.0, feedback_missing_scale)
+            if boost_moving_with_load and moving_with_load:
+                scale = max(scale, ARM_ASSIST_MOVING_WITH_LOAD_SCALE)
+            return bias * scale
+
+        lag_toward_target = (target_position - position) * assist_direction
+        if lag_toward_target >= ARM_ASSIST_FADE_BAND_RAD:
+            scale = 1.0
+        elif lag_toward_target >= 0.0:
+            fade = lag_toward_target / ARM_ASSIST_FADE_BAND_RAD
+            scale = target_scale + ((1.0 - target_scale) * fade)
+        else:
+            overshoot = -lag_toward_target
+            if overshoot >= ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD:
+                scale = overshoot_scale
+            else:
+                fade = overshoot / ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD
+                scale = target_scale - ((target_scale - overshoot_scale) * fade)
+        if boost_moving_with_load and moving_with_load:
+            scale = max(scale, ARM_ASSIST_MOVING_WITH_LOAD_SCALE)
+        return bias * max(0.0, scale)
 
     def arm_effective_torque_bias(
         self,
@@ -2182,51 +2271,30 @@ class DashboardController:
         target_position: float,
         target_velocity: float = 0.0,
     ) -> float:
-        bias = self.arm_torque_biases.get(axis, 0.0)
+        manual_bias = self.arm_torque_biases.get(axis, 0.0)
+        torque_ff = self.arm_scaled_torque_bias(
+            axis,
+            manual_bias,
+            target_position,
+            target_velocity,
+            ARM_ASSIST_FEEDBACK_MISSING_SCALE,
+            ARM_ASSIST_TARGET_SCALE,
+            ARM_ASSIST_OVERSHOOT_SCALE,
+            boost_moving_with_load=True,
+        )
         if self.arm_adaptive_assist_enabled and axis in ARM_ADAPTIVE_ASSIST_AXES:
-            bias += self.arm_adaptive_assist_trims.get(axis, 0.0)
-        bias = max(-ARM_TORQUE_BIAS_MAX_NM, min(ARM_TORQUE_BIAS_MAX_NM, bias))
-        if abs(bias) <= 0.000001:
-            return 0.0
-
-        assist_direction = 1.0 if bias > 0.0 else -1.0
-        moving_with_load = target_velocity * assist_direction > 0.0001
-
-        motor_id = self.arm_motor_ids[axis] & 0xFF
-        now = time.monotonic()
-        with self.lock:
-            feedback = self.feedback_by_motor.get(motor_id)
-            seen_at = self.feedback_at_by_motor.get(motor_id)
-            if feedback is None or seen_at is None or now - seen_at > ARM_FEEDBACK_START_MAX_AGE_S:
-                scale = ARM_ASSIST_FEEDBACK_MISSING_SCALE
-                if moving_with_load:
-                    scale = max(scale, ARM_ASSIST_MOVING_WITH_LOAD_SCALE)
-                return bias * scale
-            position = feedback.get("positionRad")
-            if not isinstance(position, (int, float)) or not math.isfinite(float(position)):
-                scale = ARM_ASSIST_FEEDBACK_MISSING_SCALE
-                if moving_with_load:
-                    scale = max(scale, ARM_ASSIST_MOVING_WITH_LOAD_SCALE)
-                return bias * scale
-
-        lag_toward_target = (target_position - float(position)) * assist_direction
-        if lag_toward_target >= ARM_ASSIST_FADE_BAND_RAD:
-            scale = 1.0
-        elif lag_toward_target >= 0.0:
-            fade = lag_toward_target / ARM_ASSIST_FADE_BAND_RAD
-            scale = ARM_ASSIST_TARGET_SCALE + ((1.0 - ARM_ASSIST_TARGET_SCALE) * fade)
-        else:
-            overshoot = -lag_toward_target
-            if overshoot >= ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD:
-                scale = ARM_ASSIST_OVERSHOOT_SCALE
-            else:
-                fade = overshoot / ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD
-                scale = ARM_ASSIST_TARGET_SCALE - (
-                    (ARM_ASSIST_TARGET_SCALE - ARM_ASSIST_OVERSHOOT_SCALE) * fade
-                )
-        if moving_with_load:
-            scale = max(scale, ARM_ASSIST_MOVING_WITH_LOAD_SCALE)
-        return bias * scale
+            adaptive_bias = self.arm_adaptive_assist_trims.get(axis, 0.0)
+            torque_ff += self.arm_scaled_torque_bias(
+                axis,
+                adaptive_bias,
+                target_position,
+                target_velocity,
+                0.0,
+                0.75,
+                0.0,
+                boost_moving_with_load=False,
+            )
+        return max(-ARM_TORQUE_BIAS_MAX_NM, min(ARM_TORQUE_BIAS_MAX_NM, torque_ff))
 
     def clear_arm_route(self) -> None:
         self.arm_route_waypoints.clear()
@@ -3382,7 +3450,10 @@ class DashboardController:
                     "link1": self.arm_link_1,
                     "link2": self.arm_link_2,
                     "radii": dict(self.arm_link_radii),
-                    "twistLimits": dict(self.arm_twist_limits),
+                    "twistLimits": {
+                        axis: self.arm_twist_limits[axis]
+                        for axis in ARM_TWIST_LIMIT_AXES
+                    },
                     "target": dict(self.arm_target),
                     "elbowUp": self.arm_elbow_up,
                     "velocityLimit": self.arm_velocity_limit,

@@ -33,6 +33,7 @@ const AXIS_LABELS = {
   shoulder: "Shoulder",
   elbow: "Elbow",
 };
+const TWIST_LIMIT_AXES = new Set(["base", "shoulder", "elbow"]);
 const TARGET_INPUT_AXES = {
   armTargetXInput: "x",
   armTargetYInput: "y",
@@ -1203,6 +1204,7 @@ function armTwistWarnings(arm, joints) {
   const warnings = [];
   if (!joints) return warnings;
   for (const axis of activeAxesForArm(arm)) {
+    if (!TWIST_LIMIT_AXES.has(axis)) continue;
     const angle = Number(joints[axis] || 0);
     if (!Number.isFinite(angle)) continue;
     const limit = normalizeTwistLimitRad(arm.twistLimits && arm.twistLimits[axis]);
