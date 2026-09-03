@@ -130,6 +130,15 @@ ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD = math.radians(3.0)
 ARM_ASSIST_OVERSHOOT_SCALE = 0.35
 ARM_ASSIST_FEEDBACK_MISSING_SCALE = 0.65
 ARM_ASSIST_MOVING_WITH_LOAD_SCALE = 0.90
+ARM_ADAPTIVE_ASSIST_AXES = ("shoulder", "elbow")
+ARM_ADAPTIVE_ASSIST_MAX_NM = 2.0
+ARM_ADAPTIVE_ASSIST_DEADBAND_RAD = math.radians(0.8)
+ARM_ADAPTIVE_ASSIST_LEARN_WINDOW_RAD = math.radians(18.0)
+ARM_ADAPTIVE_ASSIST_MAX_FEEDBACK_VEL_RAD_S = 0.12
+ARM_ADAPTIVE_ASSIST_MAX_TARGET_VEL_RAD_S = 0.03
+ARM_ADAPTIVE_ASSIST_LEARN_RATE_NM_PER_RAD_S = 0.85
+ARM_ADAPTIVE_ASSIST_MAX_STEP_NM = 0.006
+ARM_ADAPTIVE_ASSIST_SETTLE_S = 0.35
 ARM_FEEDBACK_START_MAX_AGE_S = 1.0
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
@@ -164,7 +173,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.8"
+APP_VERSION = "2026.09.03.9"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -173,6 +182,23 @@ def parse_int(value: Any, default: int) -> int:
     if isinstance(value, int):
         return value
     return int(str(value), 0)
+
+
+def parse_bool(value: Any, default: bool = False) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return default
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on", "enabled"):
+        return True
+    if text in ("0", "false", "no", "off", "disabled"):
+        return False
+    return default
 
 
 def private_device_id(value: Any, name: str, default: Optional[int] = None, allow_zero: bool = False) -> int:
@@ -678,6 +704,10 @@ class DashboardController:
         self.arm_damping_kd = ARM_DEFAULT_DAMPING_KD
         self.arm_current_limit = ARM_DEFAULT_CURRENT_LIMIT_A
         self.arm_torque_biases = {axis: 0.0 for axis in ARM_AXES}
+        self.arm_adaptive_assist_enabled = False
+        self.arm_adaptive_assist_trims = {axis: 0.0 for axis in ARM_AXES}
+        self.arm_adaptive_assist_last_update_at = time.monotonic()
+        self.arm_adaptive_assist_pause_until = 0.0
         self.arm_position_configured = False
         self.arm_position_signature: Optional[Tuple[Any, ...]] = None
         self.arm_current_limit_signature: Optional[Tuple[Any, ...]] = None
@@ -781,6 +811,7 @@ class DashboardController:
             self.position_configured = False
             self.arm_position_configured = False
             self.clear_arm_route()
+            self.reset_arm_adaptive_assist_trims()
             next_serial_port = serial_port or getattr(self.bus, "serial_port", DEFAULT_SERIAL_PORT)
             next_serial_baud = serial_baud or getattr(self.bus, "serial_baud", DEFAULT_SERIAL_BAUD)
             self.connected = False
@@ -1303,6 +1334,8 @@ class DashboardController:
             return self.move_arm_preset(payload)
         if command == "arm-home-zero":
             return self.home_arm_zero(payload)
+        if command == "arm-adaptive-assist":
+            return self.set_arm_adaptive_assist(payload)
         if command == "arm-stop":
             self.stop_arm()
             return {"ok": True}
@@ -1369,6 +1402,7 @@ class DashboardController:
                     self.position_configured = False
                     self.arm_position_configured = False
                     self.clear_arm_route()
+                    self.reset_arm_adaptive_assist_trims()
                     self.oscillating = False
                     self.jog_active = False
             if bus_changed:
@@ -1421,6 +1455,9 @@ class DashboardController:
                     "dampingKd": self.arm_damping_kd,
                     "currentLimit": self.arm_current_limit,
                     "torqueBiases": dict(self.arm_torque_biases),
+                    "adaptiveAssist": {
+                        "enabled": self.arm_adaptive_assist_enabled,
+                    },
                     "offsets": dict(self.arm_offsets),
                     "directions": dict(self.arm_directions),
                 },
@@ -1463,6 +1500,11 @@ class DashboardController:
         torque_biases = arm.get("torqueBiases")
         if not isinstance(torque_biases, dict):
             torque_biases = {}
+        adaptive_assist = arm.get("adaptiveAssist")
+        if isinstance(adaptive_assist, dict):
+            adaptive_assist_enabled = adaptive_assist.get("enabled", self.arm_adaptive_assist_enabled)
+        else:
+            adaptive_assist_enabled = adaptive_assist
         target = arm.get("target")
         if not isinstance(target, dict):
             target = {}
@@ -1549,6 +1591,10 @@ class DashboardController:
             "armElbowTorqueBias": payload.get(
                 "armElbowTorqueBias",
                 torque_biases.get("elbow", self.arm_torque_biases["elbow"]),
+            ),
+            "armAdaptiveAssist": payload.get(
+                "armAdaptiveAssist",
+                adaptive_assist_enabled,
             ),
             "armBaseOffset": payload.get(
                 "armBaseOffset",
@@ -1638,6 +1684,7 @@ class DashboardController:
                 self.position_configured = False
                 self.arm_position_configured = False
                 self.clear_arm_route()
+                self.reset_arm_adaptive_assist_trims()
                 self.oscillating = False
                 self.jog_active = False
                 self.commanded_speed = 0.0
@@ -1725,6 +1772,7 @@ class DashboardController:
         self.position_configured = False
         self.arm_position_configured = False
         self.clear_arm_route()
+        self.reset_arm_adaptive_assist_trims()
         self.clear_private_fault()
 
     def configure_private_velocity(self) -> bool:
@@ -1732,6 +1780,7 @@ class DashboardController:
         self.position_configured = False
         self.arm_position_configured = False
         self.clear_arm_route()
+        self.reset_arm_adaptive_assist_trims()
         self.oscillating = False
         self.jog_active = False
         self.log(
@@ -1787,6 +1836,7 @@ class DashboardController:
         self.position_configured = False
         self.arm_position_configured = False
         self.clear_arm_route()
+        self.reset_arm_adaptive_assist_trims()
         self.oscillating = False
         self.jog_active = False
         self.commanded_speed = 0.0
@@ -1884,7 +1934,32 @@ class DashboardController:
         )
         return True
 
+    def arm_adaptive_assist_config_signature(self) -> Tuple[Any, ...]:
+        axes = tuple(axis for axis in ARM_ADAPTIVE_ASSIST_AXES if axis in self.active_arm_axes())
+        return (
+            self.arm_joint_count,
+            round(self.arm_link_1, 6),
+            round(self.arm_link_2, 6),
+            self.arm_elbow_up,
+            tuple(
+                (
+                    axis,
+                    self.arm_motor_ids[axis] & 0xFF,
+                    self.arm_directions[axis],
+                    round(self.arm_torque_biases.get(axis, 0.0), 6),
+                )
+                for axis in axes
+            ),
+        )
+
+    def reset_arm_adaptive_assist_trims(self) -> None:
+        self.arm_adaptive_assist_trims = {axis: 0.0 for axis in ARM_AXES}
+        self.arm_adaptive_assist_last_update_at = time.monotonic()
+        self.arm_adaptive_assist_pause_until = 0.0
+
     def apply_arm_payload(self, payload: Dict[str, Any]) -> None:
+        previous_adaptive_enabled = self.arm_adaptive_assist_enabled
+        previous_adaptive_signature = self.arm_adaptive_assist_config_signature()
         self.arm_joint_count = arm_joint_count(payload.get("armJointCount"), self.arm_joint_count)
         self.arm_motor_ids = {
             "base": parse_int(payload.get("armBaseMotorId"), self.arm_motor_ids["base"]) & 0xFF,
@@ -1927,7 +2002,7 @@ class DashboardController:
             self.arm_link_1,
             self.arm_link_2,
         )
-        self.arm_elbow_up = bool(payload.get("armElbowUp", self.arm_elbow_up))
+        self.arm_elbow_up = parse_bool(payload.get("armElbowUp"), self.arm_elbow_up)
         self.arm_velocity_limit = positive_float(
             payload.get("armVelocityLimit"),
             self.arm_velocity_limit,
@@ -1970,6 +2045,16 @@ class DashboardController:
                 ARM_TORQUE_BIAS_MAX_NM,
             ),
         }
+        self.arm_adaptive_assist_enabled = parse_bool(
+            payload.get("armAdaptiveAssist"),
+            self.arm_adaptive_assist_enabled,
+        )
+        if (
+            not self.arm_adaptive_assist_enabled
+            or previous_adaptive_enabled != self.arm_adaptive_assist_enabled
+            or previous_adaptive_signature != self.arm_adaptive_assist_config_signature()
+        ):
+            self.reset_arm_adaptive_assist_trims()
 
     def arm_motor_target(self, axis: str, joint_angle: float) -> float:
         return self.arm_offsets[axis] + (self.arm_directions[axis] * joint_angle)
@@ -2025,6 +2110,65 @@ class DashboardController:
             return feedback
         return commanded
 
+    def update_arm_adaptive_assist(self, now: Optional[float] = None) -> None:
+        if not self.arm_adaptive_assist_enabled:
+            return
+        if now is None:
+            now = time.monotonic()
+
+        previous = self.arm_adaptive_assist_last_update_at or now
+        dt = max(0.0, min(0.20, now - previous))
+        self.arm_adaptive_assist_last_update_at = now
+        if dt <= 0.0:
+            return
+        if now < self.arm_adaptive_assist_pause_until or self.arm_route_waypoints:
+            return
+
+        active_axes = set(self.active_arm_axes())
+        learn_axes = [axis for axis in ARM_ADAPTIVE_ASSIST_AXES if axis in active_axes]
+        for axis in ARM_ADAPTIVE_ASSIST_AXES:
+            if axis not in active_axes:
+                self.arm_adaptive_assist_trims[axis] = 0.0
+
+        for axis in learn_axes:
+            try:
+                target_position = float(self.arm_motor_targets.get(axis, 0.0))
+                target_velocity = abs(float(self.arm_motor_velocities.get(axis, 0.0)))
+            except (TypeError, ValueError):
+                continue
+            if target_velocity > ARM_ADAPTIVE_ASSIST_MAX_TARGET_VEL_RAD_S:
+                continue
+
+            motor_id = self.arm_motor_ids[axis] & 0xFF
+            with self.lock:
+                feedback = self.feedback_by_motor.get(motor_id)
+                seen_at = self.feedback_at_by_motor.get(motor_id)
+            if feedback is None or seen_at is None or now - seen_at > ARM_FEEDBACK_START_MAX_AGE_S:
+                continue
+
+            position = feedback.get("positionRad")
+            velocity = feedback.get("velocityRadS")
+            if not isinstance(position, (int, float)) or not math.isfinite(float(position)):
+                continue
+            if isinstance(velocity, (int, float)) and abs(float(velocity)) > ARM_ADAPTIVE_ASSIST_MAX_FEEDBACK_VEL_RAD_S:
+                continue
+
+            error = target_position - float(position)
+            abs_error = abs(error)
+            if abs_error <= ARM_ADAPTIVE_ASSIST_DEADBAND_RAD:
+                continue
+            if abs_error > ARM_ADAPTIVE_ASSIST_LEARN_WINDOW_RAD:
+                continue
+
+            learn_error = error - math.copysign(ARM_ADAPTIVE_ASSIST_DEADBAND_RAD, error)
+            delta = learn_error * ARM_ADAPTIVE_ASSIST_LEARN_RATE_NM_PER_RAD_S * dt
+            delta = max(-ARM_ADAPTIVE_ASSIST_MAX_STEP_NM, min(ARM_ADAPTIVE_ASSIST_MAX_STEP_NM, delta))
+            current = self.arm_adaptive_assist_trims.get(axis, 0.0)
+            self.arm_adaptive_assist_trims[axis] = max(
+                -ARM_ADAPTIVE_ASSIST_MAX_NM,
+                min(ARM_ADAPTIVE_ASSIST_MAX_NM, current + delta),
+            )
+
     def arm_effective_torque_bias(
         self,
         axis: str,
@@ -2032,6 +2176,9 @@ class DashboardController:
         target_velocity: float = 0.0,
     ) -> float:
         bias = self.arm_torque_biases.get(axis, 0.0)
+        if self.arm_adaptive_assist_enabled and axis in ARM_ADAPTIVE_ASSIST_AXES:
+            bias += self.arm_adaptive_assist_trims.get(axis, 0.0)
+        bias = max(-ARM_TORQUE_BIAS_MAX_NM, min(ARM_TORQUE_BIAS_MAX_NM, bias))
         if abs(bias) <= 0.000001:
             return 0.0
 
@@ -2253,22 +2400,23 @@ class DashboardController:
         for axis in self.active_arm_axes():
             self.send_private_operation_control_to(
                 self.arm_motor_ids[axis],
-            self.arm_motor_targets[axis],
-            self.arm_motor_velocities.get(axis, 0.0),
-            self.arm_position_kp,
-            self.arm_damping_kd,
-            self.arm_effective_torque_bias(
-                axis,
                 self.arm_motor_targets[axis],
                 self.arm_motor_velocities.get(axis, 0.0),
-            ),
-        )
+                self.arm_position_kp,
+                self.arm_damping_kd,
+                self.arm_effective_torque_bias(
+                    axis,
+                    self.arm_motor_targets[axis],
+                    self.arm_motor_velocities.get(axis, 0.0),
+                ),
+            )
         self.arm_route_waypoints = deque(remaining_waypoints)
         self.arm_route_next_at = (
             time.monotonic() + self.arm_route_waypoint_interval(first_waypoint)
             if remaining_waypoints
             else 0.0
         )
+        self.arm_adaptive_assist_pause_until = time.monotonic() + ARM_ADAPTIVE_ASSIST_SETTLE_S
         self.arm_position_configured = True
         self.arm_position_signature = config_signature
         self.last_arm_position_refresh_at = time.monotonic()
@@ -2358,6 +2506,7 @@ class DashboardController:
             self.position_configured = False
             self.arm_position_configured = False
             self.clear_arm_route()
+            self.reset_arm_adaptive_assist_trims()
             self.commanded_speed = 0.0
 
         offsets: Dict[str, float] = dict(self.arm_offsets)
@@ -2570,6 +2719,32 @@ class DashboardController:
             ) if ok else f"Arm preset {label} failed to start",
         }
 
+    def set_arm_adaptive_assist(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        was_enabled = self.arm_adaptive_assist_enabled
+        self.apply_arm_payload(payload)
+        now = time.monotonic()
+        self.arm_adaptive_assist_pause_until = now + ARM_ADAPTIVE_ASSIST_SETTLE_S
+        if self.arm_position_configured:
+            for axis in self.active_arm_axes():
+                self.send_private_operation_control_to(
+                    self.arm_motor_ids[axis],
+                    self.arm_motor_targets[axis],
+                    self.arm_motor_velocities.get(axis, 0.0),
+                    self.arm_position_kp,
+                    self.arm_damping_kd,
+                    self.arm_effective_torque_bias(
+                        axis,
+                        self.arm_motor_targets[axis],
+                        self.arm_motor_velocities.get(axis, 0.0),
+                    ),
+                )
+            self.last_arm_position_refresh_at = now
+        state = "on" if self.arm_adaptive_assist_enabled else "off"
+        suffix = "; learned trims reset" if was_enabled != self.arm_adaptive_assist_enabled else ""
+        message = f"Adaptive assist {state}{suffix}"
+        self.log(message)
+        return {"ok": True, "message": message}
+
     def send_arm_position_targets(self) -> None:
         now = time.monotonic()
         if self.arm_route_waypoints and now >= self.arm_route_next_at:
@@ -2579,20 +2754,22 @@ class DashboardController:
                 self.arm_route_next_at = now + self.arm_route_waypoint_interval(waypoint)
             else:
                 self.arm_route_next_at = 0.0
+                self.arm_adaptive_assist_pause_until = now + ARM_ADAPTIVE_ASSIST_SETTLE_S
                 self.log("Arm route complete")
+        self.update_arm_adaptive_assist(now)
         for axis in self.active_arm_axes():
             self.send_private_operation_control_to(
                 self.arm_motor_ids[axis],
-            self.arm_motor_targets[axis],
-            self.arm_motor_velocities.get(axis, 0.0),
-            self.arm_position_kp,
-            self.arm_damping_kd,
-            self.arm_effective_torque_bias(
-                axis,
                 self.arm_motor_targets[axis],
                 self.arm_motor_velocities.get(axis, 0.0),
-            ),
-        )
+                self.arm_position_kp,
+                self.arm_damping_kd,
+                self.arm_effective_torque_bias(
+                    axis,
+                    self.arm_motor_targets[axis],
+                    self.arm_motor_velocities.get(axis, 0.0),
+                ),
+            )
         self.last_arm_position_refresh_at = time.monotonic()
 
     def stop_arm(self) -> None:
@@ -2600,6 +2777,7 @@ class DashboardController:
         self.position_configured = False
         self.arm_position_configured = False
         self.clear_arm_route()
+        self.reset_arm_adaptive_assist_trims()
         self.oscillating = False
         self.jog_active = False
         self.commanded_speed = 0.0
@@ -2613,6 +2791,7 @@ class DashboardController:
         self.velocity_configured = False
         self.position_configured = False
         self.clear_arm_route()
+        self.reset_arm_adaptive_assist_trims()
         self.oscillating = False
         self.jog_active = False
         self.commanded_speed = 0.0
@@ -2650,6 +2829,7 @@ class DashboardController:
         self.position_configured = False
         self.arm_position_configured = False
         self.clear_arm_route()
+        self.reset_arm_adaptive_assist_trims()
         self.log(f"private speed={speed:+.2f} rad/s sent")
         return True
 
@@ -2692,6 +2872,7 @@ class DashboardController:
             self.position_configured = False
             self.arm_position_configured = False
             self.clear_arm_route()
+            self.reset_arm_adaptive_assist_trims()
             self.commanded_speed = 0.0
             self.log("Stop/disable sent")
 
@@ -2737,6 +2918,7 @@ class DashboardController:
             self.position_configured = False
             self.arm_position_configured = False
             self.clear_arm_route()
+            self.reset_arm_adaptive_assist_trims()
             self.commanded_speed = 0.0
 
         ping = self.ping_private_candidates(old_id, COMMAND_TIMEOUT_S)
@@ -3159,6 +3341,12 @@ class DashboardController:
                     "dampingKd": self.arm_damping_kd,
                     "currentLimit": self.arm_current_limit,
                     "torqueBiases": dict(self.arm_torque_biases),
+                    "adaptiveAssist": {
+                        "enabled": self.arm_adaptive_assist_enabled,
+                        "trims": dict(self.arm_adaptive_assist_trims),
+                        "maxTrim": ARM_ADAPTIVE_ASSIST_MAX_NM,
+                        "deadbandDeg": math.degrees(ARM_ADAPTIVE_ASSIST_DEADBAND_RAD),
+                    },
                     "configured": self.arm_position_configured,
                     "routeRemaining": len(self.arm_route_waypoints),
                     "jointAngles": dict(self.arm_joint_angles),

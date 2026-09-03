@@ -520,6 +520,14 @@
                         <span>Current Limit</span>
                         <input id="armCurrentLimitInput" type="number" min="0.05" max="10" step="0.05" value="4.00" inputmode="decimal">
                       </label>
+                      <label class="switch">
+                        <input id="armAdaptiveAssistToggle" type="checkbox">
+                        <span>Adaptive Assist</span>
+                      </label>
+                      <label class="assist-trim-readout">
+                        <span>Learned Trim</span>
+                        <output id="armAdaptiveAssistReadout">S +0.00 / E +0.00 Nm</output>
+                      </label>
                       <label>
                         <span>Shoulder Assist Nm</span>
                         <input id="armShoulderTorqueInput" type="number" min="-5" max="5" step="0.05" value="0.00" inputmode="decimal">

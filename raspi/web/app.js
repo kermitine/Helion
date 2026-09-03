@@ -77,6 +77,7 @@ const armControlIds = [
   "armKpInput",
   "armKdInput",
   "armCurrentLimitInput",
+  "armAdaptiveAssistToggle",
   "armShoulderTorqueInput",
   "armElbowTorqueInput",
   "armBaseOffsetInput",
@@ -308,7 +309,7 @@ function commandPayload(command) {
       positionKp: numberInput("positionKpInput"),
     };
   }
-  if (command === "arm-move" || command === "arm-home-zero" || command === "arm-preset") {
+  if (command === "arm-move" || command === "arm-home-zero" || command === "arm-preset" || command === "arm-adaptive-assist") {
     return {
       armJointCount: jointCountInput(),
       armBaseMotorId: selectedMotorValue("armBaseMotorIdInput", currentArmMotorValue("base")),
@@ -330,6 +331,7 @@ function commandPayload(command) {
       armPositionKp: numberInput("armKpInput"),
       armDampingKd: numberInput("armKdInput"),
       armCurrentLimit: numberInput("armCurrentLimitInput"),
+      armAdaptiveAssist: $("armAdaptiveAssistToggle").checked,
       armBaseTorqueBias: 0,
       armShoulderTorqueBias: numberInput("armShoulderTorqueInput"),
       armElbowTorqueBias: numberInput("armElbowTorqueInput"),
@@ -458,6 +460,9 @@ function collectValues() {
       positionKp: numberInput("armKpInput"),
       dampingKd: numberInput("armKdInput"),
       currentLimit: numberInput("armCurrentLimitInput"),
+      adaptiveAssist: {
+        enabled: $("armAdaptiveAssistToggle").checked,
+      },
       torqueBiases: {
         base: 0,
         shoulder: numberInput("armShoulderTorqueInput"),
@@ -493,6 +498,7 @@ function applyValuePayload(payload) {
   const directions = objectValue(arm.directions);
   const twistLimits = objectValue(arm.twistLimits);
   const torqueBiases = objectValue(arm.torqueBiases);
+  const adaptiveAssist = objectValue(arm.adaptiveAssist);
 
   setDirtyValue("serialPortInput", payload.serialPort);
   setDirtyValue("serialBaudInput", payload.serialBaud);
@@ -553,6 +559,7 @@ function applyValuePayload(payload) {
   setDirtyNumber("armKpInput", firstValue(arm.positionKp, payload.armPositionKp), 2);
   setDirtyNumber("armKdInput", firstValue(arm.dampingKd, payload.armDampingKd), 2);
   setDirtyNumber("armCurrentLimitInput", firstValue(arm.currentLimit, payload.armCurrentLimit), 2);
+  setDirtyChecked("armAdaptiveAssistToggle", firstValue(adaptiveAssist.enabled, payload.armAdaptiveAssist));
   setDirtyNumber(
     "armShoulderTorqueInput",
     firstValue(torqueBiases.shoulder, payload.armShoulderTorqueBias),
@@ -2105,6 +2112,20 @@ function updateJointModeUi() {
   });
 }
 
+function renderAdaptiveAssistReadout(adaptiveAssist) {
+  const el = $("armAdaptiveAssistReadout");
+  if (!el) return;
+  const trims = objectValue(adaptiveAssist.trims);
+  const shoulder = isFiniteNumber(trims.shoulder) ? trims.shoulder : 0;
+  const elbow = isFiniteNumber(trims.elbow) ? trims.elbow : 0;
+  const enabled = Boolean(adaptiveAssist.enabled);
+  const shoulderText = `S ${shoulder >= 0 ? "+" : ""}${shoulder.toFixed(2)}`;
+  const elbowText = jointCountInput() === 2 ? "" : ` / E ${elbow >= 0 ? "+" : ""}${elbow.toFixed(2)}`;
+  el.textContent = enabled
+    ? `${shoulderText}${elbowText} Nm`
+    : "Off";
+}
+
 function render(state) {
   const detectedMotors = normalizedMotorList(state.discoveredPrivate);
   setControlValue("serialPortInput", state.serialPort || "auto");
@@ -2144,6 +2165,7 @@ function render(state) {
   const armDirections = arm.directions || {};
   const armTwistLimits = arm.twistLimits || {};
   const armTorqueBiases = arm.torqueBiases || {};
+  const adaptiveAssist = arm.adaptiveAssist || {};
   const armTarget = arm.target || {};
   const usedArmMotors = new Set();
   const baseMotor = chooseDetectedMotor(detectedMotors, armIds.base, usedArmMotors);
@@ -2168,6 +2190,8 @@ function render(state) {
   setControlValue("armKpInput", numberOr(arm.positionKp, DEFAULT_ARM_POSITION_KP).toFixed(1));
   setControlValue("armKdInput", numberOr(arm.dampingKd, DEFAULT_ARM_DAMPING_KD).toFixed(1));
   setControlValue("armCurrentLimitInput", numberOr(arm.currentLimit, DEFAULT_ARM_CURRENT_LIMIT).toFixed(2));
+  setControlChecked("armAdaptiveAssistToggle", adaptiveAssist.enabled);
+  renderAdaptiveAssistReadout(adaptiveAssist);
   setControlValue("armShoulderTorqueInput", numberOr(armTorqueBiases.shoulder, 0).toFixed(2));
   setControlValue("armElbowTorqueInput", numberOr(armTorqueBiases.elbow, 0).toFixed(2));
   setControlValue("armBaseOffsetInput", Number(armOffsets.base || 0).toFixed(3));
@@ -2266,6 +2290,10 @@ armControlIds.forEach((id) => {
   };
   el.addEventListener("input", update);
   el.addEventListener("change", update);
+});
+
+$("armAdaptiveAssistToggle").addEventListener("change", () => {
+  sendCommand("arm-adaptive-assist", commandPayload("arm-adaptive-assist"));
 });
 
 $("speedSlider").addEventListener("input", () => {

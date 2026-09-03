@@ -754,6 +754,21 @@ select {
   grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
 }
 
+.assist-trim-readout {
+  min-height: 42px;
+  align-content: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #090909;
+  padding: 7px 10px;
+}
+
+.assist-trim-readout output {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.86rem;
+}
+
 .arm-actions {
   grid-template-columns: minmax(88px, 0.72fr) repeat(3, minmax(0, 1fr));
   margin-top: 14px;

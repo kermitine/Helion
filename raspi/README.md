@@ -214,6 +214,21 @@ adjust `Position Kp` only as needed for hold stiffness. If the arm slowly falls
 even when stable, raise current limit and add signed shoulder or elbow assist
 torque.
 
+**Adaptive Assist** adds a slow learned shoulder/elbow trim on top of the manual
+assist values. It learns only while the arm is holding still near the target,
+waits briefly after each routed move, ignores large errors or fast feedback, and
+clamps the runtime trim to `+/-2 Nm` per joint. The learned trim is intentionally
+not saved; it resets when adaptive assist is toggled, the arm is stopped, faults
+are cleared, Home Zero runs, or the arm's joint/motor/direction setup changes.
+
+To set it up, first make IK stable with Adaptive Assist off. Start with manual
+`Shoulder Assist Nm` and `Elbow Assist Nm` at `0.0` or a very small known-good
+baseline, move to a reachable hold pose, then turn **Adaptive Assist** on. The
+**Learned Trim** readout should change slowly as the arm settles. If it climbs to
+the `+/-2 Nm` cap, raise current limit or add a little manual assist baseline. If
+the trim moves the joint the wrong way, press **Stop Arm** and verify that joint's
+direction/home zero before trying again.
+
 Beginner loaded-arm tuning:
 
 ```text
