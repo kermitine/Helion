@@ -106,7 +106,7 @@ ARM_ROUTE_SAMPLE_S = ARM_OPERATION_REFRESH_S
 ARM_ROUTE_MIN_DURATION_S = 0.18
 ARM_ROUTE_VELOCITY_DURATION_FACTOR = 2.6
 ARM_ROUTE_ACCEL_DURATION_FACTOR = 8.5
-ARM_ROUTE_FEEDBACK_RESEED_RAD = math.radians(18.0)
+ARM_ROUTE_FEEDBACK_RESEED_RAD = math.radians(8.0)
 ARM_PRESET_MIN_RADIAL_SCALE = 0.42
 ARM_PRESET_MAX_RADIAL_SCALE = 0.72
 ARM_PRESET_MIN_Z_SCALE = 0.16
@@ -135,12 +135,17 @@ ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD = math.radians(3.0)
 ARM_ASSIST_OVERSHOOT_SCALE = -0.20
 ARM_ASSIST_FEEDBACK_MISSING_SCALE = 0.65
 ARM_ASSIST_MOVING_WITH_LOAD_SCALE = 0.90
-ARM_HOLD_ERROR_DEADBAND_RAD = math.radians(1.5)
+ARM_HOLD_ERROR_DEADBAND_RAD = math.radians(2.5)
 ARM_HOLD_ERROR_FULL_RAD = math.radians(12.0)
 ARM_HOLD_ERROR_MAX_NM = 0.65
 ARM_HOLD_ERROR_MAX_TARGET_VEL_RAD_S = 0.03
+ARM_HOLD_ERROR_FADE_TARGET_VEL_RAD_S = 0.35
 ARM_HOLD_ERROR_MAX_FEEDBACK_VEL_RAD_S = 0.20
 ARM_HOLD_ERROR_RAMP_S = 0.90
+ARM_HOLD_ERROR_RAMP_FLOOR = 0.75
+ARM_SETTLE_DAMPING_WINDOW_RAD = math.radians(10.0)
+ARM_SETTLE_DAMPING_FADE_TARGET_VEL_RAD_S = 0.25
+ARM_SETTLE_DAMPING_BOOST_KD = 1.25
 ARM_ADAPTIVE_ASSIST_AXES = ("shoulder", "elbow")
 ARM_ADAPTIVE_ASSIST_MAX_NM = 1.5
 ARM_ADAPTIVE_ASSIST_DEADBAND_RAD = math.radians(1.2)
@@ -186,7 +191,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.16"
+APP_VERSION = "2026.09.03.18"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1936,28 +1941,30 @@ class DashboardController:
             self.log(f"{axis} {fmt_id(motor_id)} damped arm setup failed: run_mode did not verify")
             return False
         torque_ff = self.arm_effective_torque_bias(axis, position, velocity)
+        kp, kd = self.arm_effective_operation_gains(axis, position, velocity)
         self.send_private_enable_to(motor_id)
         self.send_private_operation_control_to(
             motor_id,
             position,
             velocity,
-            self.arm_position_kp,
-            self.arm_damping_kd,
+            kp,
+            kd,
             torque_ff,
         )
         self.wait_private_status_for(motor_id, 0.30)
         self.write_private_param_f32_to(motor_id, PARAM_LIMIT_CUR, current_limit)
+        kp, kd = self.arm_effective_operation_gains(axis, position, velocity)
         self.send_private_operation_control_to(
             motor_id,
             position,
             velocity,
-            self.arm_position_kp,
-            self.arm_damping_kd,
+            kp,
+            kd,
             torque_ff,
         )
         self.log(
             f"{axis} {fmt_id(motor_id)} operation hold pos={position:+.3f} "
-            f"vel={velocity:+.3f} kp={self.arm_position_kp:.2f} kd={self.arm_damping_kd:.2f} "
+            f"vel={velocity:+.3f} kp={kp:.2f} kd={kd:.2f} "
             f"assist={torque_ff:+.2f}Nm current={current_limit:.2f}A"
         )
         return True
@@ -2288,7 +2295,8 @@ class DashboardController:
         ramp_until = getattr(self, "arm_hold_correction_ramp_until", 0.0)
         if ramp_until <= 0.0 or now >= ramp_until:
             return 1.0
-        return max(0.0, 1.0 - ((ramp_until - now) / ARM_HOLD_ERROR_RAMP_S))
+        progress = max(0.0, 1.0 - ((ramp_until - now) / ARM_HOLD_ERROR_RAMP_S))
+        return ARM_HOLD_ERROR_RAMP_FLOOR + ((1.0 - ARM_HOLD_ERROR_RAMP_FLOOR) * progress)
 
     def arm_effective_torque_bias(
         self,
@@ -2328,7 +2336,8 @@ class DashboardController:
         target_position: float,
         target_velocity: float = 0.0,
     ) -> float:
-        if abs(target_velocity) > ARM_HOLD_ERROR_MAX_TARGET_VEL_RAD_S or self.arm_route_waypoints:
+        target_speed = abs(target_velocity)
+        if target_speed >= ARM_HOLD_ERROR_FADE_TARGET_VEL_RAD_S:
             return 0.0
         now = time.monotonic()
         position, feedback_velocity = self.arm_feedback_for_axis(axis, now)
@@ -2342,8 +2351,52 @@ class DashboardController:
             return 0.0
         span = max(ARM_HOLD_ERROR_FULL_RAD - ARM_HOLD_ERROR_DEADBAND_RAD, 0.000001)
         scale = min(1.0, (abs_error - ARM_HOLD_ERROR_DEADBAND_RAD) / span)
+        if target_speed > ARM_HOLD_ERROR_MAX_TARGET_VEL_RAD_S:
+            velocity_span = max(
+                ARM_HOLD_ERROR_FADE_TARGET_VEL_RAD_S - ARM_HOLD_ERROR_MAX_TARGET_VEL_RAD_S,
+                0.000001,
+            )
+            velocity_fade = 1.0 - ((target_speed - ARM_HOLD_ERROR_MAX_TARGET_VEL_RAD_S) / velocity_span)
+            scale *= max(0.0, min(1.0, velocity_fade))
         scale *= self.arm_hold_error_correction_scale(now)
         return math.copysign(ARM_HOLD_ERROR_MAX_NM * scale, error)
+
+    def arm_effective_operation_gains(
+        self,
+        axis: str,
+        target_position: float,
+        target_velocity: float = 0.0,
+    ) -> Tuple[float, float]:
+        kp = max(0.0, min(ARM_POSITION_KP_MAX, self.arm_position_kp))
+        kd = max(0.0, min(ARM_DAMPING_KD_MAX, self.arm_damping_kd))
+        target_speed = abs(target_velocity)
+        if target_speed >= ARM_SETTLE_DAMPING_FADE_TARGET_VEL_RAD_S:
+            return kp, kd
+
+        position, _feedback_velocity = self.arm_feedback_for_axis(axis)
+        if position is None:
+            return kp, kd
+        error = abs(target_position - position)
+        if error >= ARM_SETTLE_DAMPING_WINDOW_RAD:
+            return kp, kd
+
+        speed_scale = 1.0 - (target_speed / ARM_SETTLE_DAMPING_FADE_TARGET_VEL_RAD_S)
+        error_scale = 1.0 - (error / ARM_SETTLE_DAMPING_WINDOW_RAD)
+        boost = ARM_SETTLE_DAMPING_BOOST_KD * max(0.0, speed_scale) * max(0.25, error_scale)
+        return kp, min(ARM_DAMPING_KD_MAX, kd + boost)
+
+    def send_arm_operation_control_for_axis(self, axis: str) -> None:
+        target_position = self.arm_motor_targets[axis]
+        target_velocity = self.arm_motor_velocities.get(axis, 0.0)
+        kp, kd = self.arm_effective_operation_gains(axis, target_position, target_velocity)
+        self.send_private_operation_control_to(
+            self.arm_motor_ids[axis],
+            target_position,
+            target_velocity,
+            kp,
+            kd,
+            self.arm_effective_torque_bias(axis, target_position, target_velocity),
+        )
 
     def clear_arm_route(self) -> None:
         self.arm_route_waypoints.clear()
@@ -2566,18 +2619,7 @@ class DashboardController:
             self.refresh_arm_current_limits_if_needed()
         self.apply_arm_route_waypoint(first_waypoint)
         for axis in self.active_arm_axes():
-            self.send_private_operation_control_to(
-                self.arm_motor_ids[axis],
-                self.arm_motor_targets[axis],
-                self.arm_motor_velocities.get(axis, 0.0),
-                self.arm_position_kp,
-                self.arm_damping_kd,
-                self.arm_effective_torque_bias(
-                    axis,
-                    self.arm_motor_targets[axis],
-                    self.arm_motor_velocities.get(axis, 0.0),
-                ),
-            )
+            self.send_arm_operation_control_for_axis(axis)
         route_now = time.monotonic()
         self.arm_route_waypoints = deque(remaining_waypoints)
         self.arm_route_next_at = (
@@ -2900,18 +2942,7 @@ class DashboardController:
         self.arm_adaptive_assist_pause_until = now + ARM_ADAPTIVE_ASSIST_SETTLE_S
         if self.arm_position_configured:
             for axis in self.active_arm_axes():
-                self.send_private_operation_control_to(
-                    self.arm_motor_ids[axis],
-                    self.arm_motor_targets[axis],
-                    self.arm_motor_velocities.get(axis, 0.0),
-                    self.arm_position_kp,
-                    self.arm_damping_kd,
-                    self.arm_effective_torque_bias(
-                        axis,
-                        self.arm_motor_targets[axis],
-                        self.arm_motor_velocities.get(axis, 0.0),
-                    ),
-                )
+                self.send_arm_operation_control_for_axis(axis)
             self.last_arm_position_refresh_at = now
         state = "on" if self.arm_adaptive_assist_enabled else "off"
         suffix = "; learned trims reset" if was_enabled != self.arm_adaptive_assist_enabled else ""
@@ -2933,18 +2964,7 @@ class DashboardController:
                 self.log("Arm route complete")
         self.update_arm_adaptive_assist(now)
         for axis in self.active_arm_axes():
-            self.send_private_operation_control_to(
-                self.arm_motor_ids[axis],
-                self.arm_motor_targets[axis],
-                self.arm_motor_velocities.get(axis, 0.0),
-                self.arm_position_kp,
-                self.arm_damping_kd,
-                self.arm_effective_torque_bias(
-                    axis,
-                    self.arm_motor_targets[axis],
-                    self.arm_motor_velocities.get(axis, 0.0),
-                ),
-            )
+            self.send_arm_operation_control_for_axis(axis)
         self.last_arm_position_refresh_at = time.monotonic()
 
     def stop_arm(self) -> None:
