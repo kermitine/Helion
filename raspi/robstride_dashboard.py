@@ -8,6 +8,7 @@ import json
 import math
 import mimetypes
 import os
+import subprocess
 import threading
 import time
 from collections import deque
@@ -91,6 +92,7 @@ MAX_LOG_LINES = 240
 MAX_FRAME_HISTORY = 600
 COMMAND_TIMEOUT_S = 0.6
 TELEMETRY_ACTIVE_WINDOW_S = 5.0
+SHUTDOWN_COMMAND_TIMEOUT_S = 2.0
 ARM_AXES = ("base", "shoulder", "elbow")
 ARM_JOINT_COUNTS = (2, 3)
 ARM_ROLE_DEFAULT_IDS = {"base": 0x01, "shoulder": 0x02, "elbow": 0x03}
@@ -115,8 +117,10 @@ ARM_POSITION_KP_MAX = 10.0
 ARM_DAMPING_KD_MAX = 5.0
 ARM_TORQUE_BIAS_MAX_NM = 5.0
 ARM_ASSIST_FADE_BAND_RAD = math.radians(7.0)
-ARM_ASSIST_TARGET_SCALE = 0.20
+ARM_ASSIST_TARGET_SCALE = 0.65
 ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD = math.radians(3.0)
+ARM_ASSIST_OVERSHOOT_SCALE = 0.35
+ARM_ASSIST_FEEDBACK_MISSING_SCALE = 0.65
 ARM_FEEDBACK_START_MAX_AGE_S = 1.0
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
@@ -125,6 +129,14 @@ ARM_MOTION_PRESET_LABELS = {
     "orbit": "Orbit",
     "flex": "Flex",
 }
+SHUTDOWN_COMMANDS = (
+    ("/usr/bin/sudo", "-n", "/usr/local/sbin/helion-poweroff"),
+    ("/usr/local/sbin/helion-poweroff",),
+    ("/usr/bin/systemctl", "poweroff"),
+    ("/bin/systemctl", "poweroff"),
+    ("/usr/sbin/shutdown", "-h", "now"),
+    ("/sbin/shutdown", "-h", "now"),
+)
 
 ROOT_DIR = Path(__file__).resolve().parent
 WEB_DIR = ROOT_DIR / "web"
@@ -134,7 +146,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.01.10"
+APP_VERSION = "2026.09.03.2"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -607,6 +619,7 @@ class DashboardController:
         self.arm_torque_biases = {axis: 0.0 for axis in ARM_AXES}
         self.arm_position_configured = False
         self.arm_position_signature: Optional[Tuple[Any, ...]] = None
+        self.arm_current_limit_signature: Optional[Tuple[Any, ...]] = None
         self.arm_motor_targets = {axis: 0.0 for axis in ARM_AXES}
         self.arm_joint_angles = {axis: 0.0 for axis in ARM_AXES}
         self.arm_route_waypoints: Deque[Dict[str, Dict[str, float]]] = deque()
@@ -719,6 +732,84 @@ class DashboardController:
         self.running = False
         with self.bus_lock:
             self.bus.close()
+
+    def shutdown_host(self) -> Dict[str, Any]:
+        self.log("Safe shutdown requested")
+        cleanup_errors: List[str] = []
+
+        try:
+            if self.connected:
+                self.stop_arm()
+        except Exception as exc:
+            cleanup_errors.append(f"arm stop failed: {exc}")
+            self.log(cleanup_errors[-1])
+
+        try:
+            if self.connected:
+                self.stop_and_disable()
+        except Exception as exc:
+            cleanup_errors.append(f"selected motor stop failed: {exc}")
+            self.log(cleanup_errors[-1])
+
+        try:
+            self.save_values()
+        except Exception as exc:
+            cleanup_errors.append(f"values save failed: {exc}")
+            self.log(cleanup_errors[-1])
+
+        with self.bus_lock:
+            self.bus.close()
+        with self.lock:
+            self.connected = False
+
+        if os.name != "posix":
+            message = "Safe shutdown is only available on the Raspberry Pi/Linux host."
+            self.log(message)
+            return {"ok": False, "message": message, "cleanupErrors": cleanup_errors}
+
+        try:
+            subprocess.run(
+                ("sync",),
+                check=False,
+                timeout=SHUTDOWN_COMMAND_TIMEOUT_S,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            self.log(f"sync before shutdown skipped: {exc}")
+
+        last_error = ""
+        for command in SHUTDOWN_COMMANDS:
+            try:
+                completed = subprocess.run(
+                    command,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=SHUTDOWN_COMMAND_TIMEOUT_S,
+                )
+            except FileNotFoundError:
+                last_error = f"{command[0]} not found"
+                continue
+            except subprocess.CalledProcessError as exc:
+                last_error = (exc.stderr or exc.stdout or str(exc)).strip()
+                continue
+            except subprocess.SubprocessError as exc:
+                last_error = str(exc)
+                continue
+
+            message = "Safe shutdown requested; wait for the Pi activity LED to stop before cutting power."
+            if completed.stdout.strip():
+                self.log(completed.stdout.strip())
+            self.log(message)
+            return {"ok": True, "message": message, "cleanupErrors": cleanup_errors}
+
+        message = (
+            "Shutdown command failed. Re-run raspi/install_dashboard.sh to grant "
+            "passwordless /usr/local/sbin/helion-poweroff, or shut down with sudo poweroff."
+        )
+        if last_error:
+            message += f" Last error: {last_error}"
+        self.log(message)
+        return {"ok": False, "message": message, "cleanupErrors": cleanup_errors}
 
     def send(self, arbitration_id: int, data: bytes, extended: bool) -> None:
         error: Optional[Exception] = None
@@ -1040,7 +1131,7 @@ class DashboardController:
 
     def run_command(self, command: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not self.command_lock.acquire(blocking=False):
-            if command in ("stop", "clear-fault", "arm-stop", "arm-clear-fault"):
+            if command in ("stop", "clear-fault", "arm-stop", "arm-clear-fault", "shutdown-host"):
                 try:
                     if command == "stop":
                         self.stop_and_disable()
@@ -1051,9 +1142,11 @@ class DashboardController:
                     elif command == "arm-stop":
                         self.stop_arm()
                         message = "Arm stop sent while another command was running."
-                    else:
+                    elif command == "arm-clear-fault":
                         self.clear_arm_faults()
                         message = "Arm clear fault sent while another command was running."
+                    else:
+                        return self.shutdown_host()
                     return {"ok": True, "message": message}
                 except Exception as exc:
                     return {"ok": False, "message": str(exc)}
@@ -1077,6 +1170,8 @@ class DashboardController:
         if command == "reopen":
             ok = self.reopen_bus()
             return {"ok": ok}
+        if command == "shutdown-host":
+            return self.shutdown_host()
         if not self.connected:
             opened = self.open_bus()
             if not opened:
@@ -1674,8 +1769,7 @@ class DashboardController:
         if not self.write_private_run_mode_verified_for(motor_id, RUN_MODE_OPERATION):
             self.log(f"{axis} {fmt_id(motor_id)} damped arm setup failed: run_mode did not verify")
             return False
-        self.send_private_enable_to(motor_id)
-        self.wait_private_status_for(motor_id, 0.30)
+        torque_ff = self.arm_effective_torque_bias(axis, position)
         self.write_private_param_f32_to(motor_id, PARAM_LIMIT_CUR, current_limit)
         self.send_private_operation_control_to(
             motor_id,
@@ -1683,7 +1777,25 @@ class DashboardController:
             0.0,
             self.arm_position_kp,
             self.arm_damping_kd,
-            self.arm_effective_torque_bias(axis, position),
+            torque_ff,
+        )
+        self.send_private_enable_to(motor_id)
+        self.send_private_operation_control_to(
+            motor_id,
+            position,
+            0.0,
+            self.arm_position_kp,
+            self.arm_damping_kd,
+            torque_ff,
+        )
+        self.wait_private_status_for(motor_id, 0.30)
+        self.send_private_operation_control_to(
+            motor_id,
+            position,
+            0.0,
+            self.arm_position_kp,
+            self.arm_damping_kd,
+            torque_ff,
         )
         return True
 
@@ -1811,10 +1923,10 @@ class DashboardController:
             feedback = self.feedback_by_motor.get(motor_id)
             seen_at = self.feedback_at_by_motor.get(motor_id)
             if feedback is None or seen_at is None or now - seen_at > ARM_FEEDBACK_START_MAX_AGE_S:
-                return 0.0
+                return bias * ARM_ASSIST_FEEDBACK_MISSING_SCALE
             position = feedback.get("positionRad")
             if not isinstance(position, (int, float)) or not math.isfinite(float(position)):
-                return 0.0
+                return bias * ARM_ASSIST_FEEDBACK_MISSING_SCALE
 
         assist_direction = 1.0 if bias > 0.0 else -1.0
         lag_toward_target = (target_position - float(position)) * assist_direction
@@ -1826,8 +1938,12 @@ class DashboardController:
         else:
             overshoot = -lag_toward_target
             if overshoot >= ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD:
-                return 0.0
-            scale = ARM_ASSIST_TARGET_SCALE * (1.0 - (overshoot / ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD))
+                scale = ARM_ASSIST_OVERSHOOT_SCALE
+            else:
+                fade = overshoot / ARM_ASSIST_OVERSHOOT_FADE_BAND_RAD
+                scale = ARM_ASSIST_TARGET_SCALE - (
+                    (ARM_ASSIST_TARGET_SCALE - ARM_ASSIST_OVERSHOOT_SCALE) * fade
+                )
         return bias * scale
 
     def clear_arm_route(self) -> None:
@@ -1952,8 +2068,7 @@ class DashboardController:
         first_waypoint = route_waypoints[0]
         remaining_waypoints = route_waypoints[1:]
         needs_config = (
-            not live
-            or not self.arm_position_configured
+            not self.arm_position_configured
             or self.arm_position_signature != config_signature
         )
         self.oscillating = False
@@ -1983,6 +2098,9 @@ class DashboardController:
                 ):
                     self.stop_arm()
                     return False
+            self.arm_current_limit_signature = self.arm_current_limit_config_signature()
+        else:
+            self.refresh_arm_current_limits_if_needed()
         self.apply_arm_route_waypoint(first_waypoint)
         if not needs_config:
             for axis in self.active_arm_axes():
@@ -2044,25 +2162,37 @@ class DashboardController:
     def arm_position_config_signature(self) -> Tuple[Any, ...]:
         axes = self.active_arm_axes()
         return (
+            self.host_id & 0xFF,
             self.arm_joint_count,
             tuple(
                 (
                     axis,
                     self.arm_motor_ids[axis] & 0xFF,
-                    self.arm_motor_models[axis],
                 )
                 for axis in axes
             ),
-            round(self.arm_velocity_limit, 6),
-            round(self.arm_acceleration, 6),
-            round(self.arm_position_kp, 6),
-            round(self.arm_damping_kd, 6),
-            round(self.arm_current_limit, 6),
-            tuple(
-                (axis, round(self.arm_torque_biases[axis], 6))
-                for axis in axes
-            ),
         )
+
+    def arm_current_limit_config_signature(self) -> Tuple[Any, ...]:
+        axes = self.active_arm_axes()
+        return (
+            self.host_id & 0xFF,
+            tuple((axis, self.arm_motor_ids[axis] & 0xFF) for axis in axes),
+            round(self.arm_current_limit, 6),
+        )
+
+    def refresh_arm_current_limits_if_needed(self) -> None:
+        signature = self.arm_current_limit_config_signature()
+        if self.arm_current_limit_signature == signature:
+            return
+        for axis in self.active_arm_axes():
+            self.write_private_param_f32_to(
+                self.arm_motor_ids[axis],
+                PARAM_LIMIT_CUR,
+                self.arm_current_limit,
+            )
+        self.arm_current_limit_signature = signature
+        self.log(f"Arm current limit updated to {self.arm_current_limit:.2f} A without mode reset")
 
     def home_arm_zero(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         ok, message = self.validate_arm_command_motors(payload)

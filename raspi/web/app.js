@@ -672,8 +672,8 @@ function validateArmCommandMotors(options = {}) {
 }
 
 async function sendCommand(command, extra = {}) {
-  if (["stop", "arm-stop", "arm-clear-fault", "arm-preset"].includes(command)) setArmLiveMoveEnabled(false);
-  if (busy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault"].includes(command)) return;
+  if (["stop", "arm-stop", "arm-clear-fault", "arm-preset", "shutdown-host"].includes(command)) setArmLiveMoveEnabled(false);
+  if (busy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault", "shutdown-host"].includes(command)) return;
   if ((command === "arm-move" || command === "arm-home-zero" || command === "arm-preset") && !validateArmCommandMotors()) return;
   if (command === "arm-move") {
     const preview = armPreview();
@@ -690,10 +690,16 @@ async function sendCommand(command, extra = {}) {
   ) {
     return;
   }
+  if (
+    command === "shutdown-host" &&
+    !confirm("Support the arm first. This will stop the motors, save dashboard values, and power off the Raspberry Pi. Wait for the Pi activity LED to stop before cutting power.")
+  ) {
+    return;
+  }
   busy = true;
   renderBusy(true);
   try {
-    await applyConfig();
+    if (command !== "shutdown-host") await applyConfig();
     const result = await post("/api/command", { command, ...extra });
     if (result && result.ok === false && result.message) {
       appendLocalLog(`Command failed: ${result.message}`);
@@ -706,7 +712,7 @@ async function sendCommand(command, extra = {}) {
     if (command === "arm-home-zero" && result && result.ok !== false) {
       setValuesState("Saved", result.path || "");
     }
-    await refresh();
+    if (command !== "shutdown-host") await refresh();
   } catch (error) {
     appendLocalLog(`UI error: ${error.message}`);
   } finally {
@@ -821,7 +827,7 @@ async function flushArmLiveMove() {
 function renderBusy(isBusy) {
   commandButtons.forEach((button) => {
     const command = button.dataset.command;
-    button.disabled = isBusy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault"].includes(command);
+    button.disabled = isBusy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault", "shutdown-host"].includes(command);
   });
   valueButtons.forEach((button) => {
     button.disabled = isBusy;

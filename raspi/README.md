@@ -94,6 +94,13 @@ Raspberry Pi backend code, increment `APP_VERSION` in
 `raspi/robstride_dashboard.py` before committing so the Pi page makes it obvious
 which update is running.
 
+Use **Shutdown Pi** in the dashboard before removing Raspberry Pi power. The
+button stops the arm motors, saves dashboard values, flushes the filesystem, and
+then requests Linux poweroff. Wait for the Pi activity LED to stop blinking
+before cutting power. The installer grants the dashboard user passwordless sudo
+only for `/usr/local/sbin/helion-poweroff`; rerun `raspi/install_dashboard.sh`
+after updating if the button reports a permission error.
+
 Use SSH for the initial install, service-level changes such as port, Linux
 permissions or systemd edits, and code updates.
 
@@ -196,6 +203,23 @@ bouncing, press **Stop Arm**, support the load, raise `Damping Kd`, then adjust
 `Position Kp` upward only as needed for hold stiffness. If the arm slowly falls
 even when stable, raise current limit and add signed shoulder or elbow assist
 torque.
+
+Beginner loaded-arm tuning:
+
+```text
+Velocity Limit: 0.20 rad/s
+Acceleration: 0.50 rad/s^2
+Current Limit: 4.00 A
+Position Kp: 0.8
+Damping Kd: 2.0
+Shoulder Assist Nm: 0.3, then add 0.2 Nm at a time
+Elbow Assist Nm: 0.0, then add only if the forearm sags
+```
+
+Use the smallest assist torque that holds the arm near the target. If assist
+makes the joint move the wrong way, flip its sign. If the arm overshoots or
+bounces, raise `Damping Kd` before raising `Position Kp`; if the arm is stable
+but droopy, raise current limit or assist torque before raising `Position Kp`.
 
 Interactive command keys for `robstride_usb.py`: `p`, `v`, `f`, `b`, `<`, `>`,
 `g`, `0`, `s`, `+`, `-`, `e`, `r`, `a`, `x`, `d`, `c`, `h`, `t`, `?`, and `q`.

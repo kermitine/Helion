@@ -61,11 +61,16 @@ sudo tee /usr/local/sbin/helion-restart-dashboard >/dev/null <<'EOF'
 set -euo pipefail
 exec systemctl restart robstride-dashboard.service
 EOF
-sudo chmod +x /usr/local/sbin/helion-restart-dashboard
+sudo tee /usr/local/sbin/helion-poweroff >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exec systemctl poweroff
+EOF
+sudo chmod +x /usr/local/sbin/helion-restart-dashboard /usr/local/sbin/helion-poweroff
 
 if [[ "$SERVICE_USER" != "root" ]]; then
   sudo tee /etc/sudoers.d/helion-dashboard >/dev/null <<EOF
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/local/sbin/helion-restart-dashboard
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/local/sbin/helion-restart-dashboard, /usr/local/sbin/helion-poweroff
 EOF
   sudo chmod 440 /etc/sudoers.d/helion-dashboard
   sudo visudo -cf /etc/sudoers.d/helion-dashboard >/dev/null
