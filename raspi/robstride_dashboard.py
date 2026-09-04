@@ -195,7 +195,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.20"
+APP_VERSION = "2026.09.03.21"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1435,11 +1435,12 @@ class DashboardController:
                     self.model = new_model
                     self.velocity_configured = False
                     self.position_configured = False
-                    self.arm_position_configured = False
-                    self.clear_arm_route()
-                    self.reset_arm_adaptive_assist_trims()
                     self.oscillating = False
                     self.jog_active = False
+                    if bus_changed:
+                        self.arm_position_configured = False
+                        self.clear_arm_route()
+                        self.reset_arm_adaptive_assist_trims()
             if bus_changed:
                 self.reopen_bus(
                     serial_port=new_serial_port,
@@ -2091,12 +2092,17 @@ class DashboardController:
             payload.get("armAdaptiveAssist"),
             self.arm_adaptive_assist_enabled,
         )
-        if (
-            not self.arm_adaptive_assist_enabled
-            or previous_adaptive_enabled != self.arm_adaptive_assist_enabled
-            or previous_adaptive_signature != self.arm_adaptive_assist_config_signature()
-        ):
+        adaptive_reset_reason = ""
+        if not self.arm_adaptive_assist_enabled:
+            adaptive_reset_reason = "disabled"
+        elif previous_adaptive_enabled != self.arm_adaptive_assist_enabled:
+            adaptive_reset_reason = "toggle changed"
+        elif previous_adaptive_signature != self.arm_adaptive_assist_config_signature():
+            adaptive_reset_reason = "arm setup changed"
+        if adaptive_reset_reason:
             self.reset_arm_adaptive_assist_trims()
+            if previous_adaptive_enabled or self.arm_adaptive_assist_enabled:
+                self.log(f"Adaptive assist trims reset: {adaptive_reset_reason}")
 
     def arm_motor_target(self, axis: str, joint_angle: float) -> float:
         return self.arm_offsets[axis] + (self.arm_directions[axis] * joint_angle)
@@ -2721,7 +2727,6 @@ class DashboardController:
     def arm_position_config_signature(self) -> Tuple[Any, ...]:
         axes = self.active_arm_axes()
         return (
-            self.host_id & 0xFF,
             self.arm_joint_count,
             tuple(
                 (
@@ -2735,7 +2740,6 @@ class DashboardController:
     def arm_current_limit_config_signature(self) -> Tuple[Any, ...]:
         axes = self.active_arm_axes()
         return (
-            self.host_id & 0xFF,
             tuple((axis, self.arm_motor_ids[axis] & 0xFF) for axis in axes),
             round(self.arm_current_limit, 6),
         )

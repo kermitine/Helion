@@ -674,6 +674,10 @@ function validateArmCommandMotors(options = {}) {
   return true;
 }
 
+function isArmCommand(command) {
+  return command.startsWith("arm-");
+}
+
 async function sendCommand(command, extra = {}) {
   if (["stop", "arm-stop", "arm-clear-fault", "arm-preset", "shutdown-host"].includes(command)) setArmLiveMoveEnabled(false);
   if (busy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault", "shutdown-host"].includes(command)) return;
@@ -702,7 +706,7 @@ async function sendCommand(command, extra = {}) {
   busy = true;
   renderBusy(true);
   try {
-    if (command !== "shutdown-host") await applyConfig();
+    if (command !== "shutdown-host" && !isArmCommand(command)) await applyConfig();
     const result = await post("/api/command", { command, ...extra });
     if (result && result.ok === false && result.message) {
       appendLocalLog(`Command failed: ${result.message}`);
@@ -763,7 +767,6 @@ async function setArmLiveMoveEnabled(enabled) {
     return;
   }
   try {
-    await applyConfig();
     if (!armLiveMoveEnabled()) return;
     armLiveLastError = "";
     queueArmLiveMove({ immediate: true });
