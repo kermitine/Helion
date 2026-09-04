@@ -107,6 +107,7 @@ ARM_ROUTE_MIN_DURATION_S = 0.18
 ARM_ROUTE_VELOCITY_DURATION_FACTOR = 2.6
 ARM_ROUTE_ACCEL_DURATION_FACTOR = 8.5
 ARM_ROUTE_FEEDBACK_RESEED_RAD = math.radians(4.0)
+ARM_ROUTE_SUPPORT_GRACE_S = 0.45
 ARM_PRESET_MIN_RADIAL_SCALE = 0.42
 ARM_PRESET_MAX_RADIAL_SCALE = 0.72
 ARM_PRESET_MIN_Z_SCALE = 0.16
@@ -136,18 +137,18 @@ ARM_ASSIST_OVERSHOOT_SCALE = -0.20
 ARM_ASSIST_FEEDBACK_MISSING_SCALE = 0.65
 ARM_ASSIST_MOVING_WITH_LOAD_SCALE = 0.90
 ARM_HOLD_ERROR_DEADBAND_RAD = math.radians(2.5)
-ARM_HOLD_ERROR_FULL_RAD = math.radians(12.0)
-ARM_HOLD_ERROR_MAX_NM = 0.65
+ARM_HOLD_ERROR_FULL_RAD = math.radians(18.0)
+ARM_HOLD_ERROR_MAX_NM = 1.20
 ARM_HOLD_ERROR_MAX_TARGET_VEL_RAD_S = 0.03
 ARM_HOLD_ERROR_FADE_TARGET_VEL_RAD_S = 0.35
-ARM_HOLD_ERROR_MAX_FEEDBACK_VEL_RAD_S = 0.20
+ARM_HOLD_ERROR_MAX_FEEDBACK_VEL_RAD_S = 0.50
 ARM_HOLD_ERROR_RAMP_S = 0.90
-ARM_HOLD_ERROR_RAMP_FLOOR = 0.75
+ARM_HOLD_ERROR_RAMP_FLOOR = 0.90
 ARM_SETTLE_DAMPING_WINDOW_RAD = math.radians(10.0)
 ARM_SETTLE_DAMPING_FADE_TARGET_VEL_RAD_S = 0.25
 ARM_SETTLE_DAMPING_BOOST_KD = 1.25
 ARM_ADAPTIVE_ASSIST_AXES = ("shoulder", "elbow")
-ARM_ADAPTIVE_ASSIST_MAX_NM = 1.5
+ARM_ADAPTIVE_ASSIST_MAX_NM = 3.0
 ARM_ADAPTIVE_ASSIST_HOLD_TARGET_SCALE = 1.0
 ARM_ADAPTIVE_ASSIST_ROUTE_SCALE = 1.0
 ARM_ADAPTIVE_ASSIST_FEEDBACK_MISSING_SCALE = 0.65
@@ -155,11 +156,11 @@ ARM_ADAPTIVE_ASSIST_DEADBAND_RAD = math.radians(1.2)
 ARM_ADAPTIVE_ASSIST_LEARN_WINDOW_RAD = math.radians(25.0)
 ARM_ADAPTIVE_ASSIST_MAX_FEEDBACK_VEL_RAD_S = 0.06
 ARM_ADAPTIVE_ASSIST_MAX_TARGET_VEL_RAD_S = 0.02
-ARM_ADAPTIVE_ASSIST_LEARN_RATE_NM_PER_RAD_S = 0.35
-ARM_ADAPTIVE_ASSIST_MAX_STEP_NM = 0.003
+ARM_ADAPTIVE_ASSIST_LEARN_RATE_NM_PER_RAD_S = 2.0
+ARM_ADAPTIVE_ASSIST_MAX_STEP_NM = 0.025
 ARM_ADAPTIVE_ASSIST_SETTLE_S = 0.75
 ARM_ADAPTIVE_ASSIST_CONFIRM_S = 0.30
-ARM_ADAPTIVE_ASSIST_OVERSHOOT_BLEED_NM_S = 0.75
+ARM_ADAPTIVE_ASSIST_OVERSHOOT_BLEED_NM_S = 1.50
 ARM_FEEDBACK_START_MAX_AGE_S = 1.0
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
@@ -194,7 +195,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.19"
+APP_VERSION = "2026.09.03.20"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -748,6 +749,7 @@ class DashboardController:
         self.arm_motor_velocities = {axis: 0.0 for axis in ARM_AXES}
         self.arm_route_waypoints: Deque[Dict[str, Any]] = deque()
         self.arm_route_next_at = 0.0
+        self.arm_route_support_until = 0.0
         self.arm_hold_correction_ramp_until = 0.0
         self.active_reports = False
         self.oscillating = False
@@ -2295,7 +2297,12 @@ class DashboardController:
         return bias * max(-1.0, min(1.0, scale))
 
     def arm_route_motion_active(self, target_velocity: float = 0.0) -> bool:
-        return bool(self.arm_route_waypoints) or abs(target_velocity) > ARM_ADAPTIVE_ASSIST_MAX_TARGET_VEL_RAD_S
+        now = time.monotonic()
+        return (
+            bool(self.arm_route_waypoints)
+            or now < getattr(self, "arm_route_support_until", 0.0)
+            or abs(target_velocity) > ARM_ADAPTIVE_ASSIST_MAX_TARGET_VEL_RAD_S
+        )
 
     def arm_adaptive_torque_bias(
         self,
@@ -2435,6 +2442,7 @@ class DashboardController:
         self.arm_route_waypoints.clear()
         self.arm_route_next_at = 0.0
         self.arm_motor_velocities = {axis: 0.0 for axis in ARM_AXES}
+        self.arm_route_support_until = 0.0
         self.arm_hold_correction_ramp_until = 0.0
 
     def arm_route_waypoint_interval(self, waypoint: Dict[str, Any]) -> float:
@@ -2617,6 +2625,8 @@ class DashboardController:
         self.position_configured = False
         self.clear_arm_route()
         self.commanded_speed = 0.0
+        route_start_now = time.monotonic()
+        self.arm_route_support_until = route_start_now + ARM_ROUTE_SUPPORT_GRACE_S
         if needs_config:
             self.arm_position_configured = False
         should_log = not live or needs_config
@@ -2661,6 +2671,7 @@ class DashboardController:
             else 0.0
         )
         self.arm_adaptive_assist_pause_until = route_now + ARM_ADAPTIVE_ASSIST_SETTLE_S
+        self.arm_route_support_until = route_now + ARM_ROUTE_SUPPORT_GRACE_S
         self.arm_hold_correction_ramp_until = (
             route_now + ARM_HOLD_ERROR_RAMP_S
             if not remaining_waypoints
@@ -2993,6 +3004,7 @@ class DashboardController:
             else:
                 self.arm_route_next_at = 0.0
                 self.arm_adaptive_assist_pause_until = now + ARM_ADAPTIVE_ASSIST_SETTLE_S
+                self.arm_route_support_until = now + ARM_ROUTE_SUPPORT_GRACE_S
                 self.arm_hold_correction_ramp_until = now + ARM_HOLD_ERROR_RAMP_S
                 self.log("Arm route complete")
         self.update_arm_adaptive_assist(now)
