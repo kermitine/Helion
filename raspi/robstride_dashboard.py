@@ -106,7 +106,7 @@ ARM_ROUTE_SAMPLE_S = ARM_OPERATION_REFRESH_S
 ARM_ROUTE_MIN_DURATION_S = 0.18
 ARM_ROUTE_VELOCITY_DURATION_FACTOR = 2.6
 ARM_ROUTE_ACCEL_DURATION_FACTOR = 8.5
-ARM_ROUTE_FEEDBACK_RESEED_RAD = math.radians(8.0)
+ARM_ROUTE_FEEDBACK_RESEED_RAD = math.radians(4.0)
 ARM_PRESET_MIN_RADIAL_SCALE = 0.42
 ARM_PRESET_MAX_RADIAL_SCALE = 0.72
 ARM_PRESET_MIN_Z_SCALE = 0.16
@@ -148,6 +148,9 @@ ARM_SETTLE_DAMPING_FADE_TARGET_VEL_RAD_S = 0.25
 ARM_SETTLE_DAMPING_BOOST_KD = 1.25
 ARM_ADAPTIVE_ASSIST_AXES = ("shoulder", "elbow")
 ARM_ADAPTIVE_ASSIST_MAX_NM = 1.5
+ARM_ADAPTIVE_ASSIST_HOLD_TARGET_SCALE = 1.0
+ARM_ADAPTIVE_ASSIST_ROUTE_SCALE = 1.0
+ARM_ADAPTIVE_ASSIST_FEEDBACK_MISSING_SCALE = 0.65
 ARM_ADAPTIVE_ASSIST_DEADBAND_RAD = math.radians(1.2)
 ARM_ADAPTIVE_ASSIST_LEARN_WINDOW_RAD = math.radians(25.0)
 ARM_ADAPTIVE_ASSIST_MAX_FEEDBACK_VEL_RAD_S = 0.06
@@ -191,7 +194,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.18"
+APP_VERSION = "2026.09.03.19"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -2291,6 +2294,40 @@ class DashboardController:
             scale = max(scale, ARM_ASSIST_MOVING_WITH_LOAD_SCALE)
         return bias * max(-1.0, min(1.0, scale))
 
+    def arm_route_motion_active(self, target_velocity: float = 0.0) -> bool:
+        return bool(self.arm_route_waypoints) or abs(target_velocity) > ARM_ADAPTIVE_ASSIST_MAX_TARGET_VEL_RAD_S
+
+    def arm_adaptive_torque_bias(
+        self,
+        axis: str,
+        target_position: float,
+        target_velocity: float = 0.0,
+    ) -> float:
+        adaptive_bias = self.arm_adaptive_assist_trims.get(axis, 0.0)
+        adaptive_bias = max(-ARM_TORQUE_BIAS_MAX_NM, min(ARM_TORQUE_BIAS_MAX_NM, adaptive_bias))
+        if abs(adaptive_bias) <= 0.000001:
+            return 0.0
+
+        if self.arm_route_motion_active(target_velocity):
+            position, _velocity = self.arm_feedback_for_axis(axis)
+            scale = (
+                ARM_ADAPTIVE_ASSIST_FEEDBACK_MISSING_SCALE
+                if position is None
+                else ARM_ADAPTIVE_ASSIST_ROUTE_SCALE
+            )
+            return adaptive_bias * scale
+
+        return self.arm_scaled_torque_bias(
+            axis,
+            adaptive_bias,
+            target_position,
+            target_velocity,
+            ARM_ADAPTIVE_ASSIST_FEEDBACK_MISSING_SCALE,
+            ARM_ADAPTIVE_ASSIST_HOLD_TARGET_SCALE,
+            0.0,
+            boost_moving_with_load=False,
+        )
+
     def arm_hold_error_correction_scale(self, now: float) -> float:
         ramp_until = getattr(self, "arm_hold_correction_ramp_until", 0.0)
         if ramp_until <= 0.0 or now >= ramp_until:
@@ -2316,17 +2353,7 @@ class DashboardController:
             boost_moving_with_load=True,
         )
         if self.arm_adaptive_assist_enabled and axis in ARM_ADAPTIVE_ASSIST_AXES:
-            adaptive_bias = self.arm_adaptive_assist_trims.get(axis, 0.0)
-            torque_ff += self.arm_scaled_torque_bias(
-                axis,
-                adaptive_bias,
-                target_position,
-                target_velocity,
-                0.0,
-                0.75,
-                0.0,
-                boost_moving_with_load=False,
-            )
+            torque_ff += self.arm_adaptive_torque_bias(axis, target_position, target_velocity)
         torque_ff += self.arm_hold_error_correction(axis, target_position, target_velocity)
         return max(-ARM_TORQUE_BIAS_MAX_NM, min(ARM_TORQUE_BIAS_MAX_NM, torque_ff))
 
@@ -2349,6 +2376,12 @@ class DashboardController:
         abs_error = abs(error)
         if abs_error <= ARM_HOLD_ERROR_DEADBAND_RAD:
             return 0.0
+        if self.arm_route_motion_active(target_velocity):
+            support_bias = self.arm_torque_biases.get(axis, 0.0)
+            if self.arm_adaptive_assist_enabled and axis in ARM_ADAPTIVE_ASSIST_AXES:
+                support_bias += self.arm_adaptive_assist_trims.get(axis, 0.0)
+            if support_bias * error < 0.0:
+                return 0.0
         span = max(ARM_HOLD_ERROR_FULL_RAD - ARM_HOLD_ERROR_DEADBAND_RAD, 0.000001)
         scale = min(1.0, (abs_error - ARM_HOLD_ERROR_DEADBAND_RAD) / span)
         if target_speed > ARM_HOLD_ERROR_MAX_TARGET_VEL_RAD_S:
