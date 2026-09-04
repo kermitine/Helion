@@ -774,6 +774,180 @@ select {
   margin-top: 14px;
 }
 
+.gripper-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.gripper-body {
+  display: grid;
+  gap: 14px;
+}
+
+.gripper-position-control,
+.gripper-calibration {
+  display: grid;
+  gap: 12px;
+}
+
+.gripper-readout {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) repeat(2, minmax(72px, auto));
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #090909;
+  padding: 10px 12px;
+}
+
+.gripper-readout strong {
+  min-width: 0;
+  color: var(--accent);
+  font-size: 1.12rem;
+}
+
+.gripper-readout span,
+.gripper-section-head span {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  text-align: right;
+}
+
+.gripper-slider-label {
+  gap: 8px;
+}
+
+.gripper-actions {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.gripper-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.gripper-grid {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.gripper-calibration-actions {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.guide-window {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  width: min(980px, 100%);
+  max-height: min(760px, calc(100vh - 36px));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--band);
+  padding: 14px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+}
+
+.gripper-guide-body {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.85fr) minmax(320px, 1fr);
+  gap: 14px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.wiring-card {
+  display: grid;
+  grid-template-columns: minmax(98px, 1fr) 74px minmax(98px, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 240px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #090909;
+  padding: 14px;
+}
+
+.wire-node {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  min-height: 138px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111111;
+  padding: 12px;
+  text-align: center;
+}
+
+.wire-node span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.wire-node strong {
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 1.25rem;
+}
+
+.wire-node small {
+  color: var(--text);
+  font-size: 0.76rem;
+}
+
+.wire-bundle {
+  display: grid;
+  gap: 16px;
+}
+
+.wire-bundle i {
+  display: block;
+  height: 6px;
+  border-radius: 999px;
+}
+
+.signal-wire {
+  background: var(--accent);
+}
+
+.power-wire {
+  background: #d55347;
+}
+
+.ground-wire {
+  background: #4f5654;
+}
+
+.guide-copy {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  min-width: 0;
+}
+
+.guide-copy section {
+  display: grid;
+  gap: 10px;
+}
+
+.guide-copy ol {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 22px;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
 #armSolution {
   min-height: 72px;
   margin: 0;
@@ -1062,11 +1236,13 @@ pre {
   .control-band,
   .dashboard-grid,
   .wizard-body,
-  .id-setup-body {
+  .id-setup-body,
+  .gripper-guide-body {
     grid-template-columns: 1fr;
   }
 
   .wizard-window,
+  .guide-window,
   .id-window {
     height: calc(100vh - 24px);
   }
@@ -1093,9 +1269,12 @@ pre {
   .field-grid,
   .button-row,
   .control-band .button-row,
-  .arm-actions,
-  .arm-grid,
-  .wizard-grid,
+    .arm-actions,
+    .gripper-actions,
+    .gripper-calibration-actions,
+    .gripper-readout,
+    .arm-grid,
+    .wizard-grid,
   .preset-grid,
   .file-grid,
   .toggle-row,
@@ -1130,6 +1309,7 @@ pre {
   }
 
   .target-window,
+  .guide-window,
   .id-window {
     height: calc(100vh - 16px);
     padding: 10px;
@@ -1141,6 +1321,21 @@ pre {
 
   .id-flow-visual {
     grid-template-columns: 1fr;
+  }
+
+  .wiring-card {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+
+  .wire-bundle {
+    justify-self: stretch;
+  }
+
+  .wire-bundle i {
+    width: 6px;
+    height: 28px;
+    justify-self: center;
   }
 
   .id-flow-visual i {

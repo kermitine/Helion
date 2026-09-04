@@ -172,6 +172,30 @@ ARM_ADAPTIVE_ASSIST_FALL_ARREST_LEARN_RATE_NM_PER_RAD_S = 3.5
 ARM_ADAPTIVE_ASSIST_FALL_ARREST_VEL_RATE_NM_PER_RAD_S = 1.1
 ARM_ADAPTIVE_ASSIST_FALL_ARREST_MAX_STEP_NM = 0.055
 ARM_FEEDBACK_START_MAX_AGE_S = 1.0
+GRIPPER_COMMANDS = {
+    "gripper-move",
+    "gripper-open",
+    "gripper-close",
+    "gripper-angle",
+    "gripper-config",
+    "gripper-calibrate-open",
+    "gripper-calibrate-closed",
+    "gripper-release",
+}
+GRIPPER_DEFAULT_GPIO_PIN = 18
+GRIPPER_GPIO_MIN_PIN = 0
+GRIPPER_GPIO_MAX_PIN = 27
+GRIPPER_PWM_HZ = 50.0
+GRIPPER_DEFAULT_PULSE_MIN_US = 1000.0
+GRIPPER_DEFAULT_PULSE_MAX_US = 2000.0
+GRIPPER_PULSE_MIN_US = 500.0
+GRIPPER_PULSE_MAX_US = 2500.0
+GRIPPER_MIN_PULSE_SPAN_US = 100.0
+GRIPPER_DEFAULT_CLOSED_DEG = 35.0
+GRIPPER_DEFAULT_OPEN_DEG = 120.0
+GRIPPER_DEFAULT_TEST_DEG = 90.0
+GRIPPER_DEFAULT_POSITION = 1.0
+GRIPPER_SETTLE_S = 0.45
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
     "sweep": "Sweep",
@@ -205,7 +229,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.04.01"
+APP_VERSION = "2026.09.04.02"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -279,6 +303,24 @@ def limited_float(value: Any, default: float, maximum_abs: float) -> float:
         parsed = default
     limit = abs(maximum_abs)
     return min(max(parsed, -limit), limit)
+
+
+def clamped_float(value: Any, default: float, minimum: float, maximum: float) -> float:
+    try:
+        parsed = parse_float(value, default)
+    except (TypeError, ValueError):
+        parsed = default
+    if not math.isfinite(parsed):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def clamped_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = parse_int(value, default)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
 
 
 def twist_limit_rad(value: Any, default: float = ARM_TWIST_DEFAULT_LIMIT_RAD) -> float:
@@ -971,6 +1013,20 @@ class DashboardController:
         self.arm_route_next_at = 0.0
         self.arm_route_support_until = 0.0
         self.arm_hold_correction_ramp_until = 0.0
+        self.gripper_gpio_pin = GRIPPER_DEFAULT_GPIO_PIN
+        self.gripper_pulse_min_us = GRIPPER_DEFAULT_PULSE_MIN_US
+        self.gripper_pulse_max_us = GRIPPER_DEFAULT_PULSE_MAX_US
+        self.gripper_closed_angle_deg = GRIPPER_DEFAULT_CLOSED_DEG
+        self.gripper_open_angle_deg = GRIPPER_DEFAULT_OPEN_DEG
+        self.gripper_position = GRIPPER_DEFAULT_POSITION
+        self.gripper_test_angle_deg = GRIPPER_DEFAULT_TEST_DEG
+        self.gripper_release_after_move = False
+        self.gripper_attached = False
+        self.gripper_last_angle_deg: Optional[float] = None
+        self.gripper_last_error = ""
+        self._gpio: Optional[Any] = None
+        self._gripper_pwm: Optional[Any] = None
+        self._gripper_pwm_pin: Optional[int] = None
         self.active_reports = False
         self.oscillating = False
         self.jog_active = False
@@ -1078,6 +1134,7 @@ class DashboardController:
 
     def close(self) -> None:
         self.running = False
+        self.release_gripper(log=False)
         with self.bus_lock:
             self.bus.close()
 
@@ -1097,6 +1154,12 @@ class DashboardController:
                 self.stop_and_disable()
         except Exception as exc:
             cleanup_errors.append(f"selected motor stop failed: {exc}")
+            self.log(cleanup_errors[-1])
+
+        try:
+            self.release_gripper()
+        except Exception as exc:
+            cleanup_errors.append(f"gripper release failed: {exc}")
             self.log(cleanup_errors[-1])
 
         try:
@@ -1482,6 +1545,228 @@ class DashboardController:
             self.host_id = original_host
         return None
 
+    def apply_gripper_payload(self, payload: Dict[str, Any]) -> None:
+        gripper = payload.get("gripper")
+        if not isinstance(gripper, dict):
+            gripper = {}
+
+        def value(key: str, fallback: Any) -> Any:
+            return payload.get(key, gripper.get(key, fallback))
+
+        pulse_min = clamped_float(
+            value("gripperPulseMinUs", value("pulseMinUs", self.gripper_pulse_min_us)),
+            self.gripper_pulse_min_us,
+            GRIPPER_PULSE_MIN_US,
+            GRIPPER_PULSE_MAX_US,
+        )
+        pulse_max = clamped_float(
+            value("gripperPulseMaxUs", value("pulseMaxUs", self.gripper_pulse_max_us)),
+            self.gripper_pulse_max_us,
+            GRIPPER_PULSE_MIN_US,
+            GRIPPER_PULSE_MAX_US,
+        )
+        if pulse_max < pulse_min:
+            pulse_min, pulse_max = pulse_max, pulse_min
+        if abs(pulse_max - pulse_min) < GRIPPER_MIN_PULSE_SPAN_US:
+            pulse_max = min(GRIPPER_PULSE_MAX_US, pulse_min + GRIPPER_MIN_PULSE_SPAN_US)
+            if pulse_max - pulse_min < GRIPPER_MIN_PULSE_SPAN_US:
+                pulse_min = max(GRIPPER_PULSE_MIN_US, pulse_max - GRIPPER_MIN_PULSE_SPAN_US)
+
+        with self.lock:
+            self.gripper_gpio_pin = clamped_int(
+                value("gripperGpioPin", value("gpioPin", self.gripper_gpio_pin)),
+                self.gripper_gpio_pin,
+                GRIPPER_GPIO_MIN_PIN,
+                GRIPPER_GPIO_MAX_PIN,
+            )
+            self.gripper_pulse_min_us = pulse_min
+            self.gripper_pulse_max_us = pulse_max
+            self.gripper_closed_angle_deg = clamped_float(
+                value("gripperClosedAngleDeg", value("closedAngleDeg", self.gripper_closed_angle_deg)),
+                self.gripper_closed_angle_deg,
+                0.0,
+                180.0,
+            )
+            self.gripper_open_angle_deg = clamped_float(
+                value("gripperOpenAngleDeg", value("openAngleDeg", self.gripper_open_angle_deg)),
+                self.gripper_open_angle_deg,
+                0.0,
+                180.0,
+            )
+            self.gripper_position = clamped_float(
+                value("gripperPosition", value("position", self.gripper_position)),
+                self.gripper_position,
+                0.0,
+                1.0,
+            )
+            self.gripper_test_angle_deg = clamped_float(
+                value("gripperTestAngleDeg", value("testAngleDeg", self.gripper_test_angle_deg)),
+                self.gripper_test_angle_deg,
+                0.0,
+                180.0,
+            )
+            self.gripper_release_after_move = parse_bool(
+                value("gripperReleaseAfterMove", value("releaseAfterMove", self.gripper_release_after_move)),
+                self.gripper_release_after_move,
+            )
+
+    def gripper_angle_for_position(self, position: Optional[float] = None) -> float:
+        with self.lock:
+            percent = self.gripper_position if position is None else position
+            percent = max(0.0, min(1.0, float(percent)))
+            return self.gripper_closed_angle_deg + (
+                (self.gripper_open_angle_deg - self.gripper_closed_angle_deg) * percent
+            )
+
+    def gripper_duty_cycle_for_angle(self, angle_deg: float) -> float:
+        with self.lock:
+            pulse_min = self.gripper_pulse_min_us
+            pulse_max = self.gripper_pulse_max_us
+        angle = max(0.0, min(180.0, float(angle_deg)))
+        pulse_us = pulse_min + ((pulse_max - pulse_min) * (angle / 180.0))
+        return (pulse_us / 1_000_000.0) * GRIPPER_PWM_HZ * 100.0
+
+    def ensure_gripper_pwm(self) -> Any:
+        with self.lock:
+            pin = self.gripper_gpio_pin
+        if self._gpio is None:
+            try:
+                import RPi.GPIO as GPIO  # type: ignore[import-not-found]
+            except Exception as exc:
+                raise RuntimeError(
+                    "RPi.GPIO is not available; install python3-rpi.gpio and run the dashboard on the Raspberry Pi"
+                ) from exc
+            GPIO.setwarnings(False)
+            GPIO.setmode(GPIO.BCM)
+            self._gpio = GPIO
+
+        GPIO = self._gpio
+        if self._gripper_pwm is not None and self._gripper_pwm_pin != pin:
+            self.release_gripper(log=False)
+        if self._gripper_pwm is None:
+            GPIO.setup(pin, GPIO.OUT)
+            self._gripper_pwm = GPIO.PWM(pin, GRIPPER_PWM_HZ)
+            self._gripper_pwm.start(0.0)
+            self._gripper_pwm_pin = pin
+        return self._gripper_pwm
+
+    def release_gripper(self, log: bool = True) -> None:
+        pwm = self._gripper_pwm
+        pin = self._gripper_pwm_pin
+        if pwm is not None:
+            try:
+                pwm.stop()
+            except Exception as exc:
+                with self.lock:
+                    self.gripper_last_error = str(exc)
+        if self._gpio is not None and pin is not None:
+            try:
+                self._gpio.cleanup(pin)
+            except Exception as exc:
+                with self.lock:
+                    self.gripper_last_error = str(exc)
+        self._gripper_pwm = None
+        self._gripper_pwm_pin = None
+        with self.lock:
+            self.gripper_attached = False
+        if log:
+            self.log("MG90S gripper PWM released")
+
+    def move_gripper_angle(
+        self,
+        angle_deg: float,
+        release_after_move: Optional[bool] = None,
+        quiet: bool = False,
+    ) -> Dict[str, Any]:
+        angle = max(0.0, min(180.0, float(angle_deg)))
+        if release_after_move is None:
+            with self.lock:
+                release_after_move = self.gripper_release_after_move
+        duty_cycle = self.gripper_duty_cycle_for_angle(angle)
+        try:
+            pwm = self.ensure_gripper_pwm()
+            pwm.ChangeDutyCycle(duty_cycle)
+            if release_after_move:
+                time.sleep(GRIPPER_SETTLE_S)
+                self.release_gripper(log=False)
+            with self.lock:
+                self.gripper_test_angle_deg = angle
+                self.gripper_last_angle_deg = angle
+                self.gripper_attached = not release_after_move
+                self.gripper_last_error = ""
+            suffix = " then released" if release_after_move else ""
+            if not quiet:
+                self.log(f"MG90S gripper angle={angle:.1f} deg gpio=BCM{self.gripper_gpio_pin}{suffix}")
+            return {
+                "ok": True,
+                "message": f"Gripper angle {angle:.1f} deg{suffix}",
+                "angleDeg": angle,
+                "attached": not release_after_move,
+            }
+        except Exception as exc:
+            message = str(exc)
+            with self.lock:
+                self.gripper_attached = False
+                self.gripper_last_error = message
+            self.log(f"MG90S gripper failed: {message}")
+            return {"ok": False, "message": message}
+
+    def move_gripper_position(self, position: float, quiet: bool = False) -> Dict[str, Any]:
+        percent = max(0.0, min(1.0, float(position)))
+        angle = self.gripper_angle_for_position(percent)
+        with self.lock:
+            self.gripper_position = percent
+            self.gripper_test_angle_deg = angle
+        result = self.move_gripper_angle(angle, quiet=quiet)
+        if result.get("ok"):
+            result["position"] = percent
+            suffix = " then released" if not result.get("attached", True) else ""
+            result["message"] = f"Gripper {percent * 100.0:.0f}% open at {angle:.1f} deg{suffix}"
+        return result
+
+    def run_gripper_command(self, command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if command == "gripper-release":
+            self.release_gripper()
+            return {"ok": True, "message": "Gripper PWM released"}
+
+        self.apply_gripper_payload(payload)
+        quiet = parse_bool(payload.get("gripperQuiet"), False)
+        if command == "gripper-config":
+            self.log(
+                f"MG90S gripper config gpio=BCM{self.gripper_gpio_pin} "
+                f"closed={self.gripper_closed_angle_deg:.1f}deg open={self.gripper_open_angle_deg:.1f}deg"
+            )
+            return {"ok": True, "message": "Gripper settings applied"}
+        if command == "gripper-move":
+            return self.move_gripper_position(
+                parse_float(payload.get("gripperPosition"), self.gripper_position),
+                quiet=quiet,
+            )
+        if command == "gripper-open":
+            return self.move_gripper_position(1.0)
+        if command == "gripper-close":
+            return self.move_gripper_position(0.0)
+        if command == "gripper-angle":
+            return self.move_gripper_angle(parse_float(payload.get("gripperTestAngleDeg"), self.gripper_test_angle_deg))
+        if command in ("gripper-calibrate-open", "gripper-calibrate-closed"):
+            angle = clamped_float(
+                payload.get("gripperTestAngleDeg"),
+                self.gripper_test_angle_deg,
+                0.0,
+                180.0,
+            )
+            with self.lock:
+                self.gripper_test_angle_deg = angle
+                if command == "gripper-calibrate-open":
+                    self.gripper_open_angle_deg = angle
+                    label = "open"
+                else:
+                    self.gripper_closed_angle_deg = angle
+                    label = "closed"
+            self.log(f"MG90S gripper {label} calibration={angle:.1f} deg")
+            return {"ok": True, "message": f"Gripper {label} angle set to {angle:.1f} deg"}
+        return {"ok": False, "message": f"unknown command {command}"}
+
     def wait_private_param_from(self, target_id: int, index: int, timeout_s: float) -> Optional[bytes]:
         start_seq = self.current_seq()
         self.read_private_param_from(target_id, index)
@@ -1504,7 +1789,7 @@ class DashboardController:
 
     def run_command(self, command: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not self.command_lock.acquire(blocking=False):
-            if command in ("stop", "clear-fault", "arm-stop", "arm-clear-fault", "shutdown-host"):
+            if command in ("stop", "clear-fault", "arm-stop", "arm-clear-fault", "shutdown-host", "gripper-release"):
                 try:
                     if command == "stop":
                         self.stop_and_disable()
@@ -1518,6 +1803,9 @@ class DashboardController:
                     elif command == "arm-clear-fault":
                         self.clear_arm_faults()
                         message = "Arm clear fault sent while another command was running."
+                    elif command == "gripper-release":
+                        self.release_gripper()
+                        message = "Gripper PWM released while another command was running."
                     else:
                         return self.shutdown_host()
                     return {"ok": True, "message": message}
@@ -1538,13 +1826,15 @@ class DashboardController:
             self.command_lock.release()
 
     def _run_command(self, command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        if command != "arm-live-move":
+        if command not in ("arm-live-move", "gripper-move"):
             self.log(f"Command {command}")
         if command == "reopen":
             ok = self.reopen_bus()
             return {"ok": ok}
         if command == "shutdown-host":
             return self.shutdown_host()
+        if command in GRIPPER_COMMANDS:
+            return self.run_gripper_command(command, payload)
         if not self.connected:
             opened = self.open_bus()
             if not opened:
@@ -1691,6 +1981,17 @@ class DashboardController:
                     "velocityLimit": self.position_velocity_limit,
                     "acceleration": self.position_acceleration,
                     "positionKp": self.position_kp,
+                },
+                "gripper": {
+                    "type": "mg90s",
+                    "gpioPin": self.gripper_gpio_pin,
+                    "pulseMinUs": self.gripper_pulse_min_us,
+                    "pulseMaxUs": self.gripper_pulse_max_us,
+                    "closedAngleDeg": self.gripper_closed_angle_deg,
+                    "openAngleDeg": self.gripper_open_angle_deg,
+                    "position": self.gripper_position,
+                    "testAngleDeg": self.gripper_test_angle_deg,
+                    "releaseAfterMove": self.gripper_release_after_move,
                 },
                 "arm": {
                     "jointCount": self.arm_joint_count,
@@ -1926,6 +2227,7 @@ class DashboardController:
                 self.position_kp,
                 200.0,
             )
+            self.apply_gripper_payload(payload)
             self.apply_arm_payload(self.arm_payload_from_values(payload))
             bus_changed = (
                 new_serial_port != old_serial_port
@@ -4089,6 +4391,22 @@ class DashboardController:
                 "positionKp": self.position_kp,
                 "velocityConfigured": self.velocity_configured,
                 "positionConfigured": self.position_configured,
+                "gripper": {
+                    "type": "mg90s",
+                    "gpioPin": self.gripper_gpio_pin,
+                    "pulseMinUs": self.gripper_pulse_min_us,
+                    "pulseMaxUs": self.gripper_pulse_max_us,
+                    "closedAngleDeg": self.gripper_closed_angle_deg,
+                    "openAngleDeg": self.gripper_open_angle_deg,
+                    "position": self.gripper_position,
+                    "testAngleDeg": self.gripper_test_angle_deg,
+                    "targetAngleDeg": self.gripper_angle_for_position(),
+                    "lastAngleDeg": self.gripper_last_angle_deg,
+                    "releaseAfterMove": self.gripper_release_after_move,
+                    "attached": self.gripper_attached,
+                    "lastError": self.gripper_last_error,
+                    "pwmHz": GRIPPER_PWM_HZ,
+                },
                 "arm": {
                     "jointCount": self.arm_joint_count,
                     "motorIds": dict(self.arm_motor_ids),

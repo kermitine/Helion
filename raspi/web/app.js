@@ -16,10 +16,16 @@ let armLiveTimer = null;
 let armLiveLastSentAt = 0;
 let armLiveLastError = "";
 let lastArmValidationMessage = "";
+let gripperMoveInFlight = false;
+let gripperMoveQueued = false;
+let gripperMoveTimer = null;
+let gripperLastSentAt = 0;
+let gripperLastError = "";
 
 const TAU = Math.PI * 2;
 const DEFAULT_TWIST_LIMIT_DEG = 180;
 const ARM_LIVE_SEND_INTERVAL_MS = 120;
+const GRIPPER_SEND_INTERVAL_MS = 90;
 const ARM_MIN_TARGET_REACH = 0.001;
 const ARM_BASE_PLANE_MIN_Z = 0;
 const DEFAULT_ARM_VELOCITY_LIMIT = 0.35;
@@ -37,6 +43,42 @@ const ARM_PRESET_MAX_Z_SCALE = 0.52;
 const ARM_PRESET_ELBOW_DOWN_MIN_RADIAL_SCALE = 0.66;
 const ARM_PRESET_ELBOW_DOWN_MIN_Z_SCALE = 0.50;
 const ARM_PRESET_ELBOW_DOWN_MAX_Z_SCALE = 0.60;
+const DEFAULT_GRIPPER_GPIO_PIN = 18;
+const DEFAULT_GRIPPER_PULSE_MIN_US = 1000;
+const DEFAULT_GRIPPER_PULSE_MAX_US = 2000;
+const DEFAULT_GRIPPER_CLOSED_DEG = 35;
+const DEFAULT_GRIPPER_OPEN_DEG = 120;
+const DEFAULT_GRIPPER_TEST_DEG = 90;
+const RASPI_PHYSICAL_PIN_BY_BCM = {
+  0: 27,
+  1: 28,
+  2: 3,
+  3: 5,
+  4: 7,
+  5: 29,
+  6: 31,
+  7: 26,
+  8: 24,
+  9: 21,
+  10: 19,
+  11: 23,
+  12: 32,
+  13: 33,
+  14: 8,
+  15: 10,
+  16: 36,
+  17: 11,
+  18: 12,
+  19: 35,
+  20: 38,
+  21: 40,
+  22: 15,
+  23: 16,
+  24: 18,
+  25: 22,
+  26: 37,
+  27: 13,
+};
 const AXIS_LABELS = {
   base: "Base",
   shoulder: "Shoulder",
@@ -100,6 +142,16 @@ const armControlIds = [
   "armShoulderTwistLimitInput",
   "armElbowTwistLimitInput",
 ];
+const gripperControlIds = [
+  "gripperPositionSlider",
+  "gripperAngleInput",
+  "gripperClosedAngleInput",
+  "gripperOpenAngleInput",
+  "gripperGpioPinInput",
+  "gripperPulseMinInput",
+  "gripperPulseMaxInput",
+  "gripperReleaseAfterMoveToggle",
+];
 const speedControlIds = ["speedSlider"];
 const valueButtons = [$("saveValuesBtn"), $("downloadValuesBtn"), $("uploadValuesBtn")].filter(Boolean);
 const idSetupButtons = [$("idSetupScanBtn"), $("idSetupAssignBtn")].filter(Boolean);
@@ -108,6 +160,7 @@ const allValueControlIds = [
   ...configControlIds,
   ...positionControlIds,
   ...armControlIds,
+  ...gripperControlIds,
   ...speedControlIds,
   "wizardJointCountInput",
 ];
@@ -271,6 +324,7 @@ function clearCommandDirty(command, result) {
   if (result && result.ok === false) return;
   if (command === "move-position") clearDirty(positionControlIds);
   if (command === "arm-move" || command === "arm-home-zero" || command === "arm-preset") clearDirty(armControlIds);
+  if (command.startsWith("gripper-")) clearDirty(gripperControlIds);
   if (command === "set-speed") clearDirty(speedControlIds);
 }
 
@@ -303,6 +357,48 @@ function currentArmMotorValue(axis, fallback = "") {
 function strictMotorValue(id) {
   const el = $(id);
   return el && typeof el.value === "string" ? el.value.trim() : "";
+}
+
+function clampedNumber(value, fallback, min, max) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(min, Math.min(max, numeric));
+}
+
+function gripperInputState() {
+  return {
+    gpioPin: Math.round(clampedNumber(numberInput("gripperGpioPinInput"), DEFAULT_GRIPPER_GPIO_PIN, 0, 27)),
+    pulseMinUs: clampedNumber(numberInput("gripperPulseMinInput"), DEFAULT_GRIPPER_PULSE_MIN_US, 500, 2500),
+    pulseMaxUs: clampedNumber(numberInput("gripperPulseMaxInput"), DEFAULT_GRIPPER_PULSE_MAX_US, 500, 2500),
+    closedAngleDeg: clampedNumber(numberInput("gripperClosedAngleInput"), DEFAULT_GRIPPER_CLOSED_DEG, 0, 180),
+    openAngleDeg: clampedNumber(numberInput("gripperOpenAngleInput"), DEFAULT_GRIPPER_OPEN_DEG, 0, 180),
+    position: clampedNumber(numberInput("gripperPositionSlider"), 100, 0, 100) / 100,
+    testAngleDeg: clampedNumber(numberInput("gripperAngleInput"), DEFAULT_GRIPPER_TEST_DEG, 0, 180),
+    releaseAfterMove: $("gripperReleaseAfterMoveToggle").checked,
+  };
+}
+
+function gripperAngleForPosition(gripper, position = gripper.position) {
+  return gripper.closedAngleDeg + ((gripper.openAngleDeg - gripper.closedAngleDeg) * position);
+}
+
+function raspberryPiPhysicalPinText(gpioPin) {
+  const pin = RASPI_PHYSICAL_PIN_BY_BCM[Math.round(Number(gpioPin))];
+  return pin ? `pin ${pin}` : "BCM only";
+}
+
+function gripperPayload() {
+  const gripper = gripperInputState();
+  return {
+    gripperGpioPin: gripper.gpioPin,
+    gripperPulseMinUs: gripper.pulseMinUs,
+    gripperPulseMaxUs: gripper.pulseMaxUs,
+    gripperClosedAngleDeg: gripper.closedAngleDeg,
+    gripperOpenAngleDeg: gripper.openAngleDeg,
+    gripperPosition: gripper.position,
+    gripperTestAngleDeg: gripper.testAngleDeg,
+    gripperReleaseAfterMove: gripper.releaseAfterMove,
+  };
 }
 
 function commandPayload(command) {
@@ -351,6 +447,7 @@ function commandPayload(command) {
       armElbowTwistLimit: twistLimitInputRad("armElbowTwistLimitInput"),
     };
   }
+  if (command.startsWith("gripper-")) return gripperPayload();
   return {};
 }
 
@@ -420,6 +517,7 @@ function setDirtyChecked(id, checked) {
 }
 
 function collectValues() {
+  const gripper = gripperInputState();
   return {
     schemaVersion: 1,
     appVersion: state && state.appVersion ? state.appVersion : undefined,
@@ -435,6 +533,17 @@ function collectValues() {
       velocityLimit: numberInput("positionVelocityInput"),
       acceleration: numberInput("positionAccelerationInput"),
       positionKp: numberInput("positionKpInput"),
+    },
+    gripper: {
+      type: "mg90s",
+      gpioPin: gripper.gpioPin,
+      pulseMinUs: gripper.pulseMinUs,
+      pulseMaxUs: gripper.pulseMaxUs,
+      closedAngleDeg: gripper.closedAngleDeg,
+      openAngleDeg: gripper.openAngleDeg,
+      position: gripper.position,
+      testAngleDeg: gripper.testAngleDeg,
+      releaseAfterMove: gripper.releaseAfterMove,
     },
     arm: {
       motorIds: {
@@ -494,6 +603,7 @@ function collectValues() {
 
 function applyValuePayload(payload) {
   const position = objectValue(payload.position);
+  const gripper = objectValue(payload.gripper);
   const arm = objectValue(payload.arm);
   const motorIds = objectValue(arm.motorIds || arm.motorIdHex);
   const models = objectValue(arm.models);
@@ -525,6 +635,23 @@ function applyValuePayload(payload) {
     2,
   );
   setDirtyNumber("positionKpInput", firstValue(position.positionKp, payload.positionKp), 2);
+
+  setDirtyNumber(
+    "gripperPositionSlider",
+    100 * Number(firstValue(gripper.position, payload.gripperPosition)),
+    0,
+  );
+  setDirtyNumber("gripperAngleInput", firstValue(gripper.testAngleDeg, payload.gripperTestAngleDeg), 1);
+  setDirtyNumber("gripperClosedAngleInput", firstValue(gripper.closedAngleDeg, payload.gripperClosedAngleDeg), 1);
+  setDirtyNumber("gripperOpenAngleInput", firstValue(gripper.openAngleDeg, payload.gripperOpenAngleDeg), 1);
+  setDirtyNumber("gripperGpioPinInput", firstValue(gripper.gpioPin, payload.gripperGpioPin), 0);
+  setDirtyNumber("gripperPulseMinInput", firstValue(gripper.pulseMinUs, payload.gripperPulseMinUs), 0);
+  setDirtyNumber("gripperPulseMaxInput", firstValue(gripper.pulseMaxUs, payload.gripperPulseMaxUs), 0);
+  setDirtyChecked(
+    "gripperReleaseAfterMoveToggle",
+    firstValue(gripper.releaseAfterMove, payload.gripperReleaseAfterMove),
+  );
+  updateGripperReadout();
 
   setDirtyValue(
     "armBaseMotorIdInput",
@@ -687,9 +814,13 @@ function isArmCommand(command) {
   return command.startsWith("arm-");
 }
 
+function isGripperCommand(command) {
+  return command.startsWith("gripper-");
+}
+
 async function sendCommand(command, extra = {}) {
   if (["stop", "arm-stop", "arm-clear-fault", "arm-preset", "shutdown-host"].includes(command)) setArmLiveMoveEnabled(false);
-  if (busy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault", "shutdown-host"].includes(command)) return;
+  if (busy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault", "shutdown-host", "gripper-release"].includes(command)) return;
   if ((command === "arm-move" || command === "arm-home-zero" || command === "arm-preset") && !validateArmCommandMotors()) return;
   if (command === "arm-move") {
     const preview = armPreview();
@@ -715,7 +846,7 @@ async function sendCommand(command, extra = {}) {
   busy = true;
   renderBusy(true);
   try {
-    if (command !== "shutdown-host" && !isArmCommand(command)) await applyConfig();
+    if (command !== "shutdown-host" && !isArmCommand(command) && !isGripperCommand(command)) await applyConfig();
     const result = await post("/api/command", { command, ...extra });
     if (result && result.ok === false && result.message) {
       appendLocalLog(`Command failed: ${result.message}`);
@@ -842,7 +973,7 @@ async function flushArmLiveMove() {
 function renderBusy(isBusy) {
   commandButtons.forEach((button) => {
     const command = button.dataset.command;
-    button.disabled = isBusy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault", "shutdown-host"].includes(command);
+    button.disabled = isBusy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault", "shutdown-host", "gripper-release"].includes(command);
   });
   valueButtons.forEach((button) => {
     button.disabled = isBusy;
@@ -860,6 +991,117 @@ function appendLocalLog(line) {
   const output = $("logOutput");
   output.textContent = `${output.textContent}\n${line}`.trim();
   output.scrollTop = output.scrollHeight;
+}
+
+function updateGripperReadout() {
+  const gripper = gripperInputState();
+  const angle = gripperAngleForPosition(gripper);
+  $("gripperPositionValue").textContent = `${Math.round(gripper.position * 100)}% open`;
+  $("gripperAngleValue").textContent = `${angle.toFixed(1)} deg`;
+  $("gripperTestAngleValue").textContent = `${gripper.testAngleDeg.toFixed(1)} deg`;
+  $("gripperPinValue").textContent = `BCM${gripper.gpioPin}`;
+  $("gripperGuideGpioValue").textContent = `BCM${gripper.gpioPin}`;
+  $("gripperGuidePinValue").textContent = raspberryPiPhysicalPinText(gripper.gpioPin);
+}
+
+function setGripperMessage(message = "", isError = false) {
+  const el = $("gripperMessage");
+  if (!el) return;
+  el.hidden = !message;
+  el.textContent = message;
+  el.classList.toggle("fault", Boolean(isError));
+}
+
+function renderGripper(gripper = {}) {
+  const position = clampedNumber(firstValue(gripper.position, 1), 1, 0, 1);
+  const closedAngle = clampedNumber(firstValue(gripper.closedAngleDeg, DEFAULT_GRIPPER_CLOSED_DEG), DEFAULT_GRIPPER_CLOSED_DEG, 0, 180);
+  const openAngle = clampedNumber(firstValue(gripper.openAngleDeg, DEFAULT_GRIPPER_OPEN_DEG), DEFAULT_GRIPPER_OPEN_DEG, 0, 180);
+  const testAngle = clampedNumber(
+    firstValue(gripper.testAngleDeg, gripper.targetAngleDeg, DEFAULT_GRIPPER_TEST_DEG),
+    DEFAULT_GRIPPER_TEST_DEG,
+    0,
+    180,
+  );
+  setControlValue("gripperPositionSlider", Math.round(position * 100));
+  setControlValue("gripperAngleInput", testAngle.toFixed(1));
+  setControlValue("gripperClosedAngleInput", closedAngle.toFixed(1));
+  setControlValue("gripperOpenAngleInput", openAngle.toFixed(1));
+  setControlValue("gripperGpioPinInput", Math.round(clampedNumber(firstValue(gripper.gpioPin, DEFAULT_GRIPPER_GPIO_PIN), DEFAULT_GRIPPER_GPIO_PIN, 0, 27)));
+  setControlValue("gripperPulseMinInput", Math.round(clampedNumber(firstValue(gripper.pulseMinUs, DEFAULT_GRIPPER_PULSE_MIN_US), DEFAULT_GRIPPER_PULSE_MIN_US, 500, 2500)));
+  setControlValue("gripperPulseMaxInput", Math.round(clampedNumber(firstValue(gripper.pulseMaxUs, DEFAULT_GRIPPER_PULSE_MAX_US), DEFAULT_GRIPPER_PULSE_MAX_US, 500, 2500)));
+  setControlChecked("gripperReleaseAfterMoveToggle", gripper.releaseAfterMove);
+  updateGripperReadout();
+
+  const status = $("gripperStatus");
+  if (gripper.lastError) {
+    status.textContent = "GPIO Error";
+  } else if (gripper.attached) {
+    status.textContent = `Holding BCM${firstValue(gripper.gpioPin, DEFAULT_GRIPPER_GPIO_PIN)}`;
+  } else if (gripper.releaseAfterMove) {
+    status.textContent = "Auto Release";
+  } else {
+    status.textContent = "Released";
+  }
+  setGripperMessage(gripper.lastError || "", Boolean(gripper.lastError));
+}
+
+function clearGripperMoveTimer() {
+  if (gripperMoveTimer) {
+    window.clearTimeout(gripperMoveTimer);
+    gripperMoveTimer = null;
+  }
+}
+
+function appendGripperError(message) {
+  if (!message || message === gripperLastError) return;
+  gripperLastError = message;
+  setGripperMessage(message, true);
+  appendLocalLog(`Gripper blocked: ${message}`);
+}
+
+function queueGripperMove(options = {}) {
+  gripperMoveQueued = true;
+  if (gripperMoveTimer) return;
+  const now = window.performance ? performance.now() : Date.now();
+  const elapsed = now - gripperLastSentAt;
+  const delay = options.immediate ? 0 : Math.max(0, GRIPPER_SEND_INTERVAL_MS - elapsed);
+  gripperMoveTimer = window.setTimeout(flushGripperMove, delay);
+}
+
+async function flushGripperMove() {
+  clearGripperMoveTimer();
+  if (gripperMoveInFlight) {
+    gripperMoveTimer = window.setTimeout(flushGripperMove, 40);
+    return;
+  }
+  gripperMoveQueued = false;
+  gripperMoveInFlight = true;
+  gripperLastSentAt = window.performance ? performance.now() : Date.now();
+  try {
+    const result = await post("/api/command", { command: "gripper-move", ...gripperPayload(), gripperQuiet: true });
+    if (result && result.ok === false) {
+      appendGripperError(result.message || "move rejected");
+    } else {
+      gripperLastError = "";
+      setGripperMessage("");
+    }
+  } catch (error) {
+    appendGripperError(error.message);
+  } finally {
+    gripperMoveInFlight = false;
+    if (gripperMoveQueued) queueGripperMove();
+  }
+}
+
+function setGripperCalibration(kind) {
+  const angle = gripperInputState().testAngleDeg;
+  if (kind === "open") {
+    setDirtyNumber("gripperOpenAngleInput", angle, 1);
+  } else {
+    setDirtyNumber("gripperClosedAngleInput", angle, 1);
+  }
+  updateGripperReadout();
+  sendCommand(`gripper-calibrate-${kind}`, gripperPayload());
 }
 
 function isFiniteNumber(value) {
@@ -1801,6 +2043,16 @@ function closeIdSetup() {
   document.body.classList.remove("modal-open");
 }
 
+function openGripperGuide() {
+  $("gripperGuideFlow").hidden = false;
+  document.body.classList.add("modal-open");
+}
+
+function closeGripperGuide() {
+  $("gripperGuideFlow").hidden = true;
+  document.body.classList.remove("modal-open");
+}
+
 async function scanSingleMotorForIdSetup() {
   if (busy) return;
   busy = true;
@@ -2273,6 +2525,7 @@ function render(state) {
   setControlValue("positionVelocityInput", Number(state.positionVelocityLimit || 1).toFixed(2));
   setControlValue("positionAccelerationInput", Number(state.positionAcceleration || 10).toFixed(1));
   setControlValue("positionKpInput", Number(state.positionKp || 5).toFixed(1));
+  renderGripper(state.gripper || {});
 
   const arm = state.arm || {};
   setControlValue("wizardJointCountInput", Number(arm.jointCount) === 2 ? "2" : "3");
@@ -2394,6 +2647,23 @@ positionControlIds.forEach((id) => {
   el.addEventListener("change", () => markDirty(id));
 });
 
+gripperControlIds.forEach((id) => {
+  const el = $(id);
+  if (!el) return;
+  const update = () => {
+    markDirty(id);
+    updateGripperReadout();
+  };
+  el.addEventListener("input", () => {
+    update();
+    if (id === "gripperPositionSlider") queueGripperMove();
+  });
+  el.addEventListener("change", () => {
+    update();
+    if (id === "gripperPositionSlider") queueGripperMove({ immediate: true });
+  });
+});
+
 armControlIds.forEach((id) => {
   const el = $(id);
   const update = () => {
@@ -2501,7 +2771,16 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("ikWizardFlow").hidden) closeWizard();
   if (event.key === "Escape" && !$("idSetupFlow").hidden) closeIdSetup();
   if (event.key === "Escape" && !$("targetEditorFlow").hidden) closeTargetEditor();
+  if (event.key === "Escape" && !$("gripperGuideFlow").hidden) closeGripperGuide();
 });
+
+$("gripperGuideBtn").addEventListener("click", openGripperGuide);
+$("gripperGuideCloseBtn").addEventListener("click", closeGripperGuide);
+$("gripperGuideFlow").addEventListener("click", (event) => {
+  if (event.target === $("gripperGuideFlow")) closeGripperGuide();
+});
+$("gripperSetClosedBtn").addEventListener("click", () => setGripperCalibration("closed"));
+$("gripperSetOpenBtn").addEventListener("click", () => setGripperCalibration("open"));
 
 document.querySelectorAll("[data-target-preset]").forEach((button) => {
   button.addEventListener("click", () => applyTargetPreset(button.dataset.targetPreset));

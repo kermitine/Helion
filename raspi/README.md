@@ -103,6 +103,28 @@ new sudo rule is used. If the button reports interactive authentication, update
 again and rerun `bash raspi/install_dashboard.sh`; the dashboard log will list
 the Linux user and every shutdown command it tried.
 
+## MG90S Gripper
+
+The dashboard has an **MG90S Gripper** panel for a small PWM servo gripper. It
+uses BCM GPIO numbering and defaults to GPIO `18` on physical pin `12`, with a
+50 Hz servo signal and conservative `1000..2000 us` pulse bounds. Gripper
+commands do not require the RobStride USB-CAN adapter to be online.
+
+Use the panel's **Guide** button for the built-in wiring and calibration flow.
+In short: connect the servo signal wire to the selected GPIO pin, power the
+servo from a regulated 5 V supply sized for the gripper load, and tie servo
+ground, supply ground, and Raspberry Pi ground together. Avoid powering a loaded
+servo directly from the Pi 5 V pin if it causes brownouts or resets.
+
+For calibration, use **Test Angle** and **Move Angle** to find the fully closed
+and fully open positions without forcing the linkage. Press **Closed Here** and
+**Open Here** to store those angles, then use the position slider: `0%` maps to
+the closed angle and `100%` maps to the open angle. Use **Release** to stop the
+servo PWM output, or enable **Release After Move** if you want the dashboard to
+pulse the servo briefly without holding torque. Press **Save Values** after
+calibration so the GPIO pin, pulse bounds, and open/closed angles load on the
+next dashboard start.
+
 Use SSH for the initial install, service-level changes such as port, Linux
 permissions or systemd edits, and code updates.
 

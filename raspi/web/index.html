@@ -611,6 +611,126 @@
           </div>
         </div>
 
+        <div class="panel gripper-panel">
+          <div class="panel-head">
+            <h2>MG90S Gripper</h2>
+            <span id="gripperStatus">Released</span>
+          </div>
+
+          <div class="gripper-body">
+            <div class="gripper-position-control">
+              <div class="gripper-readout">
+                <strong id="gripperPositionValue">100% open</strong>
+                <span id="gripperAngleValue">120.0 deg</span>
+                <span id="gripperPinValue">BCM18</span>
+              </div>
+              <label class="gripper-slider-label">
+                <span>Position</span>
+                <input id="gripperPositionSlider" type="range" min="0" max="100" step="1" value="100">
+              </label>
+              <div class="button-row gripper-actions">
+                <button data-command="gripper-close">Close</button>
+                <button class="soft" data-command="gripper-open">Open</button>
+                <button class="danger" data-command="gripper-release">Release</button>
+                <button id="gripperGuideBtn" type="button">Guide</button>
+              </div>
+            </div>
+
+            <div class="gripper-calibration">
+              <div class="gripper-section-head">
+                <h3>Calibration</h3>
+                <span id="gripperTestAngleValue">90.0 deg</span>
+              </div>
+              <div class="arm-grid gripper-grid">
+                <label>
+                  <span>Test Angle</span>
+                  <input id="gripperAngleInput" type="number" min="0" max="180" step="1" value="90" inputmode="decimal">
+                </label>
+                <label>
+                  <span>Closed Angle</span>
+                  <input id="gripperClosedAngleInput" type="number" min="0" max="180" step="1" value="35" inputmode="decimal">
+                </label>
+                <label>
+                  <span>Open Angle</span>
+                  <input id="gripperOpenAngleInput" type="number" min="0" max="180" step="1" value="120" inputmode="decimal">
+                </label>
+                <label>
+                  <span>GPIO BCM</span>
+                  <input id="gripperGpioPinInput" type="number" min="0" max="27" step="1" value="18" inputmode="numeric">
+                </label>
+                <label>
+                  <span>Min Pulse us</span>
+                  <input id="gripperPulseMinInput" type="number" min="500" max="2500" step="10" value="1000" inputmode="numeric">
+                </label>
+                <label>
+                  <span>Max Pulse us</span>
+                  <input id="gripperPulseMaxInput" type="number" min="500" max="2500" step="10" value="2000" inputmode="numeric">
+                </label>
+                <label class="switch">
+                  <input id="gripperReleaseAfterMoveToggle" type="checkbox">
+                  <span>Release After Move</span>
+                </label>
+              </div>
+              <div class="button-row gripper-calibration-actions">
+                <button data-command="gripper-angle">Move Angle</button>
+                <button id="gripperSetClosedBtn" type="button">Closed Here</button>
+                <button id="gripperSetOpenBtn" type="button" class="soft">Open Here</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="gripperMessage" class="safety-warning" hidden></div>
+        </div>
+
+        <div class="wizard-overlay" id="gripperGuideFlow" role="dialog" aria-modal="true" aria-labelledby="gripperGuideTitle" hidden>
+          <div class="guide-window">
+            <div class="wizard-progress">
+              <span>MG90S</span>
+              <strong id="gripperGuideTitle">Gripper Connection Guide</strong>
+              <button id="gripperGuideCloseBtn" type="button" class="ghost">Close</button>
+            </div>
+            <div class="gripper-guide-body">
+              <div class="wiring-card" aria-hidden="true">
+                <div class="wire-node pi-node">
+                  <span>Pi</span>
+                  <strong id="gripperGuideGpioValue">BCM18</strong>
+                  <small id="gripperGuidePinValue">pin 12</small>
+                </div>
+                <div class="wire-bundle">
+                  <i class="signal-wire"></i>
+                  <i class="power-wire"></i>
+                  <i class="ground-wire"></i>
+                </div>
+                <div class="wire-node servo-node">
+                  <span>MG90S</span>
+                  <strong>Signal</strong>
+                  <small>5 V servo power</small>
+                </div>
+              </div>
+              <div class="guide-copy">
+                <section>
+                  <h3>Wiring</h3>
+                  <ol>
+                    <li>Connect the MG90S signal wire to the selected BCM GPIO pin. The default is BCM18, physical pin 12.</li>
+                    <li>Power the servo from a regulated 5 V supply sized for the gripper load.</li>
+                    <li>Connect servo ground, power-supply ground, and Raspberry Pi ground together.</li>
+                    <li>Keep the motor USB-CAN wiring separate from the servo power leads where practical.</li>
+                  </ol>
+                </section>
+                <section>
+                  <h3>Calibration</h3>
+                  <ol>
+                    <li>Use Test Angle and Move Angle to find the fully closed servo angle without forcing the linkage.</li>
+                    <li>Press Closed Here, then find the fully open angle and press Open Here.</li>
+                    <li>Use the Position slider: 0% maps to Closed Angle, 100% maps to Open Angle.</li>
+                    <li>Save Values after calibration so the angles load on the next dashboard start.</li>
+                  </ol>
+                </section>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="panel telemetry-panel">
           <div class="panel-head">
             <h2>Telemetry</h2>

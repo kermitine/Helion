@@ -23,9 +23,19 @@ fi
 
 sudo apt update
 sudo apt install -y git python3
+if ! sudo apt install -y python3-rpi.gpio; then
+  echo "Warning: python3-rpi.gpio was not installed; MG90S gripper control will report a GPIO library error until it is available." >&2
+fi
 
 if [[ "$SERVICE_USER" != "root" ]]; then
   sudo usermod -aG dialout "$SERVICE_USER" || true
+  SUPPLEMENTARY_GROUPS="dialout"
+  if getent group gpio >/dev/null; then
+    sudo usermod -aG gpio "$SERVICE_USER" || true
+    SUPPLEMENTARY_GROUPS="dialout gpio"
+  fi
+else
+  SUPPLEMENTARY_GROUPS=""
 fi
 
 chmod +x "$REPO_DIR/raspi/robstride_usb.py"
@@ -101,7 +111,7 @@ Wants=network-online.target
 Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_GROUP
-SupplementaryGroups=dialout
+${SUPPLEMENTARY_GROUPS:+SupplementaryGroups=$SUPPLEMENTARY_GROUPS}
 $DASHBOARD_CAPABILITY_LINES
 NoNewPrivileges=false
 ExecStart=/usr/local/bin/helion-dashboard --host $DASHBOARD_HOST --port $DASHBOARD_PORT --serial-port $SERIAL_PORT --serial-baud $SERIAL_BAUD
