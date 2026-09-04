@@ -108,6 +108,8 @@ ARM_ROUTE_VELOCITY_DURATION_FACTOR = 2.6
 ARM_ROUTE_ACCEL_DURATION_FACTOR = 8.5
 ARM_ROUTE_FEEDBACK_RESEED_RAD = math.radians(4.0)
 ARM_ROUTE_SUPPORT_GRACE_S = 0.45
+ARM_ROUTE_LAUNCH_HOLD_S = 0.09
+ARM_ROUTE_LIVE_LAUNCH_HOLD_S = ARM_ROUTE_SAMPLE_S
 ARM_PRESET_MIN_RADIAL_SCALE = 0.42
 ARM_PRESET_MAX_RADIAL_SCALE = 0.72
 ARM_PRESET_MIN_Z_SCALE = 0.16
@@ -161,6 +163,11 @@ ARM_ADAPTIVE_ASSIST_MAX_STEP_NM = 0.025
 ARM_ADAPTIVE_ASSIST_SETTLE_S = 0.75
 ARM_ADAPTIVE_ASSIST_CONFIRM_S = 0.30
 ARM_ADAPTIVE_ASSIST_OVERSHOOT_BLEED_NM_S = 1.50
+ARM_ADAPTIVE_ASSIST_FALL_ARREST_MIN_VEL_RAD_S = 0.035
+ARM_ADAPTIVE_ASSIST_FALL_ARREST_MAX_FEEDBACK_VEL_RAD_S = 0.80
+ARM_ADAPTIVE_ASSIST_FALL_ARREST_LEARN_RATE_NM_PER_RAD_S = 3.5
+ARM_ADAPTIVE_ASSIST_FALL_ARREST_VEL_RATE_NM_PER_RAD_S = 1.1
+ARM_ADAPTIVE_ASSIST_FALL_ARREST_MAX_STEP_NM = 0.055
 ARM_FEEDBACK_START_MAX_AGE_S = 1.0
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
@@ -195,7 +202,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.21"
+APP_VERSION = "2026.09.03.22"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -2186,9 +2193,6 @@ class DashboardController:
         self.arm_adaptive_assist_last_update_at = now
         if dt <= 0.0:
             return
-        if now < self.arm_adaptive_assist_pause_until or self.arm_route_waypoints:
-            return
-
         active_axes = set(self.active_arm_axes())
         learn_axes = [axis for axis in ARM_ADAPTIVE_ASSIST_AXES if axis in active_axes]
         for axis in ARM_ADAPTIVE_ASSIST_AXES:
@@ -2203,22 +2207,54 @@ class DashboardController:
                 target_velocity = abs(float(self.arm_motor_velocities.get(axis, 0.0)))
             except (TypeError, ValueError):
                 continue
-            if target_velocity > ARM_ADAPTIVE_ASSIST_MAX_TARGET_VEL_RAD_S:
-                self.arm_adaptive_assist_error_signs[axis] = 0
-                continue
 
             position, feedback_velocity = self.arm_feedback_for_axis(axis, now)
             if position is None:
                 self.arm_adaptive_assist_error_signs[axis] = 0
                 continue
             velocity = feedback_velocity or 0.0
-            if abs(velocity) > ARM_ADAPTIVE_ASSIST_MAX_FEEDBACK_VEL_RAD_S:
-                self.arm_adaptive_assist_error_signs[axis] = 0
-                continue
 
             error = target_position - position
             abs_error = abs(error)
             current = self.arm_adaptive_assist_trims.get(axis, 0.0)
+            moving_away = (
+                abs_error > ARM_ADAPTIVE_ASSIST_DEADBAND_RAD
+                and abs(velocity) >= ARM_ADAPTIVE_ASSIST_FALL_ARREST_MIN_VEL_RAD_S
+                and abs(velocity) <= ARM_ADAPTIVE_ASSIST_FALL_ARREST_MAX_FEEDBACK_VEL_RAD_S
+                and velocity * error < 0.0
+            )
+            if moving_away:
+                learn_error = error - math.copysign(ARM_ADAPTIVE_ASSIST_DEADBAND_RAD, error)
+                delta = learn_error * ARM_ADAPTIVE_ASSIST_FALL_ARREST_LEARN_RATE_NM_PER_RAD_S * dt
+                delta += (
+                    math.copysign(1.0, error)
+                    * abs(velocity)
+                    * ARM_ADAPTIVE_ASSIST_FALL_ARREST_VEL_RATE_NM_PER_RAD_S
+                    * dt
+                )
+                delta = max(
+                    -ARM_ADAPTIVE_ASSIST_FALL_ARREST_MAX_STEP_NM,
+                    min(ARM_ADAPTIVE_ASSIST_FALL_ARREST_MAX_STEP_NM, delta),
+                )
+                self.arm_adaptive_assist_trims[axis] = max(
+                    -ARM_ADAPTIVE_ASSIST_MAX_NM,
+                    min(ARM_ADAPTIVE_ASSIST_MAX_NM, current + delta),
+                )
+                self.arm_adaptive_assist_error_signs[axis] = 0
+                self.arm_adaptive_assist_error_since[axis] = 0.0
+                continue
+
+            if target_velocity > ARM_ADAPTIVE_ASSIST_MAX_TARGET_VEL_RAD_S:
+                self.arm_adaptive_assist_error_signs[axis] = 0
+                continue
+            if abs(velocity) > ARM_ADAPTIVE_ASSIST_MAX_FEEDBACK_VEL_RAD_S:
+                self.arm_adaptive_assist_error_signs[axis] = 0
+                continue
+
+            if now < self.arm_adaptive_assist_pause_until or self.arm_route_waypoints:
+                self.arm_adaptive_assist_error_signs[axis] = 0
+                continue
+
             if current * error < 0.0 and abs_error > ARM_ADAPTIVE_ASSIST_DEADBAND_RAD:
                 bleed = min(abs(current), ARM_ADAPTIVE_ASSIST_OVERSHOOT_BLEED_NM_S * dt)
                 self.arm_adaptive_assist_trims[axis] = current - math.copysign(bleed, current)
@@ -2444,6 +2480,18 @@ class DashboardController:
             self.arm_effective_torque_bias(axis, target_position, target_velocity),
         )
 
+    def refresh_arm_hold_before_route_planning(self) -> None:
+        if not self.arm_position_configured:
+            return
+        now = time.monotonic()
+        self.arm_route_support_until = max(
+            getattr(self, "arm_route_support_until", 0.0),
+            now + ARM_ROUTE_SUPPORT_GRACE_S,
+        )
+        for axis in self.active_arm_axes():
+            self.send_arm_operation_control_for_axis(axis)
+        self.last_arm_position_refresh_at = time.monotonic()
+
     def clear_arm_route(self) -> None:
         self.arm_route_waypoints.clear()
         self.arm_route_next_at = 0.0
@@ -2457,6 +2505,23 @@ class DashboardController:
         except (TypeError, ValueError):
             interval = ARM_ROUTE_SAMPLE_S
         return max(0.005, min(0.20, interval))
+
+    def arm_hold_waypoint(
+        self,
+        joint_angles: Dict[str, float],
+        interval: float,
+    ) -> Dict[str, Any]:
+        hold_angles = {axis: float(joint_angles.get(axis, 0.0)) for axis in ARM_AXES}
+        if self.arm_joint_count == 2:
+            hold_angles["elbow"] = 0.0
+        hold_velocities = {axis: 0.0 for axis in ARM_AXES}
+        return {
+            "jointAngles": hold_angles,
+            "jointVelocities": hold_velocities,
+            "motorTargets": self.arm_motor_targets_for_joints(hold_angles),
+            "motorVelocities": self.arm_motor_velocities_for_joints(hold_velocities),
+            "interval": interval,
+        }
 
     def apply_arm_route_waypoint(self, waypoint: Dict[str, Any]) -> None:
         self.arm_joint_angles = dict(waypoint["jointAngles"])
@@ -2595,11 +2660,14 @@ class DashboardController:
         self,
         targets: List[Dict[str, float]],
         max_step_rad: float,
+        launch_hold_s: float = 0.0,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, float], Dict[str, float]]:
         previous_angles = self.arm_route_start_joint_angles()
         final_target = dict(self.arm_target)
         final_joint_angles = dict(previous_angles)
         route_waypoints: List[Dict[str, Any]] = []
+        if launch_hold_s > 0.0:
+            route_waypoints.append(self.arm_hold_waypoint(previous_angles, launch_hold_s))
         for target in targets:
             segment, final_target, final_joint_angles = self.arm_route_waypoints_to_target(
                 target,
@@ -2945,9 +3013,14 @@ class DashboardController:
             raise ValueError(message)
         self.apply_arm_payload(payload)
         config_signature = self.arm_position_config_signature()
+        launch_hold_s = 0.0
+        if self.arm_position_configured and self.arm_position_signature == config_signature:
+            self.refresh_arm_hold_before_route_planning()
+            launch_hold_s = ARM_ROUTE_LIVE_LAUNCH_HOLD_S if live else ARM_ROUTE_LAUNCH_HOLD_S
         route_waypoints, final_target, _final_joint_angles = self.build_arm_route_for_targets(
             [dict(self.arm_target)],
             ARM_ROUTE_MAX_STEP_RAD,
+            launch_hold_s=launch_hold_s,
         )
         self.arm_target = final_target
         label = (
@@ -2964,15 +3037,21 @@ class DashboardController:
         preset = str(payload.get("armMotionPreset", "showcase")).strip().lower()
         label = ARM_MOTION_PRESET_LABELS.get(preset, preset.title())
         targets = self.arm_motion_preset_targets(preset)
+        config_signature = self.arm_position_config_signature()
+        launch_hold_s = 0.0
+        if self.arm_position_configured and self.arm_position_signature == config_signature:
+            self.refresh_arm_hold_before_route_planning()
+            launch_hold_s = ARM_ROUTE_LAUNCH_HOLD_S
         route_waypoints, final_target, _final_joint_angles = self.build_arm_route_for_targets(
             targets,
             ARM_PRESET_MAX_STEP_RAD,
+            launch_hold_s=launch_hold_s,
         )
         self.arm_target = final_target
         route_duration = sum(self.arm_route_waypoint_interval(item) for item in route_waypoints)
         ok = self.start_arm_route(
             route_waypoints,
-            self.arm_position_config_signature(),
+            config_signature,
             f"Arm preset {label} ({self.arm_joint_count}-joint)",
         )
         return {
