@@ -43,7 +43,7 @@ const ARM_PRESET_MAX_Z_SCALE = 0.52;
 const ARM_PRESET_ELBOW_DOWN_MIN_RADIAL_SCALE = 0.66;
 const ARM_PRESET_ELBOW_DOWN_MIN_Z_SCALE = 0.50;
 const ARM_PRESET_ELBOW_DOWN_MAX_Z_SCALE = 0.60;
-const DEFAULT_GRIPPER_GPIO_PIN = 18;
+const DEFAULT_GRIPPER_GPIO_PIN = 12;
 const DEFAULT_GRIPPER_PULSE_MIN_US = 1000;
 const DEFAULT_GRIPPER_PULSE_MAX_US = 2000;
 const DEFAULT_GRIPPER_CLOSED_DEG = 35;
@@ -754,7 +754,7 @@ function downloadValues() {
   const url = URL.createObjectURL(new Blob([`${data}\n`], { type: "application/json" }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = "helion-dashboard-values.json";
+  link.download = "helionos-values.json";
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -839,7 +839,7 @@ async function sendCommand(command, extra = {}) {
   }
   if (
     command === "shutdown-host" &&
-    !confirm("Support the arm first. This will stop the motors, save dashboard values, and power off the Raspberry Pi. Wait for the Pi activity LED to stop before cutting power.")
+    !confirm("Support the arm first. This will stop the motors, save HelionOS values, and power off the Raspberry Pi. Wait for the Pi activity LED to stop before cutting power.")
   ) {
     return;
   }
@@ -2508,7 +2508,7 @@ function render(state) {
   const status = $("connectionStatus");
   status.textContent = state.connected ? "Online" : "Offline";
   status.className = `status-pill ${state.connected ? "online" : "offline"}`;
-  $("subtitle").textContent = state.openError || state.transportLabel || "Helion control surface";
+  $("subtitle").textContent = state.openError || state.transportLabel || "HelionOS control surface";
   $("appVersion").textContent = state.appVersion ? `v${state.appVersion}` : "v--";
   setIdSetupMotorOptions(detectedMotors);
   $("configuredState").textContent = state.positionConfigured

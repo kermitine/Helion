@@ -1,7 +1,7 @@
-# RobStride On Raspberry Pi
+# HelionOS On Raspberry Pi
 
-This folder contains the Raspberry Pi command-line tool and Pi-local web
-dashboard for the official RobStride USB-CAN adapter using RobStride private
+This folder contains the Raspberry Pi command-line tool and Pi-local HelionOS
+web app for the official RobStride USB-CAN adapter using RobStride private
 extended-ID control.
 
 ```bash
@@ -30,7 +30,7 @@ python3 raspi/robstride_usb.py --self-test
 
 The default private-protocol motor ID is `0x7F` and host ID is `0xFD`.
 
-## Dashboard Install
+## HelionOS Install
 
 From a fresh Pi:
 
@@ -48,20 +48,20 @@ To be explicit about the adapter:
 SERIAL_PORT=auto SERIAL_BAUD=921600 bash raspi/install_dashboard.sh
 ```
 
-The installer creates and enables `robstride-dashboard.service`, so the
-dashboard starts automatically every time the Pi boots. It also adds the
-dashboard service user to the `dialout` group so it can open the USB adapter.
+The installer creates and enables `robstride-dashboard.service`, so HelionOS
+starts automatically every time the Pi boots. It also adds the HelionOS service
+user to the `dialout` group so it can open the USB adapter.
 If an older install created CAN helper wrappers or `robstride-can.service`, the
 installer disables and removes those stale pieces.
 
-Open the dashboard from another machine on the same network:
+Open HelionOS from another machine on the same network:
 
 ```text
 http://<pi-ip-address>
 ```
 
 The installed service listens on port `80` by default, which is why the browser
-URL does not need `:8080`. The service grants the Python dashboard only the
+URL does not need `:8080`. The service grants HelionOS only the
 `CAP_NET_BIND_SERVICE` capability needed to bind that low port. To keep using
 the old explicit port instead, reinstall with `DASHBOARD_PORT=8080`.
 
@@ -74,7 +74,7 @@ helion-update
 ```
 
 `helion-update` pulls the current GitHub branch with `git pull --ff-only`,
-checks the Python files, and restarts the dashboard service.
+checks the Python files, and restarts the HelionOS service.
 
 If the Pi has local edits, `helion-update` saves them in a Git stash before
 pulling so the update can continue without overwriting those changes. To disable
@@ -89,24 +89,24 @@ After the update is running, rerun `bash raspi/install_dashboard.sh` when you
 want the installed systemd service and helper commands cleaned up to match the
 new layout.
 
-The web UI shows the dashboard version in the header. When changing dashboard or
+The web UI shows the HelionOS version in the header. When changing HelionOS or
 Raspberry Pi backend code, increment `APP_VERSION` in
 `raspi/robstride_dashboard.py` before committing so the Pi page makes it obvious
 which update is running.
 
-Use **Shutdown Pi** in the dashboard before removing Raspberry Pi power. The
-button stops the arm motors, saves dashboard values, flushes the filesystem, and
+Use **Shutdown Pi** in HelionOS before removing Raspberry Pi power. The
+button stops the arm motors, saves HelionOS values, flushes the filesystem, and
 then requests Linux poweroff. Wait for the Pi activity LED to stop blinking
-before cutting power. The installer grants the dashboard user passwordless sudo
-for `/usr/local/sbin/helion-poweroff` and restarts the dashboard service so the
-new sudo rule is used. If the button reports interactive authentication, update
-again and rerun `bash raspi/install_dashboard.sh`; the dashboard log will list
-the Linux user and every shutdown command it tried.
+before cutting power. The installer grants the HelionOS service user
+passwordless sudo for `/usr/local/sbin/helion-poweroff` and restarts the
+HelionOS service so the new sudo rule is used. If the button reports interactive
+authentication, update again and rerun `bash raspi/install_dashboard.sh`; the
+HelionOS log will list the Linux user and every shutdown command it tried.
 
 ## MG90S Gripper
 
-The dashboard has an **MG90S Gripper** panel for a small PWM servo gripper. It
-uses BCM GPIO numbering and defaults to GPIO `18` on physical pin `12`, with a
+HelionOS has an **MG90S Gripper** panel for a small PWM servo gripper. It
+uses BCM GPIO numbering and defaults to GPIO `12` on physical pin `32`, with a
 50 Hz servo signal and conservative `1000..2000 us` pulse bounds. Gripper
 commands do not require the RobStride USB-CAN adapter to be online.
 
@@ -120,10 +120,10 @@ For calibration, use **Test Angle** and **Move Angle** to find the fully closed
 and fully open positions without forcing the linkage. Press **Closed Here** and
 **Open Here** to store those angles, then use the position slider: `0%` maps to
 the closed angle and `100%` maps to the open angle. Use **Release** to stop the
-servo PWM output, or enable **Release After Move** if you want the dashboard to
+servo PWM output, or enable **Release After Move** if you want HelionOS to
 pulse the servo briefly without holding torque. Press **Save Values** after
 calibration so the GPIO pin, pulse bounds, and open/closed angles load on the
-next dashboard start.
+next HelionOS start.
 
 Use SSH for the initial install, service-level changes such as port, Linux
 permissions or systemd edits, and code updates.
@@ -133,7 +133,7 @@ Normal update flow:
 ```bash
 # On your dev machine
 git add .
-git commit -m "Update RobStride dashboard"
+git commit -m "Update HelionOS"
 git push
 
 # On the Pi
@@ -149,7 +149,7 @@ git pull
 bash raspi/install_dashboard.sh
 ```
 
-Keep the dashboard on a trusted local network only. It can move the motor and
+Keep HelionOS on a trusted local network only. It can move the motor and
 change saved motor setup values.
 
 Useful service checks:
@@ -170,15 +170,15 @@ python3 raspi/robstride_usb.py --serial-port auto --command configure
 python3 raspi/robstride_usb.py --serial-port auto --command jog-right
 ```
 
-If the dashboard opens but no motors appear, wait a few seconds and press
-**Scan Private** before rebooting the Pi. The dashboard also runs a delayed
+If HelionOS opens but no motors appear, wait a few seconds and press
+**Scan Private** before rebooting the Pi. HelionOS also runs a delayed
 startup scan automatically. If a scan finds no motors, it reopens the RobStride
 USB-CAN adapter and retries, which usually fixes boot timing races between the
 Pi, adapter, and motor power.
 
 ## Arm IK
 
-The dashboard Arm IK panel solves a three-axis base/shoulder/elbow arm in the
+The HelionOS Arm IK panel solves a three-axis base/shoulder/elbow arm in the
 browser as you edit the values. The canvas uses the same link lengths, target,
 elbow-up setting, joint offsets, and motor directions that will be sent by
 **Move IK**.
@@ -195,16 +195,16 @@ degrees to `-179` degrees is broken into safe waypoints back through zero
 instead of slipping past the `+180` degree wire limit.
 
 For homing, manually move the arm to its mechanical/kinematic zero pose, then
-press **Home Zero**. The dashboard disables the arm motors, reads each motor's
+press **Home Zero**. HelionOS disables the arm motors, reads each motor's
 current private-protocol position, stores those positions as the IK offsets, and
-saves them for the next dashboard start.
+saves them for the next HelionOS start.
 
 The quick **Home** target preset is separate from **Home Zero**: **Home** points
 the arm vertically up at `x=0`, `y=0`, `z=link1+link2`, while **Home Zero** keeps
 the flat-forward zero pose.
 
-The **Files** step can save the current dashboard values on the Pi, download
-them as JSON, or upload a JSON values file. Saved values are loaded on dashboard
+The **Files** step can save the current HelionOS values on the Pi, download
+them as JSON, or upload a JSON values file. Saved values are loaded on HelionOS
 startup from:
 
 ```text
@@ -229,7 +229,7 @@ without allowing the arm to route underneath the horizontal plane.
 Loaded arms use RobStride operation-control frames for IK moves so the hold loop
 has explicit damping and feed-forward torque. IK targets are streamed as small
 smootherstep route samples with velocity feed-forward; `Velocity Limit` and
-`Acceleration` control the planned route duration. The dashboard defaults to
+`Acceleration` control the planned route duration. HelionOS defaults to
 `0.35 rad/s`, `2.5 rad/s^2`, `Kp=4.0`, `Kd=2.0`, and `4 A`, and caps saved arm
 values at `1.5 rad/s`, `8 rad/s^2`, `Kp=10.0`, `Kd=5.0`, and `+/-5 Nm` assist
 torque. Motion presets are generated from the current link lengths, elbow bend,

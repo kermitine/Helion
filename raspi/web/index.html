@@ -3,15 +3,15 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Helion</title>
+    <title>HelionOS</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
     <main class="app">
       <header class="topbar">
         <div>
-          <h1>Helion</h1>
-          <p><span id="subtitle">Arm control surface</span> <span id="appVersion">v--</span></p>
+          <h1>HelionOS</h1>
+          <p><span id="subtitle">Motion control surface</span> <span id="appVersion">v--</span></p>
         </div>
         <div class="status-pill" id="connectionStatus">Offline</div>
       </header>
@@ -622,7 +622,7 @@
               <div class="gripper-readout">
                 <strong id="gripperPositionValue">100% open</strong>
                 <span id="gripperAngleValue">120.0 deg</span>
-                <span id="gripperPinValue">BCM18</span>
+                <span id="gripperPinValue">BCM12</span>
               </div>
               <label class="gripper-slider-label">
                 <span>Position</span>
@@ -656,7 +656,7 @@
                 </label>
                 <label>
                   <span>GPIO BCM</span>
-                  <input id="gripperGpioPinInput" type="number" min="0" max="27" step="1" value="18" inputmode="numeric">
+                  <input id="gripperGpioPinInput" type="number" min="0" max="27" step="1" value="12" inputmode="numeric">
                 </label>
                 <label>
                   <span>Min Pulse us</span>
@@ -693,8 +693,8 @@
               <div class="wiring-card" aria-hidden="true">
                 <div class="wire-node pi-node">
                   <span>Pi</span>
-                  <strong id="gripperGuideGpioValue">BCM18</strong>
-                  <small id="gripperGuidePinValue">pin 12</small>
+                  <strong id="gripperGuideGpioValue">BCM12</strong>
+                  <small id="gripperGuidePinValue">pin 32</small>
                 </div>
                 <div class="wire-bundle">
                   <i class="signal-wire"></i>
@@ -711,7 +711,7 @@
                 <section>
                   <h3>Wiring</h3>
                   <ol>
-                    <li>Connect the MG90S signal wire to the selected BCM GPIO pin. The default is BCM18, physical pin 12.</li>
+                    <li>Connect the MG90S signal wire to the selected BCM GPIO pin. The default is BCM12, physical pin 32.</li>
                     <li>Power the servo from a regulated 5 V supply sized for the gripper load.</li>
                     <li>Connect servo ground, power-supply ground, and Raspberry Pi ground together.</li>
                     <li>Keep the motor USB-CAN wiring separate from the servo power leads where practical.</li>
@@ -723,7 +723,7 @@
                     <li>Use Test Angle and Move Angle to find the fully closed servo angle without forcing the linkage.</li>
                     <li>Press Closed Here, then find the fully open angle and press Open Here.</li>
                     <li>Use the Position slider: 0% maps to Closed Angle, 100% maps to Open Angle.</li>
-                    <li>Save Values after calibration so the angles load on the next dashboard start.</li>
+                    <li>Save Values after calibration so the angles load on the next HelionOS start.</li>
                   </ol>
                 </section>
               </div>

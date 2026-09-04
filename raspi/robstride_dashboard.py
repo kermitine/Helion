@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local RobStride dashboard for the RobStride USB-CAN adapter."""
+"""HelionOS web control surface for the RobStride USB-CAN adapter."""
 
 from __future__ import annotations
 
@@ -182,7 +182,7 @@ GRIPPER_COMMANDS = {
     "gripper-calibrate-closed",
     "gripper-release",
 }
-GRIPPER_DEFAULT_GPIO_PIN = 18
+GRIPPER_DEFAULT_GPIO_PIN = 12
 GRIPPER_GPIO_MIN_PIN = 0
 GRIPPER_GPIO_MAX_PIN = 27
 GRIPPER_PWM_HZ = 50.0
@@ -229,7 +229,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.04.02"
+APP_VERSION = "2026.09.04.04"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1634,7 +1634,7 @@ class DashboardController:
                 import RPi.GPIO as GPIO  # type: ignore[import-not-found]
             except Exception as exc:
                 raise RuntimeError(
-                    "RPi.GPIO is not available; install python3-rpi.gpio and run the dashboard on the Raspberry Pi"
+            "RPi.GPIO is not available; install python3-rpi.gpio and run HelionOS on the Raspberry Pi"
                 ) from exc
             GPIO.setwarnings(False)
             GPIO.setmode(GPIO.BCM)
@@ -2270,7 +2270,7 @@ class DashboardController:
         if persist:
             self.log(f"Values saved to {VALUES_PATH}")
         elif bus_changed or control_changed:
-            self.log("Dashboard values applied")
+            self.log("HelionOS values applied")
         result: Dict[str, Any] = {
             "ok": True,
             "path": str(VALUES_PATH),
@@ -4459,7 +4459,7 @@ class DashboardController:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "RobStrideDashboard/1.0"
+    server_version = "HelionOS/1.0"
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -4572,7 +4572,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--motor-id", default=hex(DEFAULT_MOTOR_ID))
     parser.add_argument("--host-id", default=hex(DEFAULT_HOST_ID))
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--no-open", action="store_true", help="start dashboard without opening the USB adapter")
+    parser.add_argument("--no-open", action="store_true", help="start HelionOS without opening the USB adapter")
     return parser.parse_args()
 
 
@@ -4587,7 +4587,7 @@ def main() -> int:
         open_can=not args.no_open,
     )
     server = DashboardServer((args.host, args.port), DashboardHandler, controller)
-    print(f"RobStride dashboard listening on http://{args.host}:{args.port}")
+    print(f"HelionOS listening on http://{args.host}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

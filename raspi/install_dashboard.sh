@@ -103,7 +103,7 @@ sudo rm -f /etc/systemd/system/robstride-can.service
 
 sudo tee /etc/systemd/system/robstride-dashboard.service >/dev/null <<EOF
 [Unit]
-Description=RobStride web dashboard
+Description=HelionOS web control service
 After=network-online.target
 Wants=network-online.target
 
@@ -133,8 +133,8 @@ else
   DASHBOARD_URL="http://${PI_IP}:${DASHBOARD_PORT}"
 fi
 
-echo "Dashboard installed."
+echo "HelionOS installed."
 echo "Open: ${DASHBOARD_URL}"
 echo "Update later with: helion-update"
-echo "Dashboard service runs as user: ${SERVICE_USER}"
+echo "HelionOS service runs as user: ${SERVICE_USER}"
 echo "RobStride USB adapter: ${SERIAL_PORT} at ${SERIAL_BAUD} baud"
