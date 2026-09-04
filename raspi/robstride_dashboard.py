@@ -110,6 +110,9 @@ ARM_ROUTE_FEEDBACK_RESEED_RAD = math.radians(4.0)
 ARM_ROUTE_SUPPORT_GRACE_S = 0.45
 ARM_ROUTE_LAUNCH_HOLD_S = 0.09
 ARM_ROUTE_LIVE_LAUNCH_HOLD_S = ARM_ROUTE_SAMPLE_S
+ARM_PRESET_SPLINE_TENSION = 0.55
+ARM_PRESET_TWIST_MARGIN_RAD = math.radians(2.0)
+ARM_PRESET_REACH_MARGIN_SCALE = 0.08
 ARM_PRESET_MIN_RADIAL_SCALE = 0.42
 ARM_PRESET_MAX_RADIAL_SCALE = 0.72
 ARM_PRESET_MIN_Z_SCALE = 0.16
@@ -202,7 +205,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.03.22"
+APP_VERSION = "2026.09.04.01"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -331,6 +334,26 @@ def point_dot(a: Dict[str, float], b: Dict[str, float]) -> float:
 
 def point_length(a: Dict[str, float]) -> float:
     return math.sqrt(point_dot(a, a))
+
+
+def clamp_float(value: float, lower: float, upper: float) -> float:
+    if lower > upper:
+        lower, upper = upper, lower
+    return max(lower, min(upper, value))
+
+
+def joint_angle_distance(
+    joint_count: int,
+    a: Dict[str, float],
+    b: Dict[str, float],
+) -> float:
+    return max(
+        (
+            abs(float(b.get(axis, 0.0)) - float(a.get(axis, 0.0)))
+            for axis in arm_axes_for_count(joint_count)
+        ),
+        default=0.0,
+    )
 
 
 def trim_segment(
@@ -527,6 +550,161 @@ def plan_arm_joint_route(
     return waypoints
 
 
+def hermite_value(p0: float, p1: float, m0: float, m1: float, u: float) -> float:
+    u2 = u * u
+    u3 = u2 * u
+    h00 = (2.0 * u3) - (3.0 * u2) + 1.0
+    h10 = u3 - (2.0 * u2) + u
+    h01 = (-2.0 * u3) + (3.0 * u2)
+    h11 = u3 - u2
+    return (h00 * p0) + (h10 * m0) + (h01 * p1) + (h11 * m1)
+
+
+def hermite_derivative(p0: float, p1: float, m0: float, m1: float, u: float) -> float:
+    u2 = u * u
+    dh00 = (6.0 * u2) - (6.0 * u)
+    dh10 = (3.0 * u2) - (4.0 * u) + 1.0
+    dh01 = (-6.0 * u2) + (6.0 * u)
+    dh11 = (3.0 * u2) - (2.0 * u)
+    return (dh00 * p0) + (dh10 * m0) + (dh01 * p1) + (dh11 * m1)
+
+
+def normalized_joint_angles(joint_count: int, joint_angles: Dict[str, float]) -> Dict[str, float]:
+    normalized = {axis: float(joint_angles.get(axis, 0.0)) for axis in ARM_AXES}
+    if joint_count == 2:
+        normalized["elbow"] = 0.0
+    return normalized
+
+
+def plan_arm_joint_path(
+    joint_count: int,
+    control_angles: List[Dict[str, float]],
+    max_step_rad: float = ARM_ROUTE_MAX_STEP_RAD,
+    velocity_limit_rad_s: float = ARM_DEFAULT_POSITION_VEL_RAD_S,
+    acceleration_limit_rad_s2: float = ARM_DEFAULT_POSITION_ACCEL_RAD_S2,
+    sample_interval_s: float = ARM_ROUTE_SAMPLE_S,
+    spline_tension: float = ARM_PRESET_SPLINE_TENSION,
+) -> List[Dict[str, Any]]:
+    if not control_angles:
+        return []
+
+    axes = arm_axes_for_count(joint_count)
+    points: List[Dict[str, float]] = []
+    for item in control_angles:
+        point = normalized_joint_angles(joint_count, item)
+        if not points or joint_angle_distance(joint_count, points[-1], point) > 0.000001:
+            points.append(point)
+
+    zero_velocities = {axis: 0.0 for axis in ARM_AXES}
+    if len(points) == 1:
+        return [
+            {
+                "jointAngles": dict(points[0]),
+                "jointVelocities": dict(zero_velocities),
+                "interval": ARM_ROUTE_MIN_DURATION_S,
+            }
+        ]
+    if len(points) == 2:
+        return plan_arm_joint_route(
+            joint_count,
+            points[0],
+            points[1],
+            max_step_rad,
+            velocity_limit_rad_s,
+            acceleration_limit_rad_s2,
+            sample_interval_s,
+        )
+
+    segment_lengths = [
+        max(joint_angle_distance(joint_count, points[index], points[index + 1]), 0.000001)
+        for index in range(len(points) - 1)
+    ]
+    cumulative = [0.0]
+    for length in segment_lengths:
+        cumulative.append(cumulative[-1] + length)
+    total_length = cumulative[-1]
+
+    velocity_limit = max(abs(float(velocity_limit_rad_s)), 0.05)
+    acceleration_limit = max(abs(float(acceleration_limit_rad_s2)), 0.10)
+    sample_interval = max(0.01, min(0.10, abs(float(sample_interval_s))))
+    max_step = max(abs(float(max_step_rad)), 0.001)
+
+    duration = ARM_ROUTE_MIN_DURATION_S
+    for axis in axes:
+        axis_distance = sum(
+            abs(float(points[index + 1].get(axis, 0.0)) - float(points[index].get(axis, 0.0)))
+            for index in range(len(points) - 1)
+        )
+        if axis_distance <= 0.000001:
+            continue
+        duration = max(
+            duration,
+            ARM_ROUTE_VELOCITY_DURATION_FACTOR * axis_distance / velocity_limit,
+            math.sqrt(ARM_ROUTE_ACCEL_DURATION_FACTOR * axis_distance / acceleration_limit),
+        )
+    duration = max(
+        duration,
+        ARM_ROUTE_VELOCITY_DURATION_FACTOR * total_length / velocity_limit,
+        math.sqrt(ARM_ROUTE_ACCEL_DURATION_FACTOR * total_length / acceleration_limit),
+    )
+
+    steps = max(
+        1,
+        int(math.ceil(duration / sample_interval)),
+        int(math.ceil(total_length / max_step)),
+    )
+    interval = max(0.005, duration / steps)
+    tension = clamp_float(float(spline_tension), 0.0, 1.0)
+
+    tangents: List[Dict[str, float]] = []
+    for index, point in enumerate(points):
+        tangent = {axis: 0.0 for axis in ARM_AXES}
+        if 0 < index < len(points) - 1:
+            span = max(cumulative[index + 1] - cumulative[index - 1], 0.000001)
+            for axis in axes:
+                tangent[axis] = tension * (
+                    float(points[index + 1].get(axis, 0.0)) - float(points[index - 1].get(axis, 0.0))
+                ) / span
+        tangents.append(tangent)
+
+    waypoints: List[Dict[str, Any]] = []
+    segment_index = 0
+    for step in range(1, steps + 1):
+        progress = step / steps
+        path_s = total_length * smootherstep(progress)
+        path_rate = (
+            total_length * smootherstep_derivative(progress) / duration
+            if duration > 0.0
+            else 0.0
+        )
+        while segment_index < len(segment_lengths) - 1 and path_s > cumulative[segment_index + 1] + 0.000001:
+            segment_index += 1
+        segment_length = segment_lengths[segment_index]
+        local_u = clamp_float((path_s - cumulative[segment_index]) / segment_length, 0.0, 1.0)
+
+        joint_angles = dict(points[segment_index])
+        joint_velocities = {axis: 0.0 for axis in ARM_AXES}
+        for axis in axes:
+            p0 = float(points[segment_index].get(axis, 0.0))
+            p1 = float(points[segment_index + 1].get(axis, 0.0))
+            m0 = float(tangents[segment_index].get(axis, 0.0)) * segment_length
+            m1 = float(tangents[segment_index + 1].get(axis, 0.0)) * segment_length
+            joint_angles[axis] = hermite_value(p0, p1, m0, m1, local_u)
+            local_derivative = hermite_derivative(p0, p1, m0, m1, local_u)
+            joint_velocities[axis] = (local_derivative / segment_length) * path_rate
+        if joint_count == 2:
+            joint_angles["elbow"] = 0.0
+            joint_velocities["elbow"] = 0.0
+        waypoints.append(
+            {
+                "jointAngles": joint_angles,
+                "jointVelocities": joint_velocities,
+                "interval": interval,
+            }
+        )
+    return waypoints
+
+
 def arm_twist_safety_check(
     joint_count: int,
     joint_angles: Dict[str, float],
@@ -632,6 +810,41 @@ def arm_solution_points(
         "z": p1["z"] + link_2 * math.sin(solution.shoulder + solution.elbow),
     }
     return [p0, p1, p2]
+
+
+def arm_target_from_joint_angles(
+    joint_count: int,
+    joint_angles: Dict[str, float],
+    link_1: float,
+    link_2: float,
+    fallback_reach: Optional[float] = None,
+) -> Dict[str, float]:
+    base = float(joint_angles.get("base", 0.0))
+    shoulder = float(joint_angles.get("shoulder", 0.0))
+    elbow = float(joint_angles.get("elbow", 0.0))
+    base_dir = {"x": math.cos(base), "y": math.sin(base)}
+
+    if joint_count == 2:
+        max_reach = max(abs(link_1) + abs(link_2), 0.001)
+        reach = max_reach
+        if fallback_reach is not None and math.isfinite(float(fallback_reach)):
+            reach = clamp_float(abs(float(fallback_reach)), ARM_MIN_TARGET_REACH, max_reach)
+        return {
+            "x": reach * math.cos(shoulder) * base_dir["x"],
+            "y": reach * math.cos(shoulder) * base_dir["y"],
+            "z": reach * math.sin(shoulder),
+        }
+
+    p1 = {
+        "x": link_1 * math.cos(shoulder) * base_dir["x"],
+        "y": link_1 * math.cos(shoulder) * base_dir["y"],
+        "z": link_1 * math.sin(shoulder),
+    }
+    return {
+        "x": p1["x"] + link_2 * math.cos(shoulder + elbow) * base_dir["x"],
+        "y": p1["y"] + link_2 * math.cos(shoulder + elbow) * base_dir["y"],
+        "z": p1["z"] + link_2 * math.sin(shoulder + elbow),
+    }
 
 
 def arm_points_min_z(points: List[Dict[str, float]]) -> float:
@@ -2537,12 +2750,11 @@ class DashboardController:
             for axis in ARM_AXES
         }
 
-    def arm_route_waypoints_to_target(
+    def arm_resolve_target_joints(
         self,
         target: Dict[str, float],
         previous_angles: Dict[str, float],
-        max_step_rad: float,
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, float], Dict[str, float]]:
+    ) -> Tuple[Dict[str, float], Dict[str, float]]:
         clamped_target = clamp_arm_target_to_reach(
             self.arm_joint_count,
             target,
@@ -2569,48 +2781,79 @@ class DashboardController:
             self.arm_twist_limits,
             previous_angles,
         )
-        final_points = arm_solution_points(
-            self.arm_joint_count,
-            ArmIkSolution(
-                base=joint_angles["base"],
-                shoulder=joint_angles["shoulder"],
-                elbow=joint_angles["elbow"],
-            ),
-            clamped_target,
-            self.arm_link_1,
-            self.arm_link_2,
-        )
-        final_safety = arm_safety_check(
-            self.arm_joint_count,
-            final_points,
-            self.arm_link_radii,
-            joint_angles,
-            self.arm_twist_limits,
-        )
-        if not final_safety["ok"]:
-            raise ValueError(f"Unsafe IK target: {'; '.join(final_safety['warnings'])}")
+        return clamped_target, joint_angles
 
-        route_base_plane_min_z = ARM_BASE_PLANE_MIN_Z
-        if self.arm_joint_count == 3:
-            start_points = arm_solution_points(
+    def arm_points_for_joint_angles(
+        self,
+        joint_angles: Dict[str, float],
+        target: Optional[Dict[str, float]] = None,
+    ) -> List[Dict[str, float]]:
+        if target is None:
+            target = arm_target_from_joint_angles(
                 self.arm_joint_count,
-                ArmIkSolution(
-                    base=previous_angles.get("base", 0.0),
-                    shoulder=previous_angles.get("shoulder", 0.0),
-                    elbow=previous_angles.get("elbow", 0.0),
-                ),
-                clamped_target,
+                joint_angles,
                 self.arm_link_1,
                 self.arm_link_2,
             )
-            start_min_z = arm_points_min_z(start_points)
-            final_min_z = arm_points_min_z(final_points)
-            if start_min_z < ARM_BASE_PLANE_MIN_Z - 0.000001 <= final_min_z + 0.000001:
-                route_base_plane_min_z = start_min_z - ARM_BASE_PLANE_RECOVERY_TOLERANCE_M
-                self.log(
-                    "Arm route starts below base plane; allowing recovery "
-                    f"from min Z={start_min_z:.3f} m"
-                )
+        return arm_solution_points(
+            self.arm_joint_count,
+            ArmIkSolution(
+                base=joint_angles.get("base", 0.0),
+                shoulder=joint_angles.get("shoulder", 0.0),
+                elbow=joint_angles.get("elbow", 0.0),
+            ),
+            target,
+            self.arm_link_1,
+            self.arm_link_2,
+        )
+
+    def arm_safety_for_joint_angles(
+        self,
+        joint_angles: Dict[str, float],
+        target: Optional[Dict[str, float]] = None,
+        base_plane_min_z: float = ARM_BASE_PLANE_MIN_Z,
+    ) -> Dict[str, Any]:
+        points = self.arm_points_for_joint_angles(joint_angles, target)
+        return arm_safety_check(
+            self.arm_joint_count,
+            points,
+            self.arm_link_radii,
+            joint_angles,
+            self.arm_twist_limits,
+            base_plane_min_z=base_plane_min_z,
+        )
+
+    def arm_route_base_plane_min_z(
+        self,
+        start_angles: Dict[str, float],
+        final_angles: Dict[str, float],
+    ) -> float:
+        route_base_plane_min_z = ARM_BASE_PLANE_MIN_Z
+        if self.arm_joint_count != 3:
+            return route_base_plane_min_z
+
+        start_min_z = arm_points_min_z(self.arm_points_for_joint_angles(start_angles))
+        final_min_z = arm_points_min_z(self.arm_points_for_joint_angles(final_angles))
+        if start_min_z < ARM_BASE_PLANE_MIN_Z - 0.000001 <= final_min_z + 0.000001:
+            route_base_plane_min_z = start_min_z - ARM_BASE_PLANE_RECOVERY_TOLERANCE_M
+            self.log(
+                "Arm route starts below base plane; allowing recovery "
+                f"from min Z={start_min_z:.3f} m"
+            )
+        return route_base_plane_min_z
+
+    def arm_route_waypoints_to_target(
+        self,
+        target: Dict[str, float],
+        previous_angles: Dict[str, float],
+        max_step_rad: float,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, float], Dict[str, float]]:
+        clamped_target, joint_angles = self.arm_resolve_target_joints(target, previous_angles)
+        final_safety = self.arm_safety_for_joint_angles(joint_angles, clamped_target)
+        if not final_safety["ok"]:
+            raise ValueError(f"Unsafe IK target: {'; '.join(final_safety['warnings'])}")
+
+        route_base_plane_min_z = self.arm_route_base_plane_min_z(previous_angles, joint_angles)
         route_samples = plan_arm_joint_route(
             self.arm_joint_count,
             previous_angles,
@@ -2676,6 +2919,79 @@ class DashboardController:
             )
             route_waypoints.extend(segment)
             previous_angles = final_joint_angles
+        if not route_waypoints:
+            raise ValueError("Arm route has no waypoints")
+        return route_waypoints, final_target, final_joint_angles
+
+    def build_arm_smooth_route_for_targets(
+        self,
+        targets: List[Dict[str, float]],
+        max_step_rad: float,
+        launch_hold_s: float = 0.0,
+        start_angles: Optional[Dict[str, float]] = None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, float], Dict[str, float]]:
+        previous_angles = normalized_joint_angles(
+            self.arm_joint_count,
+            start_angles or self.arm_route_start_joint_angles(),
+        )
+        initial_angles = dict(previous_angles)
+        final_target = dict(self.arm_target)
+        final_joint_angles = dict(previous_angles)
+        control_angles = [dict(previous_angles)]
+        route_waypoints: List[Dict[str, Any]] = []
+        if launch_hold_s > 0.0:
+            route_waypoints.append(self.arm_hold_waypoint(previous_angles, launch_hold_s))
+
+        for target in targets:
+            final_target, final_joint_angles = self.arm_resolve_target_joints(
+                target,
+                previous_angles,
+            )
+            final_safety = self.arm_safety_for_joint_angles(final_joint_angles, final_target)
+            if not final_safety["ok"]:
+                raise ValueError(f"Unsafe IK target: {'; '.join(final_safety['warnings'])}")
+            control_angles.append(dict(final_joint_angles))
+            previous_angles = final_joint_angles
+
+        if len(control_angles) < 2:
+            raise ValueError("Arm route has no control poses")
+
+        route_base_plane_min_z = self.arm_route_base_plane_min_z(initial_angles, final_joint_angles)
+        route_samples = plan_arm_joint_path(
+            self.arm_joint_count,
+            control_angles,
+            max_step_rad,
+            self.arm_velocity_limit,
+            self.arm_acceleration,
+        )
+
+        fallback_reach = point_length(final_target)
+        for sample in route_samples:
+            waypoint_angles = sample["jointAngles"]
+            sample_target = arm_target_from_joint_angles(
+                self.arm_joint_count,
+                waypoint_angles,
+                self.arm_link_1,
+                self.arm_link_2,
+                fallback_reach,
+            )
+            waypoint_safety = self.arm_safety_for_joint_angles(
+                waypoint_angles,
+                sample_target,
+                base_plane_min_z=route_base_plane_min_z,
+            )
+            if not waypoint_safety["ok"]:
+                raise ValueError(f"Unsafe IK route: {'; '.join(waypoint_safety['warnings'])}")
+            route_waypoints.append(
+                {
+                    "jointAngles": dict(waypoint_angles),
+                    "jointVelocities": dict(sample["jointVelocities"]),
+                    "motorTargets": self.arm_motor_targets_for_joints(waypoint_angles),
+                    "motorVelocities": self.arm_motor_velocities_for_joints(sample["jointVelocities"]),
+                    "interval": sample.get("interval", ARM_ROUTE_SAMPLE_S),
+                }
+            )
+
         if not route_waypoints:
             raise ValueError("Arm route has no waypoints")
         return route_waypoints, final_target, final_joint_angles
@@ -2875,42 +3191,141 @@ class DashboardController:
             "path": str(VALUES_PATH),
         }
 
-    def arm_motion_preset_targets(self, preset: str) -> List[Dict[str, float]]:
-        key = str(preset or "showcase").strip().lower()
-        if key not in ARM_MOTION_PRESET_LABELS:
-            choices = ", ".join(ARM_MOTION_PRESET_LABELS)
-            raise ValueError(f"Unknown arm movement preset '{preset}'. Choose one of: {choices}")
+    def arm_preset_scale_ranges(self) -> Tuple[float, float, float, float]:
+        min_radial_scale = ARM_PRESET_MIN_RADIAL_SCALE
+        min_z_scale = ARM_PRESET_MIN_Z_SCALE
+        max_z_scale = ARM_PRESET_MAX_Z_SCALE
+        if self.arm_joint_count == 3 and not self.arm_elbow_up:
+            min_radial_scale = ARM_PRESET_ELBOW_DOWN_MIN_RADIAL_SCALE
+            min_z_scale = ARM_PRESET_ELBOW_DOWN_MIN_Z_SCALE
+            max_z_scale = ARM_PRESET_ELBOW_DOWN_MAX_Z_SCALE
+        return (
+            min_radial_scale,
+            ARM_PRESET_MAX_RADIAL_SCALE,
+            min_z_scale,
+            max_z_scale,
+        )
 
-        reach = max(abs(self.arm_link_1) + abs(self.arm_link_2), 0.001)
+    def arm_preset_target_from_scales(
+        self,
+        radial_scale: float,
+        yaw_deg: float,
+        z_scale: float,
+    ) -> Dict[str, float]:
+        max_reach = max(abs(self.arm_link_1) + abs(self.arm_link_2), 0.001)
+        min_reach = (
+            ARM_MIN_TARGET_REACH
+            if self.arm_joint_count == 2
+            else abs(abs(self.arm_link_1) - abs(self.arm_link_2))
+        )
+        min_reach = min(min_reach, max_reach)
+        reach_span = max(max_reach - min_reach, 0.0)
+        reach_margin = reach_span * ARM_PRESET_REACH_MARGIN_SCALE
+        safe_min_reach = min(max(min_reach + reach_margin, ARM_MIN_TARGET_REACH), max_reach)
+        safe_max_reach = max_reach - reach_margin
+        if safe_max_reach < safe_min_reach:
+            safe_min_reach = min_reach
+            safe_max_reach = max_reach
 
-        def target(radial_scale: float, yaw_deg: float, z_scale: float) -> Dict[str, float]:
-            min_radial_scale = ARM_PRESET_MIN_RADIAL_SCALE
-            min_z_scale = ARM_PRESET_MIN_Z_SCALE
-            max_z_scale = ARM_PRESET_MAX_Z_SCALE
-            if self.arm_joint_count == 3 and not self.arm_elbow_up:
-                min_radial_scale = ARM_PRESET_ELBOW_DOWN_MIN_RADIAL_SCALE
-                min_z_scale = ARM_PRESET_ELBOW_DOWN_MIN_Z_SCALE
-                max_z_scale = ARM_PRESET_ELBOW_DOWN_MAX_Z_SCALE
-            radial = reach * max(
-                min_radial_scale,
-                min(ARM_PRESET_MAX_RADIAL_SCALE, radial_scale),
-            )
-            yaw = math.radians(yaw_deg)
-            z = reach * max(
-                min_z_scale,
-                min(max_z_scale, z_scale),
-            )
-            return clamp_arm_target_to_reach(
-                self.arm_joint_count,
-                {
-                    "x": radial * math.cos(yaw),
-                    "y": radial * math.sin(yaw),
-                    "z": z,
-                },
-                self.arm_link_1,
-                self.arm_link_2,
-            )
+        min_radial_scale, max_radial_scale, min_z_scale, max_z_scale = self.arm_preset_scale_ranges()
+        radial = max_reach * clamp_float(radial_scale, min_radial_scale, max_radial_scale)
+        z = max_reach * clamp_float(z_scale, min_z_scale, max_z_scale)
+        planar_reach = math.hypot(radial, z)
+        if planar_reach > safe_max_reach:
+            scale = safe_max_reach / planar_reach
+            radial *= scale
+            z *= scale
+        elif 0.000001 < planar_reach < safe_min_reach:
+            scale = safe_min_reach / planar_reach
+            radial *= scale
+            z *= scale
 
+        base_limit = twist_limit_rad(self.arm_twist_limits.get("base", ARM_TWIST_DEFAULT_LIMIT_RAD))
+        yaw_limit = max(0.0, base_limit - ARM_PRESET_TWIST_MARGIN_RAD)
+        yaw = clamp_float(math.radians(yaw_deg), -yaw_limit, yaw_limit)
+        return clamp_arm_target_to_reach(
+            self.arm_joint_count,
+            {
+                "x": radial * math.cos(yaw),
+                "y": radial * math.sin(yaw),
+                "z": z,
+            },
+            self.arm_link_1,
+            self.arm_link_2,
+        )
+
+    def arm_preset_pose_score(
+        self,
+        target: Dict[str, float],
+        joint_angles: Dict[str, float],
+        desired_radial_scale: float,
+        desired_yaw_deg: float,
+        desired_z_scale: float,
+    ) -> float:
+        max_reach = max(abs(self.arm_link_1) + abs(self.arm_link_2), 0.001)
+        radial_scale = math.hypot(target["x"], target["y"]) / max_reach
+        z_scale = target["z"] / max_reach
+        yaw_error = abs(math.atan2(target["y"], target["x"]) - math.radians(desired_yaw_deg))
+        score = (
+            (abs(radial_scale - desired_radial_scale) * 3.0)
+            + (abs(z_scale - desired_z_scale) * 3.0)
+            + (yaw_error / max(math.radians(45.0), 0.000001))
+        )
+        for axis in self.active_arm_axes():
+            limit = twist_limit_rad(self.arm_twist_limits.get(axis, ARM_TWIST_DEFAULT_LIMIT_RAD))
+            remaining = limit - abs(float(joint_angles.get(axis, 0.0)))
+            if remaining < ARM_PRESET_TWIST_MARGIN_RAD:
+                score += (ARM_PRESET_TWIST_MARGIN_RAD - remaining) * 8.0
+        return score
+
+    def arm_safe_preset_target(
+        self,
+        preset: str,
+        radial_scale: float,
+        yaw_deg: float,
+        z_scale: float,
+        previous_angles: Dict[str, float],
+    ) -> Tuple[Dict[str, float], Dict[str, float]]:
+        yaw_factors = (1.0, 0.75, 0.5, 0.25, 0.0)
+        scale_offsets = (0.0, 0.04, -0.04, 0.08, -0.08, 0.14, -0.14, 0.22, -0.22)
+        best: Optional[Tuple[float, Dict[str, float], Dict[str, float]]] = None
+        last_reason = ""
+
+        for yaw_factor in yaw_factors:
+            for radial_offset in scale_offsets:
+                for z_offset in scale_offsets:
+                    candidate = self.arm_preset_target_from_scales(
+                        radial_scale + radial_offset,
+                        yaw_deg * yaw_factor,
+                        z_scale + z_offset,
+                    )
+                    try:
+                        clamped_target, joint_angles = self.arm_resolve_target_joints(candidate, previous_angles)
+                    except ValueError as exc:
+                        last_reason = str(exc)
+                        continue
+                    safety = self.arm_safety_for_joint_angles(joint_angles, clamped_target)
+                    if not safety["ok"]:
+                        last_reason = "; ".join(safety["warnings"])
+                        continue
+                    score = self.arm_preset_pose_score(
+                        clamped_target,
+                        joint_angles,
+                        radial_scale,
+                        yaw_deg,
+                        z_scale,
+                    )
+                    if best is None or score < best[0]:
+                        best = (score, clamped_target, joint_angles)
+
+        if best is None:
+            detail = f": {last_reason}" if last_reason else ""
+            raise ValueError(
+                f"Arm preset {preset} has no safe pose with the current IK settings{detail}"
+            )
+        return best[1], best[2]
+
+    def arm_motion_preset_specs(self, preset: str) -> List[Tuple[float, float, float]]:
         if self.arm_joint_count == 2:
             presets = {
                 "showcase": [
@@ -3005,7 +3420,34 @@ class DashboardController:
                     (0.62, 0, 0.26),
                 ],
             }
-        return [target(*item) for item in presets[key]]
+        return presets[preset]
+
+    def arm_motion_preset_targets(
+        self,
+        preset: str,
+        start_angles: Optional[Dict[str, float]] = None,
+    ) -> List[Dict[str, float]]:
+        key = str(preset or "showcase").strip().lower()
+        if key not in ARM_MOTION_PRESET_LABELS:
+            choices = ", ".join(ARM_MOTION_PRESET_LABELS)
+            raise ValueError(f"Unknown arm movement preset '{preset}'. Choose one of: {choices}")
+
+        previous_angles = normalized_joint_angles(
+            self.arm_joint_count,
+            start_angles or self.arm_route_start_joint_angles(),
+        )
+        targets: List[Dict[str, float]] = []
+        for radial_scale, yaw_deg, z_scale in self.arm_motion_preset_specs(key):
+            target, joint_angles = self.arm_safe_preset_target(
+                key,
+                radial_scale,
+                yaw_deg,
+                z_scale,
+                previous_angles,
+            )
+            targets.append(target)
+            previous_angles = joint_angles
+        return targets
 
     def move_arm_ik(self, payload: Dict[str, Any], live: bool = False) -> bool:
         ok, message = self.validate_arm_command_motors(payload)
@@ -3036,16 +3478,18 @@ class DashboardController:
         self.apply_arm_payload(payload)
         preset = str(payload.get("armMotionPreset", "showcase")).strip().lower()
         label = ARM_MOTION_PRESET_LABELS.get(preset, preset.title())
-        targets = self.arm_motion_preset_targets(preset)
         config_signature = self.arm_position_config_signature()
         launch_hold_s = 0.0
         if self.arm_position_configured and self.arm_position_signature == config_signature:
             self.refresh_arm_hold_before_route_planning()
             launch_hold_s = ARM_ROUTE_LAUNCH_HOLD_S
-        route_waypoints, final_target, _final_joint_angles = self.build_arm_route_for_targets(
+        start_angles = self.arm_route_start_joint_angles()
+        targets = self.arm_motion_preset_targets(preset, start_angles)
+        route_waypoints, final_target, _final_joint_angles = self.build_arm_smooth_route_for_targets(
             targets,
             ARM_PRESET_MAX_STEP_RAD,
             launch_hold_s=launch_hold_s,
+            start_angles=start_angles,
         )
         self.arm_target = final_target
         route_duration = sum(self.arm_route_waypoint_interval(item) for item in route_waypoints)
@@ -3058,7 +3502,7 @@ class DashboardController:
             "ok": ok,
             "message": (
                 f"Arm preset {label} started with {len(targets)} poses "
-                f"and {len(route_waypoints)} smooth waypoints over {route_duration:.1f}s"
+                f"as one smooth motion over {route_duration:.1f}s"
             ) if ok else f"Arm preset {label} failed to start",
         }
 

@@ -28,6 +28,15 @@ const DEFAULT_ARM_POSITION_KP = 4.0;
 const DEFAULT_ARM_DAMPING_KD = 2.0;
 const DEFAULT_ARM_CURRENT_LIMIT = 4.0;
 const REACH_SOLVE_TOLERANCE = 0.001;
+const ARM_PRESET_TWIST_MARGIN_RAD = (2 * Math.PI) / 180;
+const ARM_PRESET_REACH_MARGIN_SCALE = 0.08;
+const ARM_PRESET_MIN_RADIAL_SCALE = 0.42;
+const ARM_PRESET_MAX_RADIAL_SCALE = 0.72;
+const ARM_PRESET_MIN_Z_SCALE = 0.16;
+const ARM_PRESET_MAX_Z_SCALE = 0.52;
+const ARM_PRESET_ELBOW_DOWN_MIN_RADIAL_SCALE = 0.66;
+const ARM_PRESET_ELBOW_DOWN_MIN_Z_SCALE = 0.50;
+const ARM_PRESET_ELBOW_DOWN_MAX_Z_SCALE = 0.60;
 const AXIS_LABELS = {
   base: "Base",
   shoulder: "Shoulder",
@@ -1958,32 +1967,142 @@ function renderTargetEditorInputs(preview, options = {}) {
   });
 }
 
+function armPointsForJoints(arm, joints, target = arm.target) {
+  const p0 = { x: 0, y: 0, z: 0 };
+  if (arm.jointCount === 2) {
+    return [p0, { x: target.x, y: target.y, z: target.z }];
+  }
+  const baseDir = { x: Math.cos(joints.base), y: Math.sin(joints.base) };
+  const p1 = {
+    x: arm.link1 * Math.cos(joints.shoulder) * baseDir.x,
+    y: arm.link1 * Math.cos(joints.shoulder) * baseDir.y,
+    z: arm.link1 * Math.sin(joints.shoulder),
+  };
+  const p2 = {
+    x: p1.x + arm.link2 * Math.cos(joints.shoulder + joints.elbow) * baseDir.x,
+    y: p1.y + arm.link2 * Math.cos(joints.shoulder + joints.elbow) * baseDir.y,
+    z: p1.z + arm.link2 * Math.sin(joints.shoulder + joints.elbow),
+  };
+  return [p0, p1, p2];
+}
+
+function targetPresetScaleRanges(arm) {
+  if (arm.jointCount === 3 && !arm.elbowUp) {
+    return {
+      minRadialScale: ARM_PRESET_ELBOW_DOWN_MIN_RADIAL_SCALE,
+      maxRadialScale: ARM_PRESET_MAX_RADIAL_SCALE,
+      minZScale: ARM_PRESET_ELBOW_DOWN_MIN_Z_SCALE,
+      maxZScale: ARM_PRESET_ELBOW_DOWN_MAX_Z_SCALE,
+    };
+  }
+  return {
+    minRadialScale: ARM_PRESET_MIN_RADIAL_SCALE,
+    maxRadialScale: ARM_PRESET_MAX_RADIAL_SCALE,
+    minZScale: ARM_PRESET_MIN_Z_SCALE,
+    maxZScale: ARM_PRESET_MAX_Z_SCALE,
+  };
+}
+
+function targetPresetFromScales(arm, radialScale, yawDeg, zScale) {
+  const maxReach = Math.max(arm.link1 + arm.link2, 0.001);
+  const minReach = Math.min(
+    arm.jointCount === 2 ? ARM_MIN_TARGET_REACH : Math.abs(arm.link1 - arm.link2),
+    maxReach,
+  );
+  const reachSpan = Math.max(maxReach - minReach, 0);
+  const reachMargin = reachSpan * ARM_PRESET_REACH_MARGIN_SCALE;
+  let safeMinReach = Math.min(Math.max(minReach + reachMargin, ARM_MIN_TARGET_REACH), maxReach);
+  let safeMaxReach = maxReach - reachMargin;
+  if (safeMaxReach < safeMinReach) {
+    safeMinReach = minReach;
+    safeMaxReach = maxReach;
+  }
+
+  const ranges = targetPresetScaleRanges(arm);
+  let radial = maxReach * Math.max(ranges.minRadialScale, Math.min(ranges.maxRadialScale, radialScale));
+  let z = maxReach * Math.max(ranges.minZScale, Math.min(ranges.maxZScale, zScale));
+  const planarReach = Math.hypot(radial, z);
+  if (planarReach > safeMaxReach) {
+    const scale = safeMaxReach / planarReach;
+    radial *= scale;
+    z *= scale;
+  } else if (planarReach > 0.000001 && planarReach < safeMinReach) {
+    const scale = safeMinReach / planarReach;
+    radial *= scale;
+    z *= scale;
+  }
+
+  const baseLimit = normalizeTwistLimitRad(arm.twistLimits && arm.twistLimits.base);
+  const yawLimit = Math.max(0, baseLimit - ARM_PRESET_TWIST_MARGIN_RAD);
+  const yaw = Math.max(-yawLimit, Math.min(yawLimit, degToRad(yawDeg)));
+  return clampArmTarget({
+    x: radial * Math.cos(yaw),
+    y: radial * Math.sin(yaw),
+    z,
+  }, arm).target;
+}
+
+function targetPresetPoseScore(arm, target, joints, desiredRadialScale, desiredYawDeg, desiredZScale) {
+  const maxReach = Math.max(arm.link1 + arm.link2, 0.001);
+  const radialScale = Math.hypot(target.x, target.y) / maxReach;
+  const zScale = target.z / maxReach;
+  const yawError = Math.abs(Math.atan2(target.y, target.x) - degToRad(desiredYawDeg));
+  let score = (Math.abs(radialScale - desiredRadialScale) * 3)
+    + (Math.abs(zScale - desiredZScale) * 3)
+    + (yawError / Math.max(degToRad(45), 0.000001));
+  for (const axis of activeAxesForArm(arm)) {
+    const limit = normalizeTwistLimitRad(arm.twistLimits && arm.twistLimits[axis]);
+    const remaining = limit - Math.abs(joints[axis] || 0);
+    if (remaining < ARM_PRESET_TWIST_MARGIN_RAD) {
+      score += (ARM_PRESET_TWIST_MARGIN_RAD - remaining) * 8;
+    }
+  }
+  return score;
+}
+
+function safeTargetPreset(arm, name, radialScale, yawDeg, zScale) {
+  const yawFactors = [1, 0.75, 0.5, 0.25, 0];
+  const scaleOffsets = [0, 0.04, -0.04, 0.08, -0.08, 0.14, -0.14, 0.22, -0.22];
+  let best = null;
+  let lastReason = "";
+  for (const yawFactor of yawFactors) {
+    for (const radialOffset of scaleOffsets) {
+      for (const zOffset of scaleOffsets) {
+        const target = targetPresetFromScales(arm, radialScale + radialOffset, yawDeg * yawFactor, zScale + zOffset);
+        const candidateArm = { ...arm, target };
+        try {
+          const joints = routeJointAngles(candidateArm, solveArmIk(candidateArm));
+          const safety = armSafetyCheck(candidateArm, armPointsForJoints(candidateArm, joints, target), joints);
+          if (!safety.ok) {
+            lastReason = safety.warnings.join("; ");
+            continue;
+          }
+          const score = targetPresetPoseScore(candidateArm, target, joints, radialScale, yawDeg, zScale);
+          if (!best || score < best.score) best = { score, target };
+        } catch (error) {
+          lastReason = error.message;
+        }
+      }
+    }
+  }
+  if (!best) appendLocalLog(`Target preset ${name} blocked: ${lastReason || "no safe target"}`);
+  return best && best.target;
+}
+
 function applyTargetPreset(name) {
   const arm = armInputState();
   const reach = Math.max(arm.link1 + arm.link2, 0.002);
-  const elbowDownThreeJoint = arm.jointCount === 3 && !arm.elbowUp;
-  const minRadialScale = elbowDownThreeJoint ? 0.66 : 0.42;
-  const minZScale = elbowDownThreeJoint ? 0.50 : 0.16;
-  const maxZScale = elbowDownThreeJoint ? 0.60 : 0.52;
-  const target = (radialScale, yawDeg, zScale) => {
-    const radial = reach * Math.max(minRadialScale, Math.min(0.72, radialScale));
-    const yaw = degToRad(yawDeg);
-    return {
-      x: radial * Math.cos(yaw),
-      y: radial * Math.sin(yaw),
-      z: reach * Math.max(minZScale, Math.min(maxZScale, zScale)),
-    };
-  };
   let next;
   if (name === "forward") {
-    next = target(0.66, 0, 0.18);
+    next = safeTargetPreset(arm, name, 0.66, 0, 0.18);
   } else if (name === "left") {
-    next = target(0.58, 28, 0.24);
+    next = safeTargetPreset(arm, name, 0.58, 28, 0.24);
   } else if (name === "high") {
-    next = target(0.50, 0, 0.48);
+    next = safeTargetPreset(arm, name, 0.50, 0, 0.48);
   } else {
     next = { x: 0, y: 0, z: reach };
   }
+  if (!next) return;
   setArmTarget(next.x, next.y, next.z);
 }
 

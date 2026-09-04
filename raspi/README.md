@@ -205,22 +205,24 @@ limit allows horizontal-forward through vertical to horizontal-backward motion
 without allowing the arm to route underneath the horizontal plane.
 
 Loaded arms use RobStride operation-control frames for IK moves so the hold loop
-has explicit damping and feed-forward torque. IK targets are streamed as
-small smootherstep waypoints with velocity feed-forward; `Velocity Limit` and
+has explicit damping and feed-forward torque. IK targets are streamed as small
+smootherstep route samples with velocity feed-forward; `Velocity Limit` and
 `Acceleration` control the planned route duration. The dashboard defaults to
 `0.35 rad/s`, `2.5 rad/s^2`, `Kp=4.0`, `Kd=2.0`, and `4 A`, and caps saved arm
 values at `1.5 rad/s`, `8 rad/s^2`, `Kp=10.0`, `Kd=5.0`, and `+/-5 Nm` assist
-torque. Motion presets use those same controls and adaptive loaded-arm target
-envelopes, so lower `Velocity Limit`/`Acceleration` values make presets slower
-and smoother too. Active routes start from the current commanded hold target and
-keep stronger assist while moving in the load-bearing direction, so gravity
-compensation does not suddenly disappear at the start of a move. If the arm
-starts bouncing, press **Stop Arm**, support the load, raise `Damping Kd`, then
-adjust `Position Kp` only as needed for hold stiffness. If the arm slowly falls
-even when stable, raise current limit and add signed shoulder or elbow assist
-torque. If feedback reseeding finds the arm already slightly below the base
-plane, the route planner allows a limited recovery path back to a safe target
-instead of blocking the move at the first below-plane waypoint.
+torque. Motion presets are generated from the current link lengths, elbow bend,
+twist limits, link radii, and reach envelope. Their accepted poses are streamed
+as one continuous spline, so the arm flows through the preset instead of
+stopping at each named pose. Lower `Velocity Limit`/`Acceleration` values make
+presets slower and smoother too. Active routes start from the current commanded
+hold target and keep stronger assist while moving in the load-bearing direction,
+so gravity compensation does not suddenly disappear at the start of a move. If
+the arm starts bouncing, press **Stop Arm**, support the load, raise
+`Damping Kd`, then adjust `Position Kp` only as needed for hold stiffness. If the
+arm slowly falls even when stable, raise current limit and add signed shoulder or
+elbow assist torque. If feedback reseeding finds the arm already slightly below
+the base plane, the route planner allows a limited recovery path back to a safe
+target instead of blocking the move at the first below-plane waypoint.
 
 **Adaptive Assist** adds a slow learned shoulder/elbow trim on top of the manual
 assist values. It learns only while the arm is holding still near the target,
