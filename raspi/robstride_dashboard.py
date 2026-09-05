@@ -196,6 +196,9 @@ GRIPPER_DEFAULT_OPEN_DEG = 120.0
 GRIPPER_DEFAULT_TEST_DEG = 90.0
 GRIPPER_DEFAULT_POSITION = 1.0
 GRIPPER_SETTLE_S = 0.45
+GRIPPER_RAMP_STEP_DEG = 3.0
+GRIPPER_RAMP_STEP_S = 0.025
+GRIPPER_ANGLE_DEADBAND_DEG = 0.25
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
     "sweep": "Sweep",
@@ -229,7 +232,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.05.01"
+APP_VERSION = "2026.09.05.02"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1696,6 +1699,22 @@ class DashboardController:
         pulse_us = pulse_min + ((pulse_max - pulse_min) * (angle / 180.0))
         return (pulse_us / 1_000_000.0) * GRIPPER_PWM_HZ * 100.0
 
+    def set_gripper_pwm_angle(self, pwm: Any, angle_deg: float) -> None:
+        duty_cycle = self.gripper_duty_cycle_for_angle(angle_deg)
+        if hasattr(pwm, "set_angle"):
+            pwm.set_angle(angle_deg, duty_cycle)
+        else:
+            pwm.ChangeDutyCycle(duty_cycle)
+
+    def gripper_ramp_angles(self, start_angle_deg: float, target_angle_deg: float) -> List[float]:
+        start_angle = max(0.0, min(180.0, float(start_angle_deg)))
+        target_angle = max(0.0, min(180.0, float(target_angle_deg)))
+        delta = target_angle - start_angle
+        if abs(delta) <= GRIPPER_RAMP_STEP_DEG:
+            return [target_angle]
+        steps = max(1, int(math.ceil(abs(delta) / GRIPPER_RAMP_STEP_DEG)))
+        return [start_angle + (delta * (index / steps)) for index in range(1, steps + 1)]
+
     def ensure_gripper_pwm(self) -> Any:
         with self.lock:
             pin = self.gripper_gpio_pin
@@ -1776,13 +1795,29 @@ class DashboardController:
         if release_after_move is None:
             with self.lock:
                 release_after_move = self.gripper_release_after_move
-        duty_cycle = self.gripper_duty_cycle_for_angle(angle)
         try:
             pwm = self.ensure_gripper_pwm()
-            if hasattr(pwm, "set_angle"):
-                pwm.set_angle(angle, duty_cycle)
+            with self.lock:
+                start_angle = self.gripper_last_angle_deg
+                if start_angle is None:
+                    start_angle = self.gripper_test_angle_deg
+                already_attached = self.gripper_attached
+            if (
+                not release_after_move
+                and already_attached
+                and abs(angle - float(start_angle)) <= GRIPPER_ANGLE_DEADBAND_DEG
+            ):
+                ramp_angles: List[float] = []
             else:
-                pwm.ChangeDutyCycle(duty_cycle)
+                ramp_angles = self.gripper_ramp_angles(float(start_angle), angle)
+            for index, step_angle in enumerate(ramp_angles):
+                self.set_gripper_pwm_angle(pwm, step_angle)
+                with self.lock:
+                    self.gripper_last_angle_deg = step_angle
+                    self.gripper_attached = True
+                    self.gripper_last_error = ""
+                if index < len(ramp_angles) - 1:
+                    time.sleep(GRIPPER_RAMP_STEP_S)
             if release_after_move:
                 time.sleep(GRIPPER_SETTLE_S)
                 self.release_gripper(log=False)
