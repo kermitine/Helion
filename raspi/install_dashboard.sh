@@ -23,8 +23,11 @@ fi
 
 sudo apt update
 sudo apt install -y git python3
+if ! sudo apt install -y python3-gpiozero python3-lgpio; then
+  echo "Warning: gpiozero/lgpio was not installed; Raspberry Pi 5 servo control may not work until python3-gpiozero and python3-lgpio are available." >&2
+fi
 if ! sudo apt install -y python3-rpi.gpio; then
-  echo "Warning: python3-rpi.gpio was not installed; MG90S gripper control will report a GPIO library error until it is available." >&2
+  echo "Warning: python3-rpi.gpio was not installed; older Raspberry Pi OS servo fallback will not be available." >&2
 fi
 
 if [[ "$SERVICE_USER" != "root" ]]; then

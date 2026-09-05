@@ -229,7 +229,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.04.04"
+APP_VERSION = "2026.09.05.01"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -321,6 +321,74 @@ def clamped_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(maximum, parsed))
+
+
+class GpioZeroGripperServo:
+    def __init__(
+        self,
+        pin: int,
+        pulse_min_us: float,
+        pulse_max_us: float,
+        use_lgpio: bool,
+    ):
+        from gpiozero import AngularServo  # type: ignore[import-not-found]
+
+        self.pin = pin
+        self._factory: Optional[Any] = None
+        self.backend = "gpiozero"
+        kwargs: Dict[str, Any] = {}
+        if use_lgpio:
+            from gpiozero.pins.lgpio import LGPIOFactory  # type: ignore[import-not-found]
+
+            self._factory = LGPIOFactory()
+            kwargs["pin_factory"] = self._factory
+            self.backend = "gpiozero/lgpio"
+        try:
+            self._servo = AngularServo(
+                pin,
+                min_angle=0.0,
+                max_angle=180.0,
+                min_pulse_width=pulse_min_us / 1_000_000.0,
+                max_pulse_width=pulse_max_us / 1_000_000.0,
+                frame_width=1.0 / GRIPPER_PWM_HZ,
+                initial_angle=None,
+                **kwargs,
+            )
+        except Exception:
+            if self._factory is not None and hasattr(self._factory, "close"):
+                self._factory.close()
+            raise
+
+    def set_angle(self, angle_deg: float, _duty_cycle: float) -> None:
+        self._servo.angle = max(0.0, min(180.0, float(angle_deg)))
+
+    def stop(self) -> None:
+        self._servo.detach()
+        self._servo.close()
+        if self._factory is not None and hasattr(self._factory, "close"):
+            self._factory.close()
+
+
+class RpiGpioGripperPwm:
+    backend = "RPi.GPIO"
+
+    def __init__(self, pin: int):
+        import RPi.GPIO as GPIO  # type: ignore[import-not-found]
+
+        self.pin = pin
+        self._gpio = GPIO
+        GPIO.setwarnings(False)
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(pin, GPIO.OUT)
+        self._pwm = GPIO.PWM(pin, GRIPPER_PWM_HZ)
+        self._pwm.start(0.0)
+
+    def set_angle(self, _angle_deg: float, duty_cycle: float) -> None:
+        self._pwm.ChangeDutyCycle(float(duty_cycle))
+
+    def stop(self) -> None:
+        self._pwm.stop()
+        self._gpio.cleanup(self.pin)
 
 
 def twist_limit_rad(value: Any, default: float = ARM_TWIST_DEFAULT_LIMIT_RAD) -> float:
@@ -1027,6 +1095,8 @@ class DashboardController:
         self._gpio: Optional[Any] = None
         self._gripper_pwm: Optional[Any] = None
         self._gripper_pwm_pin: Optional[int] = None
+        self._gripper_pwm_pulse_min_us: Optional[float] = None
+        self._gripper_pwm_pulse_max_us: Optional[float] = None
         self.active_reports = False
         self.oscillating = False
         self.jog_active = False
@@ -1629,25 +1699,46 @@ class DashboardController:
     def ensure_gripper_pwm(self) -> Any:
         with self.lock:
             pin = self.gripper_gpio_pin
-        if self._gpio is None:
-            try:
-                import RPi.GPIO as GPIO  # type: ignore[import-not-found]
-            except Exception as exc:
-                raise RuntimeError(
-            "RPi.GPIO is not available; install python3-rpi.gpio and run HelionOS on the Raspberry Pi"
-                ) from exc
-            GPIO.setwarnings(False)
-            GPIO.setmode(GPIO.BCM)
-            self._gpio = GPIO
-
-        GPIO = self._gpio
-        if self._gripper_pwm is not None and self._gripper_pwm_pin != pin:
+            pulse_min_us = self.gripper_pulse_min_us
+            pulse_max_us = self.gripper_pulse_max_us
+        pulse_changed = (
+            self._gripper_pwm_pulse_min_us != pulse_min_us
+            or self._gripper_pwm_pulse_max_us != pulse_max_us
+        )
+        if self._gripper_pwm is not None and (self._gripper_pwm_pin != pin or pulse_changed):
             self.release_gripper(log=False)
         if self._gripper_pwm is None:
-            GPIO.setup(pin, GPIO.OUT)
-            self._gripper_pwm = GPIO.PWM(pin, GRIPPER_PWM_HZ)
-            self._gripper_pwm.start(0.0)
-            self._gripper_pwm_pin = pin
+            errors = []
+            backend_factories: Tuple[Tuple[str, Callable[[], Any]], ...] = (
+                (
+                    "gpiozero/lgpio",
+                    lambda: GpioZeroGripperServo(pin, pulse_min_us, pulse_max_us, use_lgpio=True),
+                ),
+                (
+                    "gpiozero",
+                    lambda: GpioZeroGripperServo(pin, pulse_min_us, pulse_max_us, use_lgpio=False),
+                ),
+                ("RPi.GPIO", lambda: RpiGpioGripperPwm(pin)),
+            )
+            for label, factory in backend_factories:
+                try:
+                    self._gripper_pwm = factory()
+                    self._gripper_pwm_pin = pin
+                    self._gripper_pwm_pulse_min_us = pulse_min_us
+                    self._gripper_pwm_pulse_max_us = pulse_max_us
+                    self._gpio = None
+                    self.log(f"MG90S gripper GPIO backend={getattr(self._gripper_pwm, 'backend', label)} gpio=BCM{pin}")
+                    break
+                except Exception as exc:
+                    errors.append(f"{label}: {exc}")
+            if self._gripper_pwm is None:
+                details = "; ".join(errors)
+                raise RuntimeError(
+                    "No usable GPIO PWM backend. On Raspberry Pi 5 or Raspberry Pi OS Bookworm, "
+                    "install python3-gpiozero and python3-lgpio. On older Raspberry Pi OS, "
+                    "install python3-rpi.gpio. "
+                    f"Backend errors: {details}"
+                )
         return self._gripper_pwm
 
     def release_gripper(self, log: bool = True) -> None:
@@ -1667,6 +1758,9 @@ class DashboardController:
                     self.gripper_last_error = str(exc)
         self._gripper_pwm = None
         self._gripper_pwm_pin = None
+        self._gripper_pwm_pulse_min_us = None
+        self._gripper_pwm_pulse_max_us = None
+        self._gpio = None
         with self.lock:
             self.gripper_attached = False
         if log:
@@ -1685,7 +1779,10 @@ class DashboardController:
         duty_cycle = self.gripper_duty_cycle_for_angle(angle)
         try:
             pwm = self.ensure_gripper_pwm()
-            pwm.ChangeDutyCycle(duty_cycle)
+            if hasattr(pwm, "set_angle"):
+                pwm.set_angle(angle, duty_cycle)
+            else:
+                pwm.ChangeDutyCycle(duty_cycle)
             if release_after_move:
                 time.sleep(GRIPPER_SETTLE_S)
                 self.release_gripper(log=False)

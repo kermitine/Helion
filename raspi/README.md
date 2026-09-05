@@ -109,6 +109,9 @@ HelionOS has an **MG90S Gripper** panel for a small PWM servo gripper. It
 uses BCM GPIO numbering and defaults to GPIO `12` on physical pin `32`, with a
 50 Hz servo signal and conservative `1000..2000 us` pulse bounds. Gripper
 commands do not require the RobStride USB-CAN adapter to be online.
+On newer Raspberry Pi OS releases and Raspberry Pi 5, HelionOS prefers the
+`gpiozero` + `lgpio` backend. If that is unavailable, it falls back to
+`RPi.GPIO` for older Pi boards.
 
 Use the panel's **Guide** button for the built-in wiring and calibration flow.
 In short: connect the servo signal wire to the selected GPIO pin, power the
