@@ -49,10 +49,10 @@ const DEFAULT_GRIPPER_PULSE_MAX_US = 2000;
 const DEFAULT_GRIPPER_CLOSED_DEG = 35;
 const DEFAULT_GRIPPER_OPEN_DEG = 120;
 const DEFAULT_GRIPPER_TEST_DEG = 90;
-const DEFAULT_GRIPPER_RELEASE_AFTER_MOVE = true;
+const DEFAULT_GRIPPER_RELEASE_AFTER_MOVE = false;
 const DEFAULT_GRIPPER_ADAPTIVE_GRIP = true;
-const DEFAULT_GRIPPER_GRIP_RELAX_DEG = 10;
-const DEFAULT_GRIPPER_GRIP_SQUEEZE_S = 0.18;
+const DEFAULT_GRIPPER_GRIP_RELAX_DEG = 0;
+const DEFAULT_GRIPPER_GRIP_SQUEEZE_S = 0.2;
 const RASPI_PHYSICAL_PIN_BY_BCM = {
   0: 27,
   1: 28,
@@ -384,7 +384,7 @@ function gripperInputState() {
     releaseAfterMove: $("gripperReleaseAfterMoveToggle").checked,
     adaptiveGrip: $("gripperAdaptiveGripToggle").checked,
     gripRelaxDeg: clampedNumber(numberInput("gripperGripRelaxInput"), DEFAULT_GRIPPER_GRIP_RELAX_DEG, 0, 30),
-    gripSqueezeS: clampedNumber(numberInput("gripperGripSqueezeInput"), DEFAULT_GRIPPER_GRIP_SQUEEZE_S, 0, 0.8),
+    gripSqueezeS: clampedNumber(numberInput("gripperGripSqueezeInput"), DEFAULT_GRIPPER_GRIP_SQUEEZE_S, 0, 2),
   };
 }
 
@@ -1056,7 +1056,7 @@ function renderGripper(gripper = {}) {
   );
   setControlValue(
     "gripperGripSqueezeInput",
-    clampedNumber(firstValue(gripper.gripSqueezeS, DEFAULT_GRIPPER_GRIP_SQUEEZE_S), DEFAULT_GRIPPER_GRIP_SQUEEZE_S, 0, 0.8).toFixed(2),
+    clampedNumber(firstValue(gripper.gripSqueezeS, DEFAULT_GRIPPER_GRIP_SQUEEZE_S), DEFAULT_GRIPPER_GRIP_SQUEEZE_S, 0, 2).toFixed(2),
   );
   updateGripperReadout();
 
