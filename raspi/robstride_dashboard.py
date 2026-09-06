@@ -195,19 +195,20 @@ GRIPPER_DEFAULT_CLOSED_DEG = 35.0
 GRIPPER_DEFAULT_OPEN_DEG = 120.0
 GRIPPER_DEFAULT_TEST_DEG = 90.0
 GRIPPER_DEFAULT_POSITION = 1.0
-GRIPPER_SETTLE_S = 0.45
-GRIPPER_RAMP_SPEED_DEG_S = 85.0
+GRIPPER_DEFAULT_RELEASE_AFTER_MOVE = True
+GRIPPER_SETTLE_S = 0.18
+GRIPPER_RAMP_SPEED_DEG_S = 220.0
 GRIPPER_RAMP_INTERVAL_S = 0.020
-GRIPPER_RAMP_MIN_DURATION_S = 0.12
-GRIPPER_RAMP_MAX_DURATION_S = 1.60
+GRIPPER_RAMP_MIN_DURATION_S = 0.08
+GRIPPER_RAMP_MAX_DURATION_S = 0.75
 GRIPPER_ANGLE_DEADBAND_DEG = 0.25
 GRIPPER_ADAPTIVE_GRIP_DEFAULT_ENABLED = True
-GRIPPER_ADAPTIVE_GRIP_DEFAULT_RELAX_DEG = 6.0
-GRIPPER_ADAPTIVE_GRIP_DEFAULT_SQUEEZE_S = 0.35
+GRIPPER_ADAPTIVE_GRIP_DEFAULT_RELAX_DEG = 10.0
+GRIPPER_ADAPTIVE_GRIP_DEFAULT_SQUEEZE_S = 0.18
 GRIPPER_ADAPTIVE_GRIP_MAX_POSITION = 0.20
 GRIPPER_ADAPTIVE_GRIP_MAX_RELAX_DEG = 30.0
-GRIPPER_ADAPTIVE_GRIP_MAX_SQUEEZE_S = 2.0
-GRIPPER_ADAPTIVE_GRIP_RELAX_SETTLE_S = 0.12
+GRIPPER_ADAPTIVE_GRIP_MAX_SQUEEZE_S = 0.8
+GRIPPER_ADAPTIVE_GRIP_RELAX_SETTLE_S = 0.06
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
     "sweep": "Sweep",
@@ -241,7 +242,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.05.03"
+APP_VERSION = "2026.09.05.04"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1100,12 +1101,13 @@ class DashboardController:
         self.gripper_open_angle_deg = GRIPPER_DEFAULT_OPEN_DEG
         self.gripper_position = GRIPPER_DEFAULT_POSITION
         self.gripper_test_angle_deg = GRIPPER_DEFAULT_TEST_DEG
-        self.gripper_release_after_move = False
+        self.gripper_release_after_move = GRIPPER_DEFAULT_RELEASE_AFTER_MOVE
         self.gripper_adaptive_grip_enabled = GRIPPER_ADAPTIVE_GRIP_DEFAULT_ENABLED
         self.gripper_adaptive_grip_relax_deg = GRIPPER_ADAPTIVE_GRIP_DEFAULT_RELAX_DEG
         self.gripper_adaptive_grip_squeeze_s = GRIPPER_ADAPTIVE_GRIP_DEFAULT_SQUEEZE_S
         self.gripper_attached = False
         self.gripper_quiet_grip = False
+        self.gripper_last_grip_angle_deg: Optional[float] = None
         self.gripper_last_angle_deg: Optional[float] = None
         self.gripper_last_error = ""
         self._gpio: Optional[Any] = None
@@ -1856,6 +1858,7 @@ class DashboardController:
         with self.lock:
             self.gripper_attached = False
             self.gripper_quiet_grip = False
+            self.gripper_last_grip_angle_deg = None
         if log:
             self.log("MG90S gripper PWM released")
 
@@ -1872,21 +1875,38 @@ class DashboardController:
                 release_after_move = self.gripper_release_after_move
         adaptive_grip = bool(adaptive_grip)
         try:
-            pwm = self.ensure_gripper_pwm()
             with self.lock:
                 start_angle = self.gripper_last_angle_deg
                 if start_angle is None:
                     start_angle = self.gripper_test_angle_deg
                 already_attached = self.gripper_attached
                 quiet_grip = self.gripper_quiet_grip
+                last_grip_angle = self.gripper_last_grip_angle_deg
                 squeeze_s = self.gripper_adaptive_grip_squeeze_s
             start_angle = float(start_angle)
+            if (
+                adaptive_grip
+                and quiet_grip
+                and last_grip_angle is not None
+                and abs(angle - float(last_grip_angle)) <= GRIPPER_ANGLE_DEADBAND_DEG
+            ):
+                return {
+                    "ok": True,
+                    "message": f"Gripper already quiet at {angle:.1f} deg",
+                    "angleDeg": angle,
+                    "relaxedAngleDeg": start_angle,
+                    "attached": False,
+                    "adaptiveGrip": True,
+                    "quietGrip": True,
+                }
+            pwm = self.ensure_gripper_pwm()
             if quiet_grip and self.gripper_angle_moves_toward_open(start_angle, angle):
                 self.set_gripper_pwm_angle(pwm, angle)
                 with self.lock:
                     self.gripper_last_angle_deg = angle
                     self.gripper_attached = True
                     self.gripper_quiet_grip = False
+                    self.gripper_last_grip_angle_deg = None
                     self.gripper_last_error = ""
             elif (
                 not release_after_move
@@ -1912,6 +1932,7 @@ class DashboardController:
                     self.gripper_last_angle_deg = final_angle
                     self.gripper_attached = False
                     self.gripper_quiet_grip = True
+                    self.gripper_last_grip_angle_deg = angle
                     self.gripper_last_error = ""
                 if not quiet:
                     self.log(
@@ -1938,6 +1959,7 @@ class DashboardController:
                 self.gripper_last_angle_deg = angle
                 self.gripper_attached = not release_after_move
                 self.gripper_quiet_grip = False
+                self.gripper_last_grip_angle_deg = None
                 self.gripper_last_error = ""
             suffix = " then released" if release_after_move else ""
             if not quiet:
@@ -1953,6 +1975,7 @@ class DashboardController:
             with self.lock:
                 self.gripper_attached = False
                 self.gripper_quiet_grip = False
+                self.gripper_last_grip_angle_deg = None
                 self.gripper_last_error = message
             self.log(f"MG90S gripper failed: {message}")
             return {"ok": False, "message": message}
@@ -1968,13 +1991,21 @@ class DashboardController:
         with self.lock:
             self.gripper_position = percent
             self.gripper_test_angle_deg = angle
-            use_adaptive_grip = self.gripper_adaptive_grip_enabled if adaptive_grip is None else adaptive_grip
-        use_adaptive_grip = bool(use_adaptive_grip) and percent <= GRIPPER_ADAPTIVE_GRIP_MAX_POSITION
-        result = self.move_gripper_angle(angle, quiet=quiet, adaptive_grip=use_adaptive_grip)
+            adaptive_enabled = self.gripper_adaptive_grip_enabled if adaptive_grip is None else adaptive_grip
+        use_adaptive_grip = bool(adaptive_enabled) and percent <= GRIPPER_ADAPTIVE_GRIP_MAX_POSITION
+        release_after_move = True if bool(adaptive_enabled) and not use_adaptive_grip else None
+        result = self.move_gripper_angle(
+            angle,
+            release_after_move=release_after_move,
+            quiet=quiet,
+            adaptive_grip=use_adaptive_grip,
+        )
         if result.get("ok"):
             result["position"] = percent
             if result.get("adaptiveGrip"):
                 suffix = " adaptive grip"
+            elif release_after_move:
+                suffix = " power-save release"
             else:
                 suffix = " then released" if not result.get("attached", True) else ""
             result["message"] = f"Gripper {percent * 100.0:.0f}% open at {angle:.1f} deg{suffix}"
