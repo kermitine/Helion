@@ -49,6 +49,9 @@ const DEFAULT_GRIPPER_PULSE_MAX_US = 2000;
 const DEFAULT_GRIPPER_CLOSED_DEG = 35;
 const DEFAULT_GRIPPER_OPEN_DEG = 120;
 const DEFAULT_GRIPPER_TEST_DEG = 90;
+const DEFAULT_GRIPPER_ADAPTIVE_GRIP = true;
+const DEFAULT_GRIPPER_GRIP_RELAX_DEG = 6;
+const DEFAULT_GRIPPER_GRIP_SQUEEZE_S = 0.35;
 const RASPI_PHYSICAL_PIN_BY_BCM = {
   0: 27,
   1: 28,
@@ -151,6 +154,9 @@ const gripperControlIds = [
   "gripperPulseMinInput",
   "gripperPulseMaxInput",
   "gripperReleaseAfterMoveToggle",
+  "gripperAdaptiveGripToggle",
+  "gripperGripRelaxInput",
+  "gripperGripSqueezeInput",
 ];
 const speedControlIds = ["speedSlider"];
 const valueButtons = [$("saveValuesBtn"), $("downloadValuesBtn"), $("uploadValuesBtn")].filter(Boolean);
@@ -375,6 +381,9 @@ function gripperInputState() {
     position: clampedNumber(numberInput("gripperPositionSlider"), 100, 0, 100) / 100,
     testAngleDeg: clampedNumber(numberInput("gripperAngleInput"), DEFAULT_GRIPPER_TEST_DEG, 0, 180),
     releaseAfterMove: $("gripperReleaseAfterMoveToggle").checked,
+    adaptiveGrip: $("gripperAdaptiveGripToggle").checked,
+    gripRelaxDeg: clampedNumber(numberInput("gripperGripRelaxInput"), DEFAULT_GRIPPER_GRIP_RELAX_DEG, 0, 30),
+    gripSqueezeS: clampedNumber(numberInput("gripperGripSqueezeInput"), DEFAULT_GRIPPER_GRIP_SQUEEZE_S, 0, 2),
   };
 }
 
@@ -398,6 +407,9 @@ function gripperPayload() {
     gripperPosition: gripper.position,
     gripperTestAngleDeg: gripper.testAngleDeg,
     gripperReleaseAfterMove: gripper.releaseAfterMove,
+    gripperAdaptiveGrip: gripper.adaptiveGrip,
+    gripperGripRelaxDeg: gripper.gripRelaxDeg,
+    gripperGripSqueezeS: gripper.gripSqueezeS,
   };
 }
 
@@ -651,6 +663,12 @@ function applyValuePayload(payload) {
     "gripperReleaseAfterMoveToggle",
     firstValue(gripper.releaseAfterMove, payload.gripperReleaseAfterMove),
   );
+  setDirtyChecked(
+    "gripperAdaptiveGripToggle",
+    firstValue(gripper.adaptiveGrip, payload.gripperAdaptiveGrip),
+  );
+  setDirtyNumber("gripperGripRelaxInput", firstValue(gripper.gripRelaxDeg, payload.gripperGripRelaxDeg), 1);
+  setDirtyNumber("gripperGripSqueezeInput", firstValue(gripper.gripSqueezeS, payload.gripperGripSqueezeS), 2);
   updateGripperReadout();
 
   setDirtyValue(
@@ -1030,11 +1048,22 @@ function renderGripper(gripper = {}) {
   setControlValue("gripperPulseMinInput", Math.round(clampedNumber(firstValue(gripper.pulseMinUs, DEFAULT_GRIPPER_PULSE_MIN_US), DEFAULT_GRIPPER_PULSE_MIN_US, 500, 2500)));
   setControlValue("gripperPulseMaxInput", Math.round(clampedNumber(firstValue(gripper.pulseMaxUs, DEFAULT_GRIPPER_PULSE_MAX_US), DEFAULT_GRIPPER_PULSE_MAX_US, 500, 2500)));
   setControlChecked("gripperReleaseAfterMoveToggle", gripper.releaseAfterMove);
+  setControlChecked("gripperAdaptiveGripToggle", firstValue(gripper.adaptiveGrip, DEFAULT_GRIPPER_ADAPTIVE_GRIP));
+  setControlValue(
+    "gripperGripRelaxInput",
+    clampedNumber(firstValue(gripper.gripRelaxDeg, DEFAULT_GRIPPER_GRIP_RELAX_DEG), DEFAULT_GRIPPER_GRIP_RELAX_DEG, 0, 30).toFixed(1),
+  );
+  setControlValue(
+    "gripperGripSqueezeInput",
+    clampedNumber(firstValue(gripper.gripSqueezeS, DEFAULT_GRIPPER_GRIP_SQUEEZE_S), DEFAULT_GRIPPER_GRIP_SQUEEZE_S, 0, 2).toFixed(2),
+  );
   updateGripperReadout();
 
   const status = $("gripperStatus");
   if (gripper.lastError) {
     status.textContent = "GPIO Error";
+  } else if (gripper.quietGrip) {
+    status.textContent = "Quiet Grip";
   } else if (gripper.attached) {
     status.textContent = `Holding BCM${firstValue(gripper.gpioPin, DEFAULT_GRIPPER_GPIO_PIN)}`;
   } else if (gripper.releaseAfterMove) {

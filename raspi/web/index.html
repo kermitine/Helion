@@ -670,6 +670,18 @@
                   <input id="gripperReleaseAfterMoveToggle" type="checkbox">
                   <span>Release After Move</span>
                 </label>
+                <label class="switch">
+                  <input id="gripperAdaptiveGripToggle" type="checkbox" checked>
+                  <span>Adaptive Grip</span>
+                </label>
+                <label>
+                  <span>Grip Relax deg</span>
+                  <input id="gripperGripRelaxInput" type="number" min="0" max="30" step="1" value="6" inputmode="decimal">
+                </label>
+                <label>
+                  <span>Squeeze s</span>
+                  <input id="gripperGripSqueezeInput" type="number" min="0" max="2" step="0.05" value="0.35" inputmode="decimal">
+                </label>
               </div>
               <div class="button-row gripper-calibration-actions">
                 <button data-command="gripper-angle">Move Angle</button>
