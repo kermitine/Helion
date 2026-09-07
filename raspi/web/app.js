@@ -1119,9 +1119,12 @@ function setGripperMessage(message = "", isError = false) {
 
 function updateDanceReadout() {
   const dance = danceInputState();
-  $("danceBpmValue").textContent = `${Math.round(dance.bpm)} BPM`;
-  $("danceBounceValue").textContent = `${Math.round(dance.bounce * 100)}%`;
-  $("danceSwayValue").textContent = `${Math.round(dance.swayDeg)} deg`;
+  const bpmValue = $("danceBpmValue");
+  const bounceValue = $("danceBounceValue");
+  const swayValue = $("danceSwayValue");
+  if (bpmValue) bpmValue.textContent = `${Math.round(dance.bpm)} BPM`;
+  if (bounceValue) bounceValue.textContent = `${Math.round(dance.bounce * 100)}%`;
+  if (swayValue) swayValue.textContent = `${Math.round(dance.swayDeg)} deg`;
 }
 
 function renderDance(dance = {}) {
