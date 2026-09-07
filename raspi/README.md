@@ -107,7 +107,7 @@ HelionOS log will list the Linux user and every shutdown command it tried.
 
 HelionOS has an **MG90S Gripper** panel for a small PWM servo gripper. It
 uses BCM GPIO numbering and defaults to GPIO `12` on physical pin `32`, with a
-50 Hz servo signal and conservative `1000..2000 us` pulse bounds. Gripper
+50 Hz servo signal and full-travel `500..2500 us` pulse bounds. Gripper
 commands do not require the RobStride USB-CAN adapter to be online.
 On newer Raspberry Pi OS releases and Raspberry Pi 5, HelionOS prefers the
 `gpiozero` + `lgpio` backend. If that is unavailable, it falls back to
@@ -120,7 +120,9 @@ ground, supply ground, and Raspberry Pi ground together. Avoid powering a loaded
 servo directly from the Pi 5 V pin if it causes brownouts or resets.
 
 For calibration, use **Test Angle** and **Move Angle** to find the fully closed
-and fully open positions without forcing the linkage. Press **Closed Here** and
+and fully open positions without forcing the linkage. With the default full
+pulse range, `90 deg` should be near the servo center; reduce the pulse range if
+`0 deg` or `180 deg` drives into a hard stop. Press **Closed Here** and
 **Open Here** to store those angles, then use the position slider: `0%` maps to
 the closed angle and `100%` maps to the open angle. Use **Release** to stop the
 servo PWM output, or enable **Release After Move** if you want HelionOS to
