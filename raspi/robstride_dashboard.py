@@ -210,6 +210,24 @@ GRIPPER_ADAPTIVE_GRIP_MAX_POSITION = 0.20
 GRIPPER_ADAPTIVE_GRIP_MAX_RELAX_DEG = 30.0
 GRIPPER_ADAPTIVE_GRIP_MAX_SQUEEZE_S = 2.0
 GRIPPER_ADAPTIVE_GRIP_RELAX_SETTLE_S = 0.12
+DANCE_DEFAULT_BPM = 96.0
+DANCE_MIN_BPM = 30.0
+DANCE_MAX_BPM = 180.0
+DANCE_DEFAULT_BOUNCE = 0.55
+DANCE_DEFAULT_SWAY_DEG = 16.0
+DANCE_MAX_SWAY_DEG = 45.0
+DANCE_DEFAULT_GRIPPER_ENABLED = True
+DANCE_PHRASE_BEATS = 8
+DANCE_SAMPLES_PER_BEAT = 12
+DANCE_TWIST_MARGIN_RAD = math.radians(2.0)
+DANCE_ELBOW_MAX_BOUNCE_RAD = math.radians(22.0)
+DANCE_SHOULDER_MAX_BOUNCE_RAD = math.radians(7.0)
+DANCE_TWO_JOINT_SHOULDER_MAX_BOUNCE_RAD = math.radians(14.0)
+DANCE_SAFETY_SCALE = 0.70
+DANCE_MIN_SAFETY_SCALE = 0.06
+DANCE_GRIPPER_UPDATE_S = 0.04
+DANCE_GRIPPER_MIN_POSITION = 0.18
+DANCE_GRIPPER_MAX_POSITION = 0.95
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
     "sweep": "Sweep",
@@ -243,7 +261,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.06.02"
+APP_VERSION = "2026.09.07.02"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1092,6 +1110,14 @@ class DashboardController:
         self.arm_route_next_at = 0.0
         self.arm_route_support_until = 0.0
         self.arm_hold_correction_ramp_until = 0.0
+        self.dance_active = False
+        self.dance_bpm = DANCE_DEFAULT_BPM
+        self.dance_bounce = DANCE_DEFAULT_BOUNCE
+        self.dance_sway_deg = DANCE_DEFAULT_SWAY_DEG
+        self.dance_gripper_enabled = DANCE_DEFAULT_GRIPPER_ENABLED
+        self.dance_started_at = 0.0
+        self.dance_last_gripper_at = 0.0
+        self.dance_gripper_error_logged = False
         self.gripper_gpio_pin = GRIPPER_DEFAULT_GPIO_PIN
         self.gripper_pulse_min_us = GRIPPER_DEFAULT_PULSE_MIN_US
         self.gripper_pulse_max_us = GRIPPER_DEFAULT_PULSE_MAX_US
@@ -1203,6 +1229,7 @@ class DashboardController:
     ) -> bool:
         with self.lock:
             self.oscillating = False
+            self.dance_active = False
             self.jog_active = False
             self.velocity_configured = False
             self.position_configured = False
@@ -1227,6 +1254,7 @@ class DashboardController:
     def shutdown_host(self) -> Dict[str, Any]:
         self.log("Safe shutdown requested")
         cleanup_errors: List[str] = []
+        self.stop_dance_state()
 
         try:
             if self.connected:
@@ -1712,6 +1740,38 @@ class DashboardController:
                 GRIPPER_ADAPTIVE_GRIP_MAX_SQUEEZE_S,
             )
 
+    def apply_dance_payload(self, payload: Dict[str, Any]) -> None:
+        dance = payload.get("dance")
+        if not isinstance(dance, dict):
+            dance = {}
+
+        def value(key: str, fallback: Any) -> Any:
+            return payload.get(key, dance.get(key, fallback))
+
+        with self.lock:
+            self.dance_bpm = clamped_float(
+                value("danceBpm", value("bpm", self.dance_bpm)),
+                self.dance_bpm,
+                DANCE_MIN_BPM,
+                DANCE_MAX_BPM,
+            )
+            self.dance_bounce = clamped_float(
+                value("danceBounce", value("bounce", self.dance_bounce)),
+                self.dance_bounce,
+                0.0,
+                1.0,
+            )
+            self.dance_sway_deg = clamped_float(
+                value("danceSwayDeg", value("swayDeg", self.dance_sway_deg)),
+                self.dance_sway_deg,
+                0.0,
+                DANCE_MAX_SWAY_DEG,
+            )
+            self.dance_gripper_enabled = parse_bool(
+                value("danceGripper", value("gripper", self.dance_gripper_enabled)),
+                self.dance_gripper_enabled,
+            )
+
     def gripper_angle_for_position(self, position: Optional[float] = None) -> float:
         with self.lock:
             percent = self.gripper_position if position is None else position
@@ -2106,7 +2166,15 @@ class DashboardController:
 
     def run_command(self, command: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not self.command_lock.acquire(blocking=False):
-            if command in ("stop", "clear-fault", "arm-stop", "arm-clear-fault", "shutdown-host", "gripper-release"):
+            if command in (
+                "stop",
+                "clear-fault",
+                "arm-stop",
+                "arm-clear-fault",
+                "arm-dance-stop",
+                "shutdown-host",
+                "gripper-release",
+            ):
                 try:
                     if command == "stop":
                         self.stop_and_disable()
@@ -2120,6 +2188,8 @@ class DashboardController:
                     elif command == "arm-clear-fault":
                         self.clear_arm_faults()
                         message = "Arm clear fault sent while another command was running."
+                    elif command == "arm-dance-stop":
+                        return self.stop_arm_dance()
                     elif command == "gripper-release":
                         self.release_gripper()
                         message = "Gripper PWM released while another command was running."
@@ -2152,6 +2222,8 @@ class DashboardController:
             return self.shutdown_host()
         if command in GRIPPER_COMMANDS:
             return self.run_gripper_command(command, payload)
+        if command == "arm-dance-stop":
+            return self.stop_arm_dance()
         if not self.connected:
             opened = self.open_bus()
             if not opened:
@@ -2194,6 +2266,8 @@ class DashboardController:
             return {"ok": self.move_arm_ik(payload, live=True)}
         if command == "arm-preset":
             return self.move_arm_preset(payload)
+        if command == "arm-dance-start":
+            return self.start_arm_dance(payload)
         if command == "arm-home-zero":
             return self.home_arm_zero(payload)
         if command == "arm-adaptive-assist":
@@ -2263,6 +2337,7 @@ class DashboardController:
                     self.velocity_configured = False
                     self.position_configured = False
                     self.oscillating = False
+                    self.dance_active = False
                     self.jog_active = False
                     if bus_changed:
                         self.arm_position_configured = False
@@ -2312,6 +2387,12 @@ class DashboardController:
                     "adaptiveGrip": self.gripper_adaptive_grip_enabled,
                     "gripRelaxDeg": self.gripper_adaptive_grip_relax_deg,
                     "gripSqueezeS": self.gripper_adaptive_grip_squeeze_s,
+                },
+                "dance": {
+                    "bpm": self.dance_bpm,
+                    "bounce": self.dance_bounce,
+                    "swayDeg": self.dance_sway_deg,
+                    "gripper": self.dance_gripper_enabled,
                 },
                 "arm": {
                     "jointCount": self.arm_joint_count,
@@ -2548,6 +2629,7 @@ class DashboardController:
                 200.0,
             )
             self.apply_gripper_payload(payload)
+            self.apply_dance_payload(payload)
             self.apply_arm_payload(self.arm_payload_from_values(payload))
             bus_changed = (
                 new_serial_port != old_serial_port
@@ -2567,6 +2649,7 @@ class DashboardController:
                 self.clear_arm_route()
                 self.reset_arm_adaptive_assist_trims()
                 self.oscillating = False
+                self.dance_active = False
                 self.jog_active = False
                 self.commanded_speed = 0.0
         return bus_changed, new_serial_port, new_serial_baud, control_changed
@@ -2648,6 +2731,7 @@ class DashboardController:
 
     def clear_fault(self) -> None:
         self.oscillating = False
+        self.dance_active = False
         self.jog_active = False
         self.velocity_configured = False
         self.position_configured = False
@@ -2663,6 +2747,7 @@ class DashboardController:
         self.clear_arm_route()
         self.reset_arm_adaptive_assist_trims()
         self.oscillating = False
+        self.dance_active = False
         self.jog_active = False
         self.log(
             f"Configuring private velocity motor={fmt_id(self.motor_id)} "
@@ -2719,6 +2804,7 @@ class DashboardController:
         self.clear_arm_route()
         self.reset_arm_adaptive_assist_trims()
         self.oscillating = False
+        self.dance_active = False
         self.jog_active = False
         self.commanded_speed = 0.0
         kp = max(0.0, position_kp)
@@ -3334,6 +3420,15 @@ class DashboardController:
         self.arm_route_support_until = 0.0
         self.arm_hold_correction_ramp_until = 0.0
 
+    def stop_dance_state(self) -> bool:
+        with self.lock:
+            was_active = self.dance_active
+            self.dance_active = False
+            self.dance_started_at = 0.0
+            self.dance_last_gripper_at = 0.0
+            self.dance_gripper_error_logged = False
+        return was_active
+
     def arm_route_waypoint_interval(self, waypoint: Dict[str, Any]) -> float:
         try:
             interval = float(waypoint.get("interval", ARM_ROUTE_SAMPLE_S))
@@ -3771,6 +3866,7 @@ class DashboardController:
         self.apply_arm_payload(payload)
         with self.lock:
             self.oscillating = False
+            self.dance_active = False
             self.jog_active = False
             self.velocity_configured = False
             self.position_configured = False
@@ -4075,6 +4171,7 @@ class DashboardController:
         ok, message = self.validate_arm_command_motors(payload)
         if not ok:
             raise ValueError(message)
+        self.stop_dance_state()
         self.apply_arm_payload(payload)
         config_signature = self.arm_position_config_signature()
         launch_hold_s = 0.0
@@ -4097,6 +4194,7 @@ class DashboardController:
         ok, message = self.validate_arm_command_motors(payload)
         if not ok:
             return {"ok": False, "message": message}
+        self.stop_dance_state()
         self.apply_arm_payload(payload)
         preset = str(payload.get("armMotionPreset", "showcase")).strip().lower()
         label = ARM_MOTION_PRESET_LABELS.get(preset, preset.title())
@@ -4128,6 +4226,352 @@ class DashboardController:
             ) if ok else f"Arm preset {label} failed to start",
         }
 
+    def dance_axis_symmetric_amplitude(self, axis: str, center_angle: float, requested_rad: float) -> float:
+        limit = twist_limit_rad(self.arm_twist_limits.get(axis, ARM_TWIST_DEFAULT_LIMIT_RAD))
+        available = limit - abs(float(center_angle)) - DANCE_TWIST_MARGIN_RAD
+        return max(0.0, min(abs(float(requested_rad)), available))
+
+    def dance_axis_directional_amplitude(
+        self,
+        axis: str,
+        center_angle: float,
+        requested_rad: float,
+        direction: float,
+    ) -> float:
+        limit = twist_limit_rad(self.arm_twist_limits.get(axis, ARM_TWIST_DEFAULT_LIMIT_RAD))
+        center = float(center_angle)
+        if direction >= 0.0:
+            available = limit - center - DANCE_TWIST_MARGIN_RAD
+        else:
+            available = center + limit - DANCE_TWIST_MARGIN_RAD
+        return max(0.0, min(abs(float(requested_rad)), available))
+
+    def build_arm_dance_phrase_waypoints(
+        self,
+        center_angles: Dict[str, float],
+        sway_rad: float,
+        shoulder_amp_rad: float,
+        elbow_amp_rad: float,
+        elbow_direction: float,
+        bpm: float,
+    ) -> List[Dict[str, Any]]:
+        beats_per_second = max(DANCE_MIN_BPM, min(DANCE_MAX_BPM, bpm)) / 60.0
+        beat_s = 1.0 / beats_per_second
+        samples = max(1, DANCE_PHRASE_BEATS * DANCE_SAMPLES_PER_BEAT)
+        interval = beat_s / DANCE_SAMPLES_PER_BEAT
+        waypoints: List[Dict[str, Any]] = []
+        shoulder_direction = -1.0 if elbow_direction >= 0.0 else 1.0
+        sway_phase_rate = (math.tau / 4.0) * beats_per_second
+        bounce_phase_rate = math.tau * beats_per_second
+
+        for step in range(1, samples + 1):
+            beat_time = step / DANCE_SAMPLES_PER_BEAT
+            sway_phase = (math.tau * beat_time) / 4.0
+            bounce_phase = math.tau * beat_time
+            bounce = 0.5 - (0.5 * math.cos(bounce_phase))
+            bounce_velocity = 0.5 * bounce_phase_rate * math.sin(bounce_phase)
+
+            joint_angles = normalized_joint_angles(self.arm_joint_count, center_angles)
+            joint_velocities = {axis: 0.0 for axis in ARM_AXES}
+            joint_angles["base"] = center_angles["base"] + (sway_rad * math.sin(sway_phase))
+            joint_velocities["base"] = sway_rad * sway_phase_rate * math.cos(sway_phase)
+            joint_angles["shoulder"] = center_angles["shoulder"] + (
+                shoulder_direction * shoulder_amp_rad * bounce
+            )
+            joint_velocities["shoulder"] = shoulder_direction * shoulder_amp_rad * bounce_velocity
+
+            if self.arm_joint_count == 3:
+                joint_angles["elbow"] = center_angles["elbow"] + (elbow_direction * elbow_amp_rad * bounce)
+                joint_velocities["elbow"] = elbow_direction * elbow_amp_rad * bounce_velocity
+            else:
+                joint_angles["elbow"] = 0.0
+                joint_velocities["elbow"] = 0.0
+
+            target = arm_target_from_joint_angles(
+                self.arm_joint_count,
+                joint_angles,
+                self.arm_link_1,
+                self.arm_link_2,
+            )
+            waypoint_safety = self.arm_safety_for_joint_angles(joint_angles, target)
+            if not waypoint_safety["ok"]:
+                raise ValueError("; ".join(waypoint_safety["warnings"]))
+            waypoints.append(
+                {
+                    "jointAngles": dict(joint_angles),
+                    "jointVelocities": dict(joint_velocities),
+                    "motorTargets": self.arm_motor_targets_for_joints(joint_angles),
+                    "motorVelocities": self.arm_motor_velocities_for_joints(joint_velocities),
+                    "interval": interval,
+                }
+            )
+        return waypoints
+
+    def dance_travel_scale(
+        self,
+        sway_rad: float,
+        shoulder_amp_rad: float,
+        elbow_amp_rad: float,
+        bpm: float,
+    ) -> float:
+        beats_per_second = max(DANCE_MIN_BPM, min(DANCE_MAX_BPM, bpm)) / 60.0
+        bounce_rate = math.tau * beats_per_second
+        sway_rate = bounce_rate / 4.0
+        peak_velocity = max(
+            abs(sway_rad) * sway_rate,
+            abs(shoulder_amp_rad) * 0.5 * bounce_rate,
+            abs(elbow_amp_rad) * 0.5 * bounce_rate,
+        )
+        peak_acceleration = max(
+            abs(sway_rad) * sway_rate * sway_rate,
+            abs(shoulder_amp_rad) * 0.5 * bounce_rate * bounce_rate,
+            abs(elbow_amp_rad) * 0.5 * bounce_rate * bounce_rate,
+        )
+        velocity_limit = max(abs(self.arm_velocity_limit), 0.05)
+        acceleration_limit = max(abs(self.arm_acceleration), 0.10)
+        scale = 1.0
+        if peak_velocity > velocity_limit:
+            scale = min(scale, velocity_limit / peak_velocity)
+        if peak_acceleration > acceleration_limit:
+            scale = min(scale, acceleration_limit / peak_acceleration)
+        return max(0.0, min(1.0, scale))
+
+    def build_arm_dance_route(
+        self,
+        start_angles: Dict[str, float],
+        launch_hold_s: float = 0.0,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, float], Dict[str, float], Dict[str, float]]:
+        min_radial, max_radial, min_z, max_z = self.arm_preset_scale_ranges()
+        center_target, center_angles = self.arm_safe_preset_target(
+            "dance",
+            (min_radial + max_radial) * 0.5,
+            0.0,
+            (min_z + max_z) * 0.5,
+            normalized_joint_angles(self.arm_joint_count, start_angles),
+        )
+        route_waypoints: List[Dict[str, Any]] = []
+        if launch_hold_s > 0.0:
+            route_waypoints.append(self.arm_hold_waypoint(start_angles, launch_hold_s))
+        if joint_angle_distance(self.arm_joint_count, start_angles, center_angles) > 0.0005:
+            intro_waypoints, final_target, final_joint_angles = self.arm_route_waypoints_to_target(
+                center_target,
+                start_angles,
+                ARM_ROUTE_MAX_STEP_RAD,
+            )
+            route_waypoints.extend(intro_waypoints)
+        else:
+            final_target = center_target
+            final_joint_angles = center_angles
+
+        bounce = max(0.0, min(1.0, self.dance_bounce))
+        requested_sway = math.radians(self.dance_sway_deg)
+        elbow_direction = -1.0 if center_angles.get("elbow", 0.0) >= 0.0 else 1.0
+        sway_rad = self.dance_axis_symmetric_amplitude("base", center_angles["base"], requested_sway)
+        if self.arm_joint_count == 3:
+            shoulder_requested = DANCE_SHOULDER_MAX_BOUNCE_RAD * bounce
+            elbow_requested = DANCE_ELBOW_MAX_BOUNCE_RAD * bounce
+        else:
+            shoulder_requested = DANCE_TWO_JOINT_SHOULDER_MAX_BOUNCE_RAD * bounce
+            elbow_requested = 0.0
+        shoulder_direction = -1.0 if elbow_direction >= 0.0 else 1.0
+        shoulder_amp = self.dance_axis_directional_amplitude(
+            "shoulder",
+            center_angles["shoulder"],
+            shoulder_requested,
+            shoulder_direction,
+        )
+        elbow_amp = (
+            self.dance_axis_directional_amplitude(
+                "elbow",
+                center_angles["elbow"],
+                elbow_requested,
+                elbow_direction,
+            )
+            if self.arm_joint_count == 3
+            else 0.0
+        )
+
+        travel_scale = self.dance_travel_scale(
+            sway_rad,
+            shoulder_amp,
+            elbow_amp,
+            self.dance_bpm,
+        )
+        scale = travel_scale
+        minimum_scale = max(0.001, travel_scale * DANCE_MIN_SAFETY_SCALE)
+        last_error = ""
+        while scale >= minimum_scale:
+            try:
+                dance_waypoints = self.build_arm_dance_phrase_waypoints(
+                    center_angles,
+                    sway_rad * scale,
+                    shoulder_amp * scale,
+                    elbow_amp * scale,
+                    elbow_direction,
+                    self.dance_bpm,
+                )
+                route_waypoints.extend(dance_waypoints)
+                duration_s = sum(self.arm_route_waypoint_interval(item) for item in route_waypoints)
+                summary = {
+                    "durationS": duration_s,
+                    "swayDeg": math.degrees(sway_rad * scale),
+                    "shoulderDeg": math.degrees(shoulder_amp * scale),
+                    "elbowDeg": math.degrees(elbow_amp * scale),
+                    "travelScale": travel_scale,
+                    "safetyScale": scale / travel_scale if travel_scale > 0.0 else 0.0,
+                }
+                return route_waypoints, final_target, final_joint_angles, summary
+            except ValueError as exc:
+                last_error = str(exc)
+                scale *= DANCE_SAFETY_SCALE
+
+        detail = f": {last_error}" if last_error else ""
+        raise ValueError(f"Dance mode has no safe bounce with the current IK settings{detail}")
+
+    def move_gripper_position_immediate(self, position: float) -> Dict[str, Any]:
+        percent = max(0.0, min(1.0, float(position)))
+        angle = self.gripper_angle_for_position(percent)
+        try:
+            pwm = self.ensure_gripper_pwm()
+            self.set_gripper_pwm_angle(pwm, angle)
+            with self.lock:
+                self.gripper_position = percent
+                self.gripper_test_angle_deg = angle
+                self.gripper_last_angle_deg = angle
+                self.gripper_attached = True
+                self.gripper_quiet_grip = False
+                self.gripper_last_grip_angle_deg = None
+                self.gripper_last_error = ""
+            return {"ok": True, "angleDeg": angle, "position": percent}
+        except Exception as exc:
+            message = str(exc)
+            with self.lock:
+                self.gripper_attached = False
+                self.gripper_quiet_grip = False
+                self.gripper_last_grip_angle_deg = None
+                self.gripper_last_error = message
+            return {"ok": False, "message": message}
+
+    def update_dance_gripper(self, now: float) -> None:
+        with self.lock:
+            if (
+                not self.dance_active
+                or not self.dance_gripper_enabled
+                or now - self.dance_last_gripper_at < DANCE_GRIPPER_UPDATE_S
+            ):
+                return
+            bpm = self.dance_bpm
+            bounce = self.dance_bounce
+            started_at = self.dance_started_at or now
+            error_logged = self.dance_gripper_error_logged
+            self.dance_last_gripper_at = now
+
+        beat_age = max(0.0, now - started_at) * (bpm / 60.0)
+        beat_phase = math.tau * (beat_age % 1.0)
+        pulse = 0.5 - (0.5 * math.cos(beat_phase))
+        position = DANCE_GRIPPER_MAX_POSITION - (
+            (DANCE_GRIPPER_MAX_POSITION - DANCE_GRIPPER_MIN_POSITION) * bounce * pulse
+        )
+        result = self.move_gripper_position_immediate(position)
+        if result.get("ok"):
+            with self.lock:
+                self.dance_gripper_error_logged = False
+            return
+        if not error_logged:
+            self.log(f"Dance gripper pulse skipped: {result.get('message', 'GPIO error')}")
+            with self.lock:
+                self.dance_gripper_error_logged = True
+
+    def start_next_arm_dance_phrase(self, now: float) -> None:
+        if not self.command_lock.acquire(blocking=False):
+            return
+        try:
+            with self.lock:
+                if not self.dance_active or self.arm_route_waypoints:
+                    return
+                config_signature = self.arm_position_config_signature()
+                bpm = self.dance_bpm
+            start_angles = self.arm_route_start_joint_angles()
+            route_waypoints, final_target, _final_joint_angles, _summary = self.build_arm_dance_route(
+                start_angles,
+                launch_hold_s=0.0,
+            )
+            self.arm_target = final_target
+            ok = self.start_arm_route(
+                route_waypoints,
+                config_signature,
+                f"Arm dance phrase {bpm:.0f} BPM",
+                live=True,
+            )
+            if not ok:
+                self.stop_dance_state()
+                self.log("Dance mode stopped: arm phrase failed to start")
+        except Exception as exc:
+            self.stop_dance_state()
+            self.log(f"Dance mode stopped: {exc}")
+        finally:
+            self.command_lock.release()
+
+    def start_arm_dance(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        ok, message = self.validate_arm_command_motors(payload)
+        if not ok:
+            return {"ok": False, "message": message}
+        self.stop_dance_state()
+        self.apply_arm_payload(payload)
+        self.apply_gripper_payload(payload)
+        self.apply_dance_payload(payload)
+        config_signature = self.arm_position_config_signature()
+        launch_hold_s = 0.0
+        if self.arm_position_configured and self.arm_position_signature == config_signature:
+            self.refresh_arm_hold_before_route_planning()
+            launch_hold_s = ARM_ROUTE_LAUNCH_HOLD_S
+        start_angles = self.arm_route_start_joint_angles()
+        route_waypoints, final_target, _final_joint_angles, summary = self.build_arm_dance_route(
+            start_angles,
+            launch_hold_s=launch_hold_s,
+        )
+        self.arm_target = final_target
+        route_ok = self.start_arm_route(
+            route_waypoints,
+            config_signature,
+            f"Arm dance {self.dance_bpm:.0f} BPM ({self.arm_joint_count}-joint)",
+        )
+        if not route_ok:
+            return {"ok": False, "message": "Dance mode failed to start"}
+        now = time.monotonic()
+        with self.lock:
+            self.dance_active = True
+            self.dance_started_at = now
+            self.dance_last_gripper_at = 0.0
+            self.dance_gripper_error_logged = False
+        gripper_label = "with gripper pulse" if self.dance_gripper_enabled else "arm only"
+        travel_label = (
+            f", travel-scaled to {summary['travelScale'] * 100.0:.0f}%"
+            if summary.get("travelScale", 1.0) < 0.995
+            else ""
+        )
+        message = (
+            f"Dance mode on at {self.dance_bpm:.0f} BPM, "
+            f"sway={summary['swayDeg']:.1f}deg, shoulder={summary['shoulderDeg']:.1f}deg, "
+            f"elbow={summary['elbowDeg']:.1f}deg, {gripper_label}{travel_label}"
+        )
+        self.log(message)
+        return {"ok": True, "message": message, "durationS": summary["durationS"]}
+
+    def stop_arm_dance(self) -> Dict[str, Any]:
+        was_active = self.stop_dance_state()
+        self.clear_arm_route()
+        self.arm_motor_velocities = {axis: 0.0 for axis in ARM_AXES}
+        if self.connected and self.arm_position_configured:
+            for axis in self.active_arm_axes():
+                self.send_arm_operation_control_for_axis(axis)
+            self.last_arm_position_refresh_at = time.monotonic()
+        if self.gripper_release_after_move:
+            self.release_gripper(log=False)
+        message = "Dance mode stopped; holding current pose" if was_active else "Dance mode already idle"
+        self.log(message)
+        return {"ok": True, "message": message}
+
     def set_arm_adaptive_assist(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         was_enabled = self.arm_adaptive_assist_enabled
         self.apply_arm_payload(payload)
@@ -4155,7 +4599,8 @@ class DashboardController:
                 self.arm_adaptive_assist_pause_until = now + ARM_ADAPTIVE_ASSIST_SETTLE_S
                 self.arm_route_support_until = now + ARM_ROUTE_SUPPORT_GRACE_S
                 self.arm_hold_correction_ramp_until = now + ARM_HOLD_ERROR_RAMP_S
-                self.log("Arm route complete")
+                if not self.dance_active:
+                    self.log("Arm route complete")
         self.update_arm_adaptive_assist(now)
         for axis in self.active_arm_axes():
             self.send_arm_operation_control_for_axis(axis)
@@ -4168,6 +4613,7 @@ class DashboardController:
         self.clear_arm_route()
         self.reset_arm_adaptive_assist_trims()
         self.oscillating = False
+        self.dance_active = False
         self.jog_active = False
         self.commanded_speed = 0.0
         for motor_id in sorted(set(self.arm_motor_ids[axis] for axis in self.active_arm_axes())):
@@ -4182,6 +4628,7 @@ class DashboardController:
         self.clear_arm_route()
         self.reset_arm_adaptive_assist_trims()
         self.oscillating = False
+        self.dance_active = False
         self.jog_active = False
         self.commanded_speed = 0.0
         for motor_id in sorted(set(self.arm_motor_ids[axis] for axis in self.active_arm_axes())):
@@ -4213,6 +4660,7 @@ class DashboardController:
     def set_speed(self, speed: float) -> bool:
         if not self.velocity_configured and not self.configure_velocity():
             return False
+        self.dance_active = False
         self.commanded_speed = speed
         self.send_velocity_target(speed)
         self.position_configured = False
@@ -4234,6 +4682,7 @@ class DashboardController:
 
     def toggle_oscillation(self) -> bool:
         self.jog_active = False
+        self.dance_active = False
         if self.oscillating:
             self.oscillating = False
             self.log("Oscillation off")
@@ -4247,6 +4696,7 @@ class DashboardController:
 
     def stop_and_disable(self) -> None:
         self.oscillating = False
+        self.dance_active = False
         self.jog_active = False
         if self.velocity_configured:
             try:
@@ -4302,6 +4752,7 @@ class DashboardController:
         store = bool(payload.get("store", True))
         with self.lock:
             self.oscillating = False
+            self.dance_active = False
             self.jog_active = False
             self.velocity_configured = False
             self.position_configured = False
@@ -4485,6 +4936,10 @@ class DashboardController:
                 if self.oscillating and now - self.last_oscillation_at >= OSCILLATION_PERIOD_S:
                     self.last_oscillation_at = now
                     self.set_speed(-self.commanded_speed)
+                if self.dance_active and not self.command_lock.locked():
+                    self.update_dance_gripper(now)
+                    if not self.arm_route_waypoints:
+                        self.start_next_arm_dance_phrase(now)
                 if (
                     self.velocity_configured
                     and not self.position_configured
@@ -4593,7 +5048,7 @@ class DashboardController:
         ids: List[int] = []
         if self.velocity_configured or self.position_configured or self.jog_active or self.oscillating:
             ids.append(self.motor_id & 0xFF)
-        if self.arm_position_configured or self.arm_route_waypoints:
+        if self.arm_position_configured or self.arm_route_waypoints or self.dance_active:
             ids.extend(self.arm_motor_ids[axis] & 0xFF for axis in self.active_arm_axes())
         out: List[int] = []
         for motor_id in ids:
@@ -4730,6 +5185,15 @@ class DashboardController:
                     "quietGrip": self.gripper_quiet_grip,
                     "lastError": self.gripper_last_error,
                     "pwmHz": GRIPPER_PWM_HZ,
+                },
+                "dance": {
+                    "active": self.dance_active,
+                    "bpm": self.dance_bpm,
+                    "bounce": self.dance_bounce,
+                    "swayDeg": self.dance_sway_deg,
+                    "gripper": self.dance_gripper_enabled,
+                    "phraseBeats": DANCE_PHRASE_BEATS,
+                    "beatMs": int(round(60000.0 / max(self.dance_bpm, 1.0))),
                 },
                 "arm": {
                     "jointCount": self.arm_joint_count,

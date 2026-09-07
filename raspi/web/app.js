@@ -53,6 +53,10 @@ const DEFAULT_GRIPPER_RELEASE_AFTER_MOVE = false;
 const DEFAULT_GRIPPER_ADAPTIVE_GRIP = true;
 const DEFAULT_GRIPPER_GRIP_RELAX_DEG = 0;
 const DEFAULT_GRIPPER_GRIP_SQUEEZE_S = 0.2;
+const DEFAULT_DANCE_BPM = 96;
+const DEFAULT_DANCE_BOUNCE = 0.55;
+const DEFAULT_DANCE_SWAY_DEG = 16;
+const DEFAULT_DANCE_GRIPPER = true;
 const RASPI_PHYSICAL_PIN_BY_BCM = {
   0: 27,
   1: 28,
@@ -159,6 +163,12 @@ const gripperControlIds = [
   "gripperGripRelaxInput",
   "gripperGripSqueezeInput",
 ];
+const danceControlIds = [
+  "danceBpmInput",
+  "danceBounceInput",
+  "danceSwayInput",
+  "danceGripperToggle",
+];
 const speedControlIds = ["speedSlider"];
 const valueButtons = [$("saveValuesBtn"), $("downloadValuesBtn"), $("uploadValuesBtn")].filter(Boolean);
 const idSetupButtons = [$("idSetupScanBtn"), $("idSetupAssignBtn")].filter(Boolean);
@@ -168,6 +178,7 @@ const allValueControlIds = [
   ...positionControlIds,
   ...armControlIds,
   ...gripperControlIds,
+  ...danceControlIds,
   ...speedControlIds,
   "wizardJointCountInput",
 ];
@@ -331,6 +342,11 @@ function clearCommandDirty(command, result) {
   if (result && result.ok === false) return;
   if (command === "move-position") clearDirty(positionControlIds);
   if (command === "arm-move" || command === "arm-home-zero" || command === "arm-preset") clearDirty(armControlIds);
+  if (command === "arm-dance-start") {
+    clearDirty(armControlIds);
+    clearDirty(gripperControlIds);
+    clearDirty(danceControlIds);
+  }
   if (command.startsWith("gripper-")) clearDirty(gripperControlIds);
   if (command === "set-speed") clearDirty(speedControlIds);
 }
@@ -414,6 +430,25 @@ function gripperPayload() {
   };
 }
 
+function danceInputState() {
+  return {
+    bpm: clampedNumber(numberInput("danceBpmInput"), DEFAULT_DANCE_BPM, 30, 180),
+    bounce: clampedNumber(numberInput("danceBounceInput"), DEFAULT_DANCE_BOUNCE * 100, 0, 100) / 100,
+    swayDeg: clampedNumber(numberInput("danceSwayInput"), DEFAULT_DANCE_SWAY_DEG, 0, 45),
+    gripper: $("danceGripperToggle").checked,
+  };
+}
+
+function dancePayload() {
+  const dance = danceInputState();
+  return {
+    danceBpm: dance.bpm,
+    danceBounce: dance.bounce,
+    danceSwayDeg: dance.swayDeg,
+    danceGripper: dance.gripper,
+  };
+}
+
 function commandPayload(command) {
   if (command === "move-position") {
     return {
@@ -423,8 +458,14 @@ function commandPayload(command) {
       positionKp: numberInput("positionKpInput"),
     };
   }
-  if (command === "arm-move" || command === "arm-home-zero" || command === "arm-preset" || command === "arm-adaptive-assist") {
-    return {
+  if (
+    command === "arm-move"
+    || command === "arm-home-zero"
+    || command === "arm-preset"
+    || command === "arm-dance-start"
+    || command === "arm-adaptive-assist"
+  ) {
+    const payload = {
       armJointCount: jointCountInput(),
       armBaseMotorId: selectedMotorValue("armBaseMotorIdInput", currentArmMotorValue("base")),
       armShoulderMotorId: selectedMotorValue("armShoulderMotorIdInput", currentArmMotorValue("shoulder")),
@@ -459,6 +500,10 @@ function commandPayload(command) {
       armShoulderTwistLimit: twistLimitInputRad("armShoulderTwistLimitInput"),
       armElbowTwistLimit: twistLimitInputRad("armElbowTwistLimitInput"),
     };
+    if (command === "arm-dance-start") {
+      return { ...payload, ...dancePayload(), ...gripperPayload() };
+    }
+    return payload;
   }
   if (command.startsWith("gripper-")) return gripperPayload();
   return {};
@@ -531,6 +576,7 @@ function setDirtyChecked(id, checked) {
 
 function collectValues() {
   const gripper = gripperInputState();
+  const dance = danceInputState();
   return {
     schemaVersion: 1,
     appVersion: state && state.appVersion ? state.appVersion : undefined,
@@ -557,6 +603,15 @@ function collectValues() {
       position: gripper.position,
       testAngleDeg: gripper.testAngleDeg,
       releaseAfterMove: gripper.releaseAfterMove,
+      adaptiveGrip: gripper.adaptiveGrip,
+      gripRelaxDeg: gripper.gripRelaxDeg,
+      gripSqueezeS: gripper.gripSqueezeS,
+    },
+    dance: {
+      bpm: dance.bpm,
+      bounce: dance.bounce,
+      swayDeg: dance.swayDeg,
+      gripper: dance.gripper,
     },
     arm: {
       motorIds: {
@@ -617,6 +672,7 @@ function collectValues() {
 function applyValuePayload(payload) {
   const position = objectValue(payload.position);
   const gripper = objectValue(payload.gripper);
+  const dance = objectValue(payload.dance);
   const arm = objectValue(payload.arm);
   const motorIds = objectValue(arm.motorIds || arm.motorIdHex);
   const models = objectValue(arm.models);
@@ -671,6 +727,12 @@ function applyValuePayload(payload) {
   setDirtyNumber("gripperGripRelaxInput", firstValue(gripper.gripRelaxDeg, payload.gripperGripRelaxDeg), 1);
   setDirtyNumber("gripperGripSqueezeInput", firstValue(gripper.gripSqueezeS, payload.gripperGripSqueezeS), 2);
   updateGripperReadout();
+
+  setDirtyNumber("danceBpmInput", firstValue(dance.bpm, payload.danceBpm), 0);
+  setDirtyNumber("danceBounceInput", 100 * Number(firstValue(dance.bounce, payload.danceBounce)), 0);
+  setDirtyNumber("danceSwayInput", firstValue(dance.swayDeg, payload.danceSwayDeg), 0);
+  setDirtyChecked("danceGripperToggle", firstValue(dance.gripper, payload.danceGripper));
+  updateDanceReadout();
 
   setDirtyValue(
     "armBaseMotorIdInput",
@@ -838,9 +900,24 @@ function isGripperCommand(command) {
 }
 
 async function sendCommand(command, extra = {}) {
-  if (["stop", "arm-stop", "arm-clear-fault", "arm-preset", "shutdown-host"].includes(command)) setArmLiveMoveEnabled(false);
-  if (busy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault", "shutdown-host", "gripper-release"].includes(command)) return;
-  if ((command === "arm-move" || command === "arm-home-zero" || command === "arm-preset") && !validateArmCommandMotors()) return;
+  if (["stop", "arm-stop", "arm-clear-fault", "arm-preset", "arm-dance-start", "shutdown-host"].includes(command)) setArmLiveMoveEnabled(false);
+  if (busy && ![
+    "stop",
+    "zero-speed",
+    "clear-fault",
+    "arm-stop",
+    "arm-clear-fault",
+    "arm-dance-stop",
+    "shutdown-host",
+    "gripper-release",
+  ].includes(command)) return;
+  if (
+    (command === "arm-move"
+      || command === "arm-home-zero"
+      || command === "arm-preset"
+      || command === "arm-dance-start")
+    && !validateArmCommandMotors()
+  ) return;
   if (command === "arm-move") {
     const preview = armPreview();
     if (!preview.ok || !preview.safe) {
@@ -975,8 +1052,8 @@ async function flushArmLiveMove() {
   try {
     const result = await post("/api/command", { command: "arm-live-move", ...commandPayload("arm-move") });
     if (result && result.ok === false) {
-      const message = result.message || "move rejected";
-      appendArmLiveError(message);
+    const message = result.message || "move rejected";
+    appendArmLiveError(message);
       if (message.includes("Another command")) armLiveQueued = true;
     } else {
       armLiveLastError = "";
@@ -992,7 +1069,16 @@ async function flushArmLiveMove() {
 function renderBusy(isBusy) {
   commandButtons.forEach((button) => {
     const command = button.dataset.command;
-    button.disabled = isBusy && !["stop", "zero-speed", "clear-fault", "arm-stop", "arm-clear-fault", "shutdown-host", "gripper-release"].includes(command);
+    button.disabled = isBusy && ![
+      "stop",
+      "zero-speed",
+      "clear-fault",
+      "arm-stop",
+      "arm-clear-fault",
+      "arm-dance-stop",
+      "shutdown-host",
+      "gripper-release",
+    ].includes(command);
   });
   valueButtons.forEach((button) => {
     button.disabled = isBusy;
@@ -1029,6 +1115,25 @@ function setGripperMessage(message = "", isError = false) {
   el.hidden = !message;
   el.textContent = message;
   el.classList.toggle("fault", Boolean(isError));
+}
+
+function updateDanceReadout() {
+  const dance = danceInputState();
+  $("danceBpmValue").textContent = `${Math.round(dance.bpm)} BPM`;
+  $("danceBounceValue").textContent = `${Math.round(dance.bounce * 100)}%`;
+  $("danceSwayValue").textContent = `${Math.round(dance.swayDeg)} deg`;
+}
+
+function renderDance(dance = {}) {
+  const bpm = clampedNumber(firstValue(dance.bpm, DEFAULT_DANCE_BPM), DEFAULT_DANCE_BPM, 30, 180);
+  const bounce = clampedNumber(firstValue(dance.bounce, DEFAULT_DANCE_BOUNCE), DEFAULT_DANCE_BOUNCE, 0, 1);
+  const swayDeg = clampedNumber(firstValue(dance.swayDeg, DEFAULT_DANCE_SWAY_DEG), DEFAULT_DANCE_SWAY_DEG, 0, 45);
+  setControlValue("danceBpmInput", Math.round(bpm));
+  setControlValue("danceBounceInput", Math.round(bounce * 100));
+  setControlValue("danceSwayInput", Math.round(swayDeg));
+  setControlChecked("danceGripperToggle", firstValue(dance.gripper, DEFAULT_DANCE_GRIPPER));
+  $("danceStatus").textContent = dance.active ? "Dancing" : "Idle";
+  updateDanceReadout();
 }
 
 function renderGripper(gripper = {}) {
@@ -2556,6 +2661,7 @@ function render(state) {
   setControlValue("positionAccelerationInput", Number(state.positionAcceleration || 10).toFixed(1));
   setControlValue("positionKpInput", Number(state.positionKp || 5).toFixed(1));
   renderGripper(state.gripper || {});
+  renderDance(state.dance || {});
 
   const arm = state.arm || {};
   setControlValue("wizardJointCountInput", Number(arm.jointCount) === 2 ? "2" : "3");
@@ -2614,11 +2720,13 @@ function render(state) {
     "armElbowTwistLimitInput",
     radToDeg(normalizeTwistLimitRad(armTwistLimits.elbow)).toFixed(1),
   );
-  $("armConfiguredState").textContent = Number(arm.routeRemaining || 0) > 0
-    ? "Routing IK"
-    : arm.configured
-      ? "Holding IK"
-      : "Idle";
+  $("armConfiguredState").textContent = state.dance && state.dance.active
+    ? "Dancing"
+    : Number(arm.routeRemaining || 0) > 0
+      ? "Routing IK"
+      : arm.configured
+        ? "Holding IK"
+        : "Idle";
   renderIkPreview();
 
   $("activeReportsToggle").checked = state.activeReports;
@@ -2692,6 +2800,17 @@ gripperControlIds.forEach((id) => {
     update();
     if (id === "gripperPositionSlider") queueGripperMove({ immediate: true });
   });
+});
+
+danceControlIds.forEach((id) => {
+  const el = $(id);
+  if (!el) return;
+  const update = () => {
+    markDirty(id);
+    updateDanceReadout();
+  };
+  el.addEventListener("input", update);
+  el.addEventListener("change", update);
 });
 
 armControlIds.forEach((id) => {

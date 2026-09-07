@@ -714,7 +714,8 @@ select {
   padding-top: 12px;
 }
 
-.motion-presets h3 {
+.motion-presets h3,
+.dance-head h3 {
   margin: 0;
   color: var(--muted);
   font-size: 0.78rem;
@@ -724,6 +725,47 @@ select {
 
 .motion-preset-grid {
   grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+}
+
+.dance-mode {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.dance-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dance-head span,
+.dance-range strong {
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+}
+
+.dance-grid {
+  align-items: end;
+  grid-template-columns: minmax(88px, 0.68fr) repeat(2, minmax(130px, 1fr)) minmax(126px, 0.9fr);
+}
+
+.dance-range {
+  gap: 8px;
+}
+
+.dance-range span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dance-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .wizard-nudges {
@@ -1270,6 +1312,8 @@ pre {
   .button-row,
   .control-band .button-row,
     .arm-actions,
+    .dance-actions,
+    .dance-grid,
     .gripper-actions,
     .gripper-calibration-actions,
     .gripper-readout,

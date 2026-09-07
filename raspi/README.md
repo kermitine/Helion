@@ -251,6 +251,18 @@ elbow assist torque. If feedback reseeding finds the arm already slightly below
 the base plane, the route planner allows a limited recovery path back to a safe
 target instead of blocking the move at the first below-plane waypoint.
 
+**Dance Mode** generates a repeating beat-synced arm phrase from the current IK
+settings. It chooses a safe center pose from the configured link lengths, reach,
+elbow bend, twist limits, and link radii, then sways the base side to side while
+bouncing mostly through the elbow. `BPM` controls the beat timing, `Bounce`
+controls shoulder/elbow motion, `Sway` controls the base sweep, and
+**Gripper Pulse** moves the MG90S smoothly through its calibrated open/closed
+range on the beat. HelionOS accounts for the configured arm velocity and
+acceleration by keeping the BPM fixed and scaling the requested sway/bounce
+amplitude down when the move would otherwise outrun those limits. Use
+**Stop Dance** to stop the loop and hold the current pose; use **Stop Arm** for
+a full arm disable.
+
 **Adaptive Assist** adds a slow learned shoulder/elbow trim on top of the manual
 assist values. It learns only while the arm is holding still near the target,
 waits briefly after each routed move, ignores large errors or fast feedback, and
