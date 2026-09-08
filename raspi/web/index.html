@@ -257,32 +257,26 @@
                   <button type="button" data-arm-motion-preset="flex">Flex</button>
                 </div>
               </div>
-              <div class="dance-mode">
-                <div class="dance-head">
-                  <h3>Dance Mode</h3>
-                  <span id="danceStatus">Idle</span>
+              <div class="arm-planner">
+                <div class="planner-head">
+                  <h3>Movement Planner</h3>
+                  <span id="armPlanStatus">Ready</span>
                 </div>
-                <div class="arm-grid dance-grid">
-                  <label>
-                    <span>BPM <strong id="danceBpmValue">96 BPM</strong></span>
-                    <input id="danceBpmInput" type="number" min="30" max="180" step="1" value="96" inputmode="numeric">
-                  </label>
-                  <label class="dance-range">
-                    <span>Bounce <strong id="danceBounceValue">55%</strong></span>
-                    <input id="danceBounceInput" type="range" min="0" max="100" step="1" value="55">
-                  </label>
-                  <label class="dance-range">
-                    <span>Sway <strong id="danceSwayValue">16 deg</strong></span>
-                    <input id="danceSwayInput" type="range" min="0" max="45" step="1" value="16">
-                  </label>
-                  <label class="switch">
-                    <input id="danceGripperToggle" type="checkbox" checked>
-                    <span>Gripper Pulse</span>
-                  </label>
+                <div class="planner-toolbar">
+                  <button id="addPlanMoveBtn" type="button">Add Position</button>
+                  <button id="addPlanWaitBtn" type="button">Add Gap</button>
+                  <button id="addPlanLoopBtn" type="button">Add Loop</button>
                 </div>
-                <div class="button-row dance-actions">
-                  <button class="soft" data-command="arm-dance-start">Start Dance</button>
-                  <button class="danger" data-command="arm-dance-stop">Stop Dance</button>
+                <div class="planner-filebar">
+                  <button id="exportPlanBtn" type="button">Export Plan</button>
+                  <button id="importPlanBtn" type="button">Import Plan</button>
+                  <input id="importPlanInput" type="file" accept="application/json,.json" hidden>
+                </div>
+                <div id="armPlanBlocks" class="planner-block-list"></div>
+                <div class="planner-summary" id="armPlanSummary">0 blocks</div>
+                <div class="button-row planner-actions">
+                  <button class="soft" data-command="arm-plan-start">Start Plan</button>
+                  <button class="danger" data-command="arm-plan-stop">Stop Plan</button>
                 </div>
               </div>
               <div class="wizard-grid wizard-nudges">

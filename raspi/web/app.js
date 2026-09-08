@@ -21,6 +21,10 @@ let gripperMoveQueued = false;
 let gripperMoveTimer = null;
 let gripperLastSentAt = 0;
 let gripperLastError = "";
+let armPlanBlocks = [];
+let armPlanRenderSignature = "";
+let editingArmPlanBlockIndex = null;
+let targetEditorRestoreTarget = null;
 
 const TAU = Math.PI * 2;
 const DEFAULT_TWIST_LIMIT_DEG = 180;
@@ -53,10 +57,11 @@ const DEFAULT_GRIPPER_RELEASE_AFTER_MOVE = false;
 const DEFAULT_GRIPPER_ADAPTIVE_GRIP = true;
 const DEFAULT_GRIPPER_GRIP_RELAX_DEG = 0;
 const DEFAULT_GRIPPER_GRIP_SQUEEZE_S = 0.2;
-const DEFAULT_DANCE_BPM = 96;
-const DEFAULT_DANCE_BOUNCE = 0.55;
-const DEFAULT_DANCE_SWAY_DEG = 16;
-const DEFAULT_DANCE_GRIPPER = true;
+const ARM_PLAN_MAX_BLOCKS = 48;
+const ARM_PLAN_MAX_EXPANDED_BLOCKS = 240;
+const ARM_PLAN_DEFAULT_WAIT_S = 0.5;
+const ARM_PLAN_DEFAULT_LOOP_COUNT = 2;
+const ARM_PLAN_MAX_LOOP_COUNT = 50;
 const RASPI_PHYSICAL_PIN_BY_BCM = {
   0: 27,
   1: 28,
@@ -163,23 +168,25 @@ const gripperControlIds = [
   "gripperGripRelaxInput",
   "gripperGripSqueezeInput",
 ];
-const danceControlIds = [
-  "danceBpmInput",
-  "danceBounceInput",
-  "danceSwayInput",
-  "danceGripperToggle",
-];
 const speedControlIds = ["speedSlider"];
 const valueButtons = [$("saveValuesBtn"), $("downloadValuesBtn"), $("uploadValuesBtn")].filter(Boolean);
 const idSetupButtons = [$("idSetupScanBtn"), $("idSetupAssignBtn")].filter(Boolean);
+const armPlannerButtons = [
+  $("addPlanMoveBtn"),
+  $("addPlanWaitBtn"),
+  $("addPlanLoopBtn"),
+  $("exportPlanBtn"),
+  $("importPlanBtn"),
+  ...document.querySelectorAll('[data-command="arm-plan-start"], [data-command="arm-plan-stop"]'),
+].filter(Boolean);
 const armLiveToggles = [$("armLiveMoveToggle"), $("targetEditorLiveMoveToggle")].filter(Boolean);
 const allValueControlIds = [
   ...configControlIds,
   ...positionControlIds,
   ...armControlIds,
   ...gripperControlIds,
-  ...danceControlIds,
   ...speedControlIds,
+  "armPlan",
   "wizardJointCountInput",
 ];
 const allValueControlIdSet = new Set(allValueControlIds);
@@ -342,10 +349,9 @@ function clearCommandDirty(command, result) {
   if (result && result.ok === false) return;
   if (command === "move-position") clearDirty(positionControlIds);
   if (command === "arm-move" || command === "arm-home-zero" || command === "arm-preset") clearDirty(armControlIds);
-  if (command === "arm-dance-start") {
+  if (command === "arm-plan-start") {
     clearDirty(armControlIds);
-    clearDirty(gripperControlIds);
-    clearDirty(danceControlIds);
+    clearDirty(["armPlan"]);
   }
   if (command.startsWith("gripper-")) clearDirty(gripperControlIds);
   if (command === "set-speed") clearDirty(speedControlIds);
@@ -430,23 +436,118 @@ function gripperPayload() {
   };
 }
 
-function danceInputState() {
+function currentTargetBlock(name = "Position") {
   return {
-    bpm: clampedNumber(numberInput("danceBpmInput"), DEFAULT_DANCE_BPM, 30, 180),
-    bounce: clampedNumber(numberInput("danceBounceInput"), DEFAULT_DANCE_BOUNCE * 100, 0, 100) / 100,
-    swayDeg: clampedNumber(numberInput("danceSwayInput"), DEFAULT_DANCE_SWAY_DEG, 0, 45),
-    gripper: $("danceGripperToggle").checked,
+    type: "move",
+    name,
+    target: {
+      x: numberInput("armTargetXInput"),
+      y: numberInput("armTargetYInput"),
+      z: numberInput("armTargetZInput"),
+    },
   };
 }
 
-function dancePayload() {
-  const dance = danceInputState();
+function defaultArmPlanBlocks() {
+  const arm = armInputState();
+  return [
+    {
+      type: "move",
+      name: "Home",
+      target: {
+        x: 0,
+        y: 0,
+        z: Math.max(ARM_MIN_TARGET_REACH, arm.link1 + arm.link2),
+      },
+    },
+    { type: "wait", name: "Pause", seconds: ARM_PLAN_DEFAULT_WAIT_S },
+  ];
+}
+
+function normalizedArmPlanBlock(block, index = 0) {
+  const source = objectValue(block);
+  let type = String(source.type || "move").trim().toLowerCase();
+  if (["position", "pose", "target"].includes(type)) type = "move";
+  if (["gap", "pause", "delay", "hold"].includes(type)) type = "wait";
+  if (type === "repeat") type = "loop";
+  if (!["move", "wait", "loop"].includes(type)) type = "move";
+  const name = String(source.name || source.label || "").trim();
+
+  if (type === "move") {
+    const target = objectValue(source.target || source);
+    return {
+      type,
+      name: name || `Position ${index + 1}`,
+      target: {
+        x: clampedNumber(target.x, numberInput("armTargetXInput"), -20, 20),
+        y: clampedNumber(target.y, numberInput("armTargetYInput"), -20, 20),
+        z: clampedNumber(target.z, numberInput("armTargetZInput"), -20, 20),
+      },
+    };
+  }
+
+  if (type === "wait") {
+    return {
+      type,
+      name: name || `Gap ${index + 1}`,
+      seconds: clampedNumber(firstValue(source.seconds, source.duration, source.time), ARM_PLAN_DEFAULT_WAIT_S, 0, 30),
+    };
+  }
+
   return {
-    danceBpm: dance.bpm,
-    danceBounce: dance.bounce,
-    danceSwayDeg: dance.swayDeg,
-    danceGripper: dance.gripper,
+    type,
+    name: name || `Loop ${index + 1}`,
+    start: Math.round(clampedNumber(source.start, 1, 1, ARM_PLAN_MAX_BLOCKS)),
+    end: Math.round(clampedNumber(source.end, Math.max(1, index), 1, ARM_PLAN_MAX_BLOCKS)),
+    count: Math.round(clampedNumber(firstValue(source.count, source.repeats, source.repeat), ARM_PLAN_DEFAULT_LOOP_COUNT, 1, ARM_PLAN_MAX_LOOP_COUNT)),
   };
+}
+
+function normalizedArmPlanBlocks(blocks) {
+  const raw = Array.isArray(blocks) ? blocks : armPlanBlocks;
+  const normalized = raw.slice(0, ARM_PLAN_MAX_BLOCKS).map((block, index) => normalizedArmPlanBlock(block, index));
+  return normalized.length ? normalized : defaultArmPlanBlocks();
+}
+
+function collectArmPlanBlocks() {
+  armPlanBlocks = normalizedArmPlanBlocks(armPlanBlocks);
+  return armPlanBlocks.map((block) => JSON.parse(JSON.stringify(block)));
+}
+
+function expandedArmPlanBlocks(blocks = armPlanBlocks) {
+  const normalized = normalizedArmPlanBlocks(blocks);
+  const expanded = [];
+
+  const appendBlock = (block) => {
+    if (expanded.length >= ARM_PLAN_MAX_EXPANDED_BLOCKS) {
+      throw new Error(`planner expands beyond ${ARM_PLAN_MAX_EXPANDED_BLOCKS} blocks`);
+    }
+    expanded.push(block);
+  };
+
+  const expandIndex = (index, stack = []) => {
+    if (index < 0 || index >= normalized.length) throw new Error(`loop references block ${index + 1}`);
+    const block = normalized[index];
+    if (block.type === "move" || block.type === "wait") {
+      appendBlock(block);
+      return;
+    }
+    if (block.type !== "loop") throw new Error(`unknown planner block ${index + 1}`);
+    if (stack.includes(index)) throw new Error(`loop ${index + 1} references itself`);
+    let start = Math.round(block.start) - 1;
+    let end = Math.round(block.end) - 1;
+    if (start > end) [start, end] = [end, start];
+    if (start < 0 || end >= normalized.length) throw new Error(`loop ${index + 1} points outside the plan`);
+    if (start <= index && index <= end) throw new Error(`loop ${index + 1} includes itself`);
+    for (let repeat = 0; repeat < block.count; repeat += 1) {
+      for (let child = start; child <= end; child += 1) {
+        expandIndex(child, [...stack, index]);
+      }
+    }
+  };
+
+  normalized.forEach((_block, index) => expandIndex(index));
+  return expanded;
 }
 
 function commandPayload(command) {
@@ -462,7 +563,7 @@ function commandPayload(command) {
     command === "arm-move"
     || command === "arm-home-zero"
     || command === "arm-preset"
-    || command === "arm-dance-start"
+    || command === "arm-plan-start"
     || command === "arm-adaptive-assist"
   ) {
     const payload = {
@@ -500,8 +601,8 @@ function commandPayload(command) {
       armShoulderTwistLimit: twistLimitInputRad("armShoulderTwistLimitInput"),
       armElbowTwistLimit: twistLimitInputRad("armElbowTwistLimitInput"),
     };
-    if (command === "arm-dance-start") {
-      return { ...payload, ...dancePayload(), ...gripperPayload() };
+    if (command === "arm-plan-start") {
+      return { ...payload, armPlan: { blocks: collectArmPlanBlocks() } };
     }
     return payload;
   }
@@ -576,7 +677,6 @@ function setDirtyChecked(id, checked) {
 
 function collectValues() {
   const gripper = gripperInputState();
-  const dance = danceInputState();
   return {
     schemaVersion: 1,
     appVersion: state && state.appVersion ? state.appVersion : undefined,
@@ -607,11 +707,8 @@ function collectValues() {
       gripRelaxDeg: gripper.gripRelaxDeg,
       gripSqueezeS: gripper.gripSqueezeS,
     },
-    dance: {
-      bpm: dance.bpm,
-      bounce: dance.bounce,
-      swayDeg: dance.swayDeg,
-      gripper: dance.gripper,
+    armPlan: {
+      blocks: collectArmPlanBlocks(),
     },
     arm: {
       motorIds: {
@@ -672,7 +769,7 @@ function collectValues() {
 function applyValuePayload(payload) {
   const position = objectValue(payload.position);
   const gripper = objectValue(payload.gripper);
-  const dance = objectValue(payload.dance);
+  const armPlan = objectValue(payload.armPlan);
   const arm = objectValue(payload.arm);
   const motorIds = objectValue(arm.motorIds || arm.motorIdHex);
   const models = objectValue(arm.models);
@@ -728,11 +825,13 @@ function applyValuePayload(payload) {
   setDirtyNumber("gripperGripSqueezeInput", firstValue(gripper.gripSqueezeS, payload.gripperGripSqueezeS), 2);
   updateGripperReadout();
 
-  setDirtyNumber("danceBpmInput", firstValue(dance.bpm, payload.danceBpm), 0);
-  setDirtyNumber("danceBounceInput", 100 * Number(firstValue(dance.bounce, payload.danceBounce)), 0);
-  setDirtyNumber("danceSwayInput", firstValue(dance.swayDeg, payload.danceSwayDeg), 0);
-  setDirtyChecked("danceGripperToggle", firstValue(dance.gripper, payload.danceGripper));
-  updateDanceReadout();
+  const planner = objectValue(arm.planner);
+  const planBlocks = firstValue(armPlan.blocks, planner.blocks, payload.armPlanBlocks);
+  if (Array.isArray(planBlocks)) {
+    armPlanBlocks = normalizedArmPlanBlocks(planBlocks);
+    markDirty("armPlan");
+    renderArmPlanBlocks();
+  }
 
   setDirtyValue(
     "armBaseMotorIdInput",
@@ -831,17 +930,76 @@ async function saveValues(successText = "Values saved") {
 }
 
 function downloadValues() {
-  const data = JSON.stringify(collectValues(), null, 2);
+  downloadJsonFile("helionos-values.json", collectValues());
+  setValuesState("Downloaded");
+  appendLocalLog("Values downloaded");
+}
+
+function downloadJsonFile(filename, payload) {
+  const data = JSON.stringify(payload, null, 2);
   const url = URL.createObjectURL(new Blob([`${data}\n`], { type: "application/json" }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = "helionos-values.json";
+  link.download = filename;
   document.body.appendChild(link);
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
-  setValuesState("Downloaded");
-  appendLocalLog("Values downloaded");
+}
+
+function armPlanExportPayload() {
+  const arm = armInputState();
+  return {
+    schemaVersion: 1,
+    kind: "helionos-arm-plan",
+    appVersion: state && state.appVersion ? state.appVersion : undefined,
+    exportedAt: new Date().toISOString(),
+    units: {
+      target: "meters",
+      gap: "seconds",
+    },
+    armContext: {
+      jointCount: arm.jointCount,
+      link1: arm.link1,
+      link2: arm.link2,
+      elbowUp: arm.elbowUp,
+    },
+    blocks: collectArmPlanBlocks(),
+  };
+}
+
+function armPlanBlocksFromImport(payload) {
+  if (Array.isArray(payload)) return payload;
+  const source = objectValue(payload);
+  const armPlan = objectValue(source.armPlan);
+  const arm = objectValue(source.arm);
+  const planner = objectValue(arm.planner);
+  const blocks = [
+    source.blocks,
+    armPlan.blocks,
+    planner.blocks,
+    source.armPlanBlocks,
+  ].find((candidate) => Array.isArray(candidate));
+  if (!Array.isArray(blocks)) throw new Error("plan JSON needs a blocks array");
+  if (!blocks.length) throw new Error("plan JSON has no blocks");
+  return blocks;
+}
+
+function importArmPlanPayload(payload) {
+  const blocks = normalizedArmPlanBlocks(armPlanBlocksFromImport(payload));
+  const expanded = expandedArmPlanBlocks(blocks);
+  if (!expanded.some((block) => block.type === "move")) {
+    throw new Error("plan needs at least one position block");
+  }
+  armPlanBlocks = blocks;
+  setArmPlanDirty();
+  renderArmPlanBlocks();
+  appendLocalLog(`Plan imported: ${blocks.length} block(s), ${expanded.length} expanded step(s)`);
+}
+
+function downloadArmPlan() {
+  downloadJsonFile("helionos-arm-plan.json", armPlanExportPayload());
+  appendLocalLog("Plan exported");
 }
 
 async function applyConfig() {
@@ -891,6 +1049,20 @@ function validateArmCommandMotors(options = {}) {
   return true;
 }
 
+function validateArmPlan(options = {}) {
+  try {
+    const expanded = expandedArmPlanBlocks(collectArmPlanBlocks());
+    if (!expanded.some((block) => block.type === "move")) {
+      throw new Error("add at least one position block");
+    }
+    return true;
+  } catch (error) {
+    if (!options.quiet) appendLocalLog(`Arm planner blocked: ${error.message}`);
+    updateArmPlanSummary();
+    return false;
+  }
+}
+
 function isArmCommand(command) {
   return command.startsWith("arm-");
 }
@@ -900,14 +1072,14 @@ function isGripperCommand(command) {
 }
 
 async function sendCommand(command, extra = {}) {
-  if (["stop", "arm-stop", "arm-clear-fault", "arm-preset", "arm-dance-start", "shutdown-host"].includes(command)) setArmLiveMoveEnabled(false);
+  if (["stop", "arm-stop", "arm-clear-fault", "arm-preset", "arm-plan-start", "shutdown-host"].includes(command)) setArmLiveMoveEnabled(false);
   if (busy && ![
     "stop",
     "zero-speed",
     "clear-fault",
     "arm-stop",
     "arm-clear-fault",
-    "arm-dance-stop",
+    "arm-plan-stop",
     "shutdown-host",
     "gripper-release",
   ].includes(command)) return;
@@ -915,9 +1087,10 @@ async function sendCommand(command, extra = {}) {
     (command === "arm-move"
       || command === "arm-home-zero"
       || command === "arm-preset"
-      || command === "arm-dance-start")
+      || command === "arm-plan-start")
     && !validateArmCommandMotors()
   ) return;
+  if (command === "arm-plan-start" && !validateArmPlan()) return;
   if (command === "arm-move") {
     const preview = armPreview();
     if (!preview.ok || !preview.safe) {
@@ -1075,7 +1248,7 @@ function renderBusy(isBusy) {
       "clear-fault",
       "arm-stop",
       "arm-clear-fault",
-      "arm-dance-stop",
+      "arm-plan-stop",
       "shutdown-host",
       "gripper-release",
     ].includes(command);
@@ -1089,6 +1262,11 @@ function renderBusy(isBusy) {
   armMotionPresetButtons.forEach((button) => {
     button.disabled = isBusy;
   });
+  armPlannerButtons.forEach((button) => {
+    const command = button.dataset ? button.dataset.command : "";
+    button.disabled = isBusy && command !== "arm-plan-stop";
+  });
+  updateArmPlanSummary();
   if (!isBusy) renderArmSafety(armPreview());
 }
 
@@ -1117,26 +1295,236 @@ function setGripperMessage(message = "", isError = false) {
   el.classList.toggle("fault", Boolean(isError));
 }
 
-function updateDanceReadout() {
-  const dance = danceInputState();
-  const bpmValue = $("danceBpmValue");
-  const bounceValue = $("danceBounceValue");
-  const swayValue = $("danceSwayValue");
-  if (bpmValue) bpmValue.textContent = `${Math.round(dance.bpm)} BPM`;
-  if (bounceValue) bounceValue.textContent = `${Math.round(dance.bounce * 100)}%`;
-  if (swayValue) swayValue.textContent = `${Math.round(dance.swayDeg)} deg`;
+function armPlanKindLabel(type) {
+  if (type === "move") return "Move";
+  if (type === "wait") return "Gap";
+  if (type === "loop") return "Loop";
+  return "Block";
 }
 
-function renderDance(dance = {}) {
-  const bpm = clampedNumber(firstValue(dance.bpm, DEFAULT_DANCE_BPM), DEFAULT_DANCE_BPM, 30, 180);
-  const bounce = clampedNumber(firstValue(dance.bounce, DEFAULT_DANCE_BOUNCE), DEFAULT_DANCE_BOUNCE, 0, 1);
-  const swayDeg = clampedNumber(firstValue(dance.swayDeg, DEFAULT_DANCE_SWAY_DEG), DEFAULT_DANCE_SWAY_DEG, 0, 45);
-  setControlValue("danceBpmInput", Math.round(bpm));
-  setControlValue("danceBounceInput", Math.round(bounce * 100));
-  setControlValue("danceSwayInput", Math.round(swayDeg));
-  setControlChecked("danceGripperToggle", firstValue(dance.gripper, DEFAULT_DANCE_GRIPPER));
-  $("danceStatus").textContent = dance.active ? "Dancing" : "Idle";
-  updateDanceReadout();
+function setArmPlanDirty() {
+  armPlanBlocks = normalizedArmPlanBlocks(armPlanBlocks);
+  armPlanRenderSignature = JSON.stringify(armPlanBlocks);
+  markDirty("armPlan");
+  updateArmPlanSummary();
+}
+
+function plannerNumberInput(labelText, value, options, onChange) {
+  const label = document.createElement("label");
+  const span = document.createElement("span");
+  const input = document.createElement("input");
+  span.textContent = labelText;
+  input.type = "number";
+  input.step = options.step || "0.01";
+  if (options.min !== undefined) input.min = options.min;
+  if (options.max !== undefined) input.max = options.max;
+  input.value = value;
+  input.inputMode = options.inputMode || "decimal";
+  input.addEventListener("input", () => onChange(input));
+  input.addEventListener("change", () => onChange(input));
+  label.append(span, input);
+  return label;
+}
+
+function plannerActionButton(text, onClick, className = "") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = text;
+  if (className) button.className = className;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function updateArmPlanBlock(index, updater) {
+  const block = armPlanBlocks[index];
+  if (!block) return;
+  updater(block);
+  setArmPlanDirty();
+}
+
+function moveArmPlanBlock(index, direction) {
+  const nextIndex = index + direction;
+  if (nextIndex < 0 || nextIndex >= armPlanBlocks.length) return;
+  const blocks = [...armPlanBlocks];
+  [blocks[index], blocks[nextIndex]] = [blocks[nextIndex], blocks[index]];
+  armPlanBlocks = blocks;
+  setArmPlanDirty();
+  renderArmPlanBlocks();
+}
+
+function deleteArmPlanBlock(index) {
+  armPlanBlocks = armPlanBlocks.filter((_block, blockIndex) => blockIndex !== index);
+  if (!armPlanBlocks.length) armPlanBlocks = defaultArmPlanBlocks();
+  setArmPlanDirty();
+  renderArmPlanBlocks();
+}
+
+function addArmPlanBlock(type) {
+  if (armPlanBlocks.length >= ARM_PLAN_MAX_BLOCKS) {
+    appendLocalLog(`Planner limit reached: ${ARM_PLAN_MAX_BLOCKS} blocks`);
+    return;
+  }
+  if (type === "loop" && !armPlanBlocks.length) {
+    armPlanBlocks.push(currentTargetBlock("Position 1"));
+  }
+  const index = armPlanBlocks.length;
+  if (type === "move") {
+    armPlanBlocks.push(currentTargetBlock(`Position ${index + 1}`));
+  } else if (type === "wait") {
+    armPlanBlocks.push({ type: "wait", name: `Gap ${index + 1}`, seconds: ARM_PLAN_DEFAULT_WAIT_S });
+  } else {
+    armPlanBlocks.push({
+      type: "loop",
+      name: `Loop ${index + 1}`,
+      start: 1,
+      end: Math.max(1, index),
+      count: ARM_PLAN_DEFAULT_LOOP_COUNT,
+    });
+  }
+  setArmPlanDirty();
+  renderArmPlanBlocks();
+}
+
+function renderArmPlanBlockFields(block, index) {
+  const fields = document.createElement("div");
+  fields.className = `planner-fields ${block.type}-fields`;
+
+  if (block.type === "move") {
+    ["x", "y", "z"].forEach((axis) => {
+      fields.appendChild(plannerNumberInput(
+        axis.toUpperCase(),
+        Number(block.target[axis] || 0).toFixed(3),
+        { step: "0.01" },
+        (input) => updateArmPlanBlock(index, (draft) => {
+          draft.target[axis] = numberOr(input.value, draft.target[axis] || 0);
+        }),
+      ));
+    });
+  } else if (block.type === "wait") {
+    fields.appendChild(plannerNumberInput(
+      "Seconds",
+      Number(block.seconds || 0).toFixed(2),
+      { min: "0", max: "30", step: "0.05" },
+      (input) => updateArmPlanBlock(index, (draft) => {
+        draft.seconds = clampedNumber(input.value, draft.seconds || ARM_PLAN_DEFAULT_WAIT_S, 0, 30);
+      }),
+    ));
+  } else {
+    fields.appendChild(plannerNumberInput(
+      "Start",
+      String(block.start || 1),
+      { min: "1", max: String(armPlanBlocks.length), step: "1", inputMode: "numeric" },
+      (input) => updateArmPlanBlock(index, (draft) => {
+        draft.start = Math.round(clampedNumber(input.value, draft.start || 1, 1, ARM_PLAN_MAX_BLOCKS));
+      }),
+    ));
+    fields.appendChild(plannerNumberInput(
+      "End",
+      String(block.end || 1),
+      { min: "1", max: String(armPlanBlocks.length), step: "1", inputMode: "numeric" },
+      (input) => updateArmPlanBlock(index, (draft) => {
+        draft.end = Math.round(clampedNumber(input.value, draft.end || 1, 1, ARM_PLAN_MAX_BLOCKS));
+      }),
+    ));
+    fields.appendChild(plannerNumberInput(
+      "Count",
+      String(block.count || ARM_PLAN_DEFAULT_LOOP_COUNT),
+      { min: "1", max: String(ARM_PLAN_MAX_LOOP_COUNT), step: "1", inputMode: "numeric" },
+      (input) => updateArmPlanBlock(index, (draft) => {
+        draft.count = Math.round(clampedNumber(input.value, draft.count || ARM_PLAN_DEFAULT_LOOP_COUNT, 1, ARM_PLAN_MAX_LOOP_COUNT));
+      }),
+    ));
+  }
+  return fields;
+}
+
+function renderArmPlanBlockActions(block, index) {
+  const actions = document.createElement("div");
+  actions.className = "planner-block-actions";
+  if (block.type === "move") {
+    actions.appendChild(plannerActionButton("Edit", () => openArmPlanTargetEditor(index), "soft"));
+    actions.appendChild(plannerActionButton("Use", () => {
+      updateArmPlanBlock(index, (draft) => {
+        draft.target = currentTargetBlock().target;
+      });
+      renderArmPlanBlocks();
+    }, "soft"));
+  }
+  actions.appendChild(plannerActionButton("Up", () => moveArmPlanBlock(index, -1)));
+  actions.appendChild(plannerActionButton("Down", () => moveArmPlanBlock(index, 1)));
+  actions.appendChild(plannerActionButton("Delete", () => deleteArmPlanBlock(index), "danger"));
+  return actions;
+}
+
+function renderArmPlanBlocks() {
+  const list = $("armPlanBlocks");
+  if (!list) return;
+  armPlanBlocks = normalizedArmPlanBlocks(armPlanBlocks);
+  armPlanRenderSignature = JSON.stringify(armPlanBlocks);
+  list.textContent = "";
+  armPlanBlocks.forEach((block, index) => {
+    const row = document.createElement("div");
+    const number = document.createElement("span");
+    const kind = document.createElement("strong");
+    row.className = `planner-block planner-block-${block.type}`;
+    number.className = "planner-block-index";
+    number.textContent = String(index + 1);
+    kind.className = "planner-block-kind";
+    kind.textContent = armPlanKindLabel(block.type);
+    row.append(number, kind, renderArmPlanBlockFields(block, index), renderArmPlanBlockActions(block, index));
+    list.appendChild(row);
+  });
+  updateArmPlanSummary();
+}
+
+function updateArmPlanSummary(plan = state && state.armPlan ? state.armPlan : {}) {
+  const summary = $("armPlanSummary");
+  const startButton = document.querySelector('[data-command="arm-plan-start"]');
+  let text = `${armPlanBlocks.length} blocks`;
+  let valid = armPlanBlocks.length > 0;
+  let title = "";
+  try {
+    const expanded = expandedArmPlanBlocks(armPlanBlocks);
+    const moves = expanded.filter((block) => block.type === "move").length;
+    const gaps = expanded.filter((block) => block.type === "wait").length;
+    const gapSeconds = expanded
+      .filter((block) => block.type === "wait")
+      .reduce((total, block) => total + Number(block.seconds || 0), 0);
+    if (!moves) {
+      valid = false;
+      title = "add at least one position block";
+    }
+    text = `${armPlanBlocks.length} blocks / ${expanded.length} steps / ${moves} moves / ${gaps} gaps / ${gapSeconds.toFixed(1)}s hold`;
+  } catch (error) {
+    valid = false;
+    title = error.message;
+    text = `Plan issue: ${error.message}`;
+  }
+  if (summary) summary.textContent = text;
+  if (startButton) {
+    startButton.disabled = busy || !valid;
+    startButton.title = title;
+  }
+  const status = $("armPlanStatus");
+  if (status) {
+    const active = Boolean(plan && plan.active);
+    const remaining = Number(plan && plan.routeRemaining);
+    status.textContent = active && Number.isFinite(remaining)
+      ? `Running ${remaining}`
+      : active
+        ? "Running"
+        : "Ready";
+  }
+}
+
+function renderArmPlan(plan = {}) {
+  const blocks = Array.isArray(plan.blocks) ? plan.blocks : defaultArmPlanBlocks();
+  const signature = JSON.stringify(normalizedArmPlanBlocks(blocks));
+  if (!dirtyControls.has("armPlan") && signature !== armPlanRenderSignature) {
+    armPlanBlocks = normalizedArmPlanBlocks(blocks);
+    renderArmPlanBlocks();
+  }
+  updateArmPlanSummary(plan);
 }
 
 function renderGripper(gripper = {}) {
@@ -2504,13 +2892,53 @@ function nudgeTarget(axis, direction) {
   setArmTarget(next.x, next.y, next.z, { axis });
 }
 
-function openTargetEditor() {
+function openTargetEditor(options = {}) {
+  const dialogOptions = options && typeof options === "object" ? options : {};
+  editingArmPlanBlockIndex = Number.isInteger(dialogOptions.armPlanBlockIndex)
+    ? dialogOptions.armPlanBlockIndex
+    : null;
+  if (editingArmPlanBlockIndex === null) targetEditorRestoreTarget = null;
+  const title = $("targetEditorTitle");
+  if (title) {
+    title.textContent = editingArmPlanBlockIndex === null
+      ? "Position Editor"
+      : `Plan Position ${editingArmPlanBlockIndex + 1}`;
+  }
   $("targetEditorFlow").hidden = false;
   document.body.classList.add("modal-open");
   requestAnimationFrame(renderIkPreview);
 }
 
-function closeTargetEditor() {
+function openArmPlanTargetEditor(index) {
+  armPlanBlocks = normalizedArmPlanBlocks(armPlanBlocks);
+  const block = armPlanBlocks[index];
+  if (!block || block.type !== "move") return;
+  syncArmLiveToggles(false);
+  armLiveQueued = false;
+  clearArmLiveTimer();
+  targetEditorRestoreTarget = { ...currentTargetBlock().target };
+  setArmTarget(block.target.x, block.target.y, block.target.z);
+  openTargetEditor({ armPlanBlockIndex: index });
+}
+
+function closeTargetEditor(savePlanBlock = false) {
+  const editedPlanBlockIndex = editingArmPlanBlockIndex;
+  if (savePlanBlock && editedPlanBlockIndex !== null) {
+    updateArmPlanBlock(editedPlanBlockIndex, (draft) => {
+      draft.target = currentTargetBlock().target;
+    });
+    renderArmPlanBlocks();
+  } else if (!savePlanBlock && editedPlanBlockIndex !== null && targetEditorRestoreTarget) {
+    setArmTarget(
+      targetEditorRestoreTarget.x,
+      targetEditorRestoreTarget.y,
+      targetEditorRestoreTarget.z,
+    );
+  }
+  editingArmPlanBlockIndex = null;
+  targetEditorRestoreTarget = null;
+  const title = $("targetEditorTitle");
+  if (title) title.textContent = "Position Editor";
   $("targetEditorFlow").hidden = true;
   document.body.classList.remove("modal-open");
   targetEditorDrag = null;
@@ -2664,7 +3092,6 @@ function render(state) {
   setControlValue("positionAccelerationInput", Number(state.positionAcceleration || 10).toFixed(1));
   setControlValue("positionKpInput", Number(state.positionKp || 5).toFixed(1));
   renderGripper(state.gripper || {});
-  renderDance(state.dance || {});
 
   const arm = state.arm || {};
   setControlValue("wizardJointCountInput", Number(arm.jointCount) === 2 ? "2" : "3");
@@ -2723,8 +3150,9 @@ function render(state) {
     "armElbowTwistLimitInput",
     radToDeg(normalizeTwistLimitRad(armTwistLimits.elbow)).toFixed(1),
   );
-  $("armConfiguredState").textContent = state.dance && state.dance.active
-    ? "Dancing"
+  renderArmPlan(state.armPlan || {});
+  $("armConfiguredState").textContent = state.armPlan && state.armPlan.active
+    ? "Running Plan"
     : Number(arm.routeRemaining || 0) > 0
       ? "Routing IK"
       : arm.configured
@@ -2776,6 +3204,26 @@ armMotionPresetButtons.forEach((button) => {
   });
 });
 
+$("addPlanMoveBtn").addEventListener("click", () => addArmPlanBlock("move"));
+$("addPlanWaitBtn").addEventListener("click", () => addArmPlanBlock("wait"));
+$("addPlanLoopBtn").addEventListener("click", () => addArmPlanBlock("loop"));
+$("exportPlanBtn").addEventListener("click", downloadArmPlan);
+$("importPlanBtn").addEventListener("click", () => {
+  $("importPlanInput").click();
+});
+
+$("importPlanInput").addEventListener("change", async (event) => {
+  const [file] = event.target.files || [];
+  if (!file) return;
+  try {
+    importArmPlanPayload(JSON.parse(await file.text()));
+  } catch (error) {
+    appendLocalLog(`Plan import failed: ${error.message}`);
+  } finally {
+    event.target.value = "";
+  }
+});
+
 configControlIds.forEach((id) => {
   const el = $(id);
   el.addEventListener("input", () => markDirty(id));
@@ -2803,17 +3251,6 @@ gripperControlIds.forEach((id) => {
     update();
     if (id === "gripperPositionSlider") queueGripperMove({ immediate: true });
   });
-});
-
-danceControlIds.forEach((id) => {
-  const el = $(id);
-  if (!el) return;
-  const update = () => {
-    markDirty(id);
-    updateDanceReadout();
-  };
-  el.addEventListener("input", update);
-  el.addEventListener("change", update);
 });
 
 armControlIds.forEach((id) => {
@@ -2948,10 +3385,10 @@ $("wizardSplitLinksBtn").addEventListener("click", splitLinks);
 $("wizardSyncReachBtn").addEventListener("click", syncReach);
 
 const targetCanvas = $("targetControlCanvas");
-targetCanvas.addEventListener("click", openTargetEditor);
-$("editTargetBtn").addEventListener("click", openTargetEditor);
-$("targetEditorCloseBtn").addEventListener("click", closeTargetEditor);
-$("targetEditorApplyBtn").addEventListener("click", closeTargetEditor);
+targetCanvas.addEventListener("click", () => openTargetEditor());
+$("editTargetBtn").addEventListener("click", () => openTargetEditor());
+$("targetEditorCloseBtn").addEventListener("click", () => closeTargetEditor(false));
+$("targetEditorApplyBtn").addEventListener("click", () => closeTargetEditor(true));
 $("targetEditorHomeBtn").addEventListener("click", () => applyTargetPreset("home"));
 ["targetEditorXInput", "targetEditorYInput", "targetEditorZInput"].forEach((id) => {
   const el = $(id);

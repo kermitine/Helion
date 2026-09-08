@@ -251,17 +251,17 @@ elbow assist torque. If feedback reseeding finds the arm already slightly below
 the base plane, the route planner allows a limited recovery path back to a safe
 target instead of blocking the move at the first below-plane waypoint.
 
-**Dance Mode** generates a repeating beat-synced arm phrase from the current IK
-settings. It chooses a safe center pose from the configured link lengths, reach,
-elbow bend, twist limits, and link radii, then sways the base side to side while
-bouncing mostly through the elbow. `BPM` controls the beat timing, `Bounce`
-controls shoulder/elbow motion, `Sway` controls the base sweep, and
-**Gripper Pulse** moves the MG90S smoothly through its calibrated open/closed
-range on the beat. HelionOS accounts for the configured arm velocity and
-acceleration by keeping the BPM fixed and scaling the requested sway/bounce
-amplitude down when the move would otherwise outrun those limits. Use
-**Stop Dance** to stop the loop and hold the current pose; use **Stop Arm** for
-a full arm disable.
+**Movement Planner** builds a finite arm route from editable blocks. **Position**
+blocks store an IK target (`x`, `y`, `z`) and can open the target gizmo editor or
+capture the current target; **Gap** blocks hold the current pose for a set number
+of seconds; **Loop** blocks repeat a numbered block span a bounded number of
+times. **Export Plan** downloads those blocks as a portable JSON file, and
+**Import Plan** accepts either that plan file, a raw block array, or a full
+HelionOS values JSON with `armPlan.blocks`. The backend expands the blocks,
+checks the same reach, twist, and base-plane safety rules as **Move IK**,
+then streams the resulting route through the normal operation-control hold loop.
+Use **Stop Plan** to cancel the queued route and hold the current pose; use
+**Stop Arm** for a full arm disable.
 
 **Adaptive Assist** adds a slow learned shoulder/elbow trim on top of the manual
 assist values. It learns only while the arm is holding still near the target,

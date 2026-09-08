@@ -715,7 +715,7 @@ select {
 }
 
 .motion-presets h3,
-.dance-head h3 {
+.planner-head h3 {
   margin: 0;
   color: var(--muted);
   font-size: 0.78rem;
@@ -727,44 +727,111 @@ select {
   grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
 }
 
-.dance-mode {
+.arm-planner {
   display: grid;
   gap: 10px;
   border-top: 1px solid var(--line);
   padding-top: 12px;
 }
 
-.dance-head {
+.planner-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
 
-.dance-head span,
-.dance-range strong {
+.planner-head span,
+.planner-summary,
+.planner-block-kind {
   color: var(--accent);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.82rem;
 }
 
-.dance-grid {
-  align-items: end;
-  grid-template-columns: minmax(88px, 0.68fr) repeat(2, minmax(130px, 1fr)) minmax(126px, 0.9fr);
-}
-
-.dance-range {
+.planner-toolbar,
+.planner-filebar {
+  display: grid;
   gap: 8px;
 }
 
-.dance-range span {
-  display: flex;
+.planner-toolbar {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.planner-filebar {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.planner-block-list {
+  display: grid;
+  gap: 8px;
+}
+
+.planner-block {
+  display: grid;
+  grid-template-columns: 34px minmax(68px, 0.55fr) minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111111;
+  padding: 8px;
+}
+
+.planner-block-index {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+}
+
+.planner-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(74px, 1fr));
   gap: 8px;
 }
 
-.dance-actions {
+.planner-fields.wait-fields {
+  grid-template-columns: minmax(90px, 0.42fr);
+}
+
+.planner-fields.loop-fields {
+  grid-template-columns: repeat(3, minmax(74px, 0.5fr));
+}
+
+.planner-fields label {
+  gap: 4px;
+}
+
+.planner-fields input {
+  min-height: 34px;
+}
+
+.planner-block-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(48px, 1fr));
+  gap: 6px;
+}
+
+.planner-block-actions button {
+  min-height: 34px;
+  padding: 0 9px;
+  font-size: 0.78rem;
+}
+
+.planner-summary {
+  min-height: 30px;
+  color: var(--muted);
+}
+
+.planner-actions {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
@@ -1312,8 +1379,12 @@ pre {
   .button-row,
   .control-band .button-row,
     .arm-actions,
-    .dance-actions,
-    .dance-grid,
+    .planner-actions,
+    .planner-toolbar,
+    .planner-filebar,
+    .planner-block,
+    .planner-block-actions,
+    .planner-fields,
     .gripper-actions,
     .gripper-calibration-actions,
     .gripper-readout,
@@ -1417,5 +1488,10 @@ pre {
 
   .wizard-nudges {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .planner-fields.wait-fields,
+  .planner-fields.loop-fields {
+    grid-template-columns: 1fr;
   }
 }
