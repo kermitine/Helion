@@ -236,7 +236,7 @@ has explicit damping and feed-forward torque. IK targets are streamed as small
 smootherstep route samples with velocity feed-forward; `Velocity Limit` and
 `Acceleration` control the planned route duration. HelionOS defaults to
 `0.35 rad/s`, `2.5 rad/s^2`, `Kp=4.0`, `Kd=2.0`, and `4 A`, and caps saved arm
-values at `1.5 rad/s`, `8 rad/s^2`, `Kp=10.0`, `Kd=5.0`, and `+/-5 Nm` assist
+values at `6.0 rad/s`, `8 rad/s^2`, `Kp=10.0`, `Kd=5.0`, and `+/-5 Nm` assist
 torque. Motion presets are generated from the current link lengths, elbow bend,
 twist limits, link radii, and reach envelope. Their accepted poses are streamed
 as one continuous spline, so the arm flows through the preset instead of

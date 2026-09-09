@@ -129,7 +129,7 @@ ARM_DEFAULT_POSITION_ACCEL_RAD_S2 = 2.5
 ARM_DEFAULT_POSITION_KP = 4.0
 ARM_DEFAULT_DAMPING_KD = 2.0
 ARM_DEFAULT_CURRENT_LIMIT_A = 4.0
-ARM_POSITION_VEL_MAX_RAD_S = 1.5
+ARM_POSITION_VEL_MAX_RAD_S = 6.0
 ARM_POSITION_ACCEL_MAX_RAD_S2 = 8.0
 ARM_POSITION_KP_MAX = 10.0
 ARM_DAMPING_KD_MAX = 5.0
@@ -252,7 +252,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.08.03"
+APP_VERSION = "2026.09.08.05"
 
 
 def parse_int(value: Any, default: int) -> int:
