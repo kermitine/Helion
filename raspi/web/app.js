@@ -53,6 +53,7 @@ const DEFAULT_GRIPPER_PULSE_MAX_US = 2500;
 const DEFAULT_GRIPPER_CLOSED_DEG = 35;
 const DEFAULT_GRIPPER_OPEN_DEG = 120;
 const DEFAULT_GRIPPER_TEST_DEG = 90;
+const DEFAULT_GRIPPER_POSITION = 1;
 const DEFAULT_GRIPPER_RELEASE_AFTER_MOVE = false;
 const DEFAULT_GRIPPER_ADAPTIVE_GRIP = true;
 const DEFAULT_GRIPPER_GRIP_RELAX_DEG = 0;
@@ -394,6 +395,17 @@ function clampedNumber(value, fallback, min, max) {
   return Math.max(min, Math.min(max, numeric));
 }
 
+function currentGripperPosition() {
+  return clampedNumber(numberInput("gripperPositionSlider"), DEFAULT_GRIPPER_POSITION * 100, 0, 100) / 100;
+}
+
+function normalizedHandPosition(value, fallback = currentGripperPosition(), forcePercent = false) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  const position = forcePercent || Math.abs(numeric) > 1 ? numeric / 100 : numeric;
+  return Math.max(0, Math.min(1, position));
+}
+
 function gripperInputState() {
   return {
     gpioPin: Math.round(clampedNumber(numberInput("gripperGpioPinInput"), DEFAULT_GRIPPER_GPIO_PIN, 0, 27)),
@@ -401,7 +413,7 @@ function gripperInputState() {
     pulseMaxUs: clampedNumber(numberInput("gripperPulseMaxInput"), DEFAULT_GRIPPER_PULSE_MAX_US, 500, 2500),
     closedAngleDeg: clampedNumber(numberInput("gripperClosedAngleInput"), DEFAULT_GRIPPER_CLOSED_DEG, 0, 180),
     openAngleDeg: clampedNumber(numberInput("gripperOpenAngleInput"), DEFAULT_GRIPPER_OPEN_DEG, 0, 180),
-    position: clampedNumber(numberInput("gripperPositionSlider"), 100, 0, 100) / 100,
+    position: currentGripperPosition(),
     testAngleDeg: clampedNumber(numberInput("gripperAngleInput"), DEFAULT_GRIPPER_TEST_DEG, 0, 180),
     releaseAfterMove: $("gripperReleaseAfterMoveToggle").checked,
     adaptiveGrip: $("gripperAdaptiveGripToggle").checked,
@@ -445,6 +457,7 @@ function currentTargetBlock(name = "Position") {
       y: numberInput("armTargetYInput"),
       z: numberInput("armTargetZInput"),
     },
+    handPosition: currentGripperPosition(),
   };
 }
 
@@ -459,6 +472,7 @@ function defaultArmPlanBlocks() {
         y: 0,
         z: Math.max(ARM_MIN_TARGET_REACH, arm.link1 + arm.link2),
       },
+      handPosition: currentGripperPosition(),
     },
     { type: "wait", name: "Pause", seconds: ARM_PLAN_DEFAULT_WAIT_S },
   ];
@@ -483,6 +497,7 @@ function normalizedArmPlanBlock(block, index = 0) {
         y: clampedNumber(target.y, numberInput("armTargetYInput"), -20, 20),
         z: clampedNumber(target.z, numberInput("armTargetZInput"), -20, 20),
       },
+      handPosition: armPlanHandPositionFromBlock(source, target),
     };
   }
 
@@ -656,6 +671,42 @@ function firstValue(...values) {
     if (hasValue(value)) return value;
   }
   return undefined;
+}
+
+function armPlanHandPositionFromBlock(source, target = {}, fallback = currentGripperPosition()) {
+  const targetObject = objectValue(target);
+  const hand = objectValue(source.hand);
+  const gripper = objectValue(source.gripper);
+  const handIsObject = Object.keys(hand).length > 0;
+  const gripperIsObject = Object.keys(gripper).length > 0;
+  const candidates = [
+    [source.handPosition, false],
+    [source.gripperPosition, false],
+    [targetObject.handPosition, false],
+    [targetObject.gripperPosition, false],
+    [hand.position, false],
+    [hand.handPosition, false],
+    [hand.gripperPosition, false],
+    [gripper.position, false],
+    [gripper.handPosition, false],
+    [gripper.gripperPosition, false],
+    [handIsObject ? undefined : source.hand, false],
+    [gripperIsObject ? undefined : source.gripper, false],
+    [source.handPercent, true],
+    [source.gripperPercent, true],
+    [targetObject.handPercent, true],
+    [targetObject.gripperPercent, true],
+    [hand.percent, true],
+    [hand.handPercent, true],
+    [hand.gripperPercent, true],
+    [gripper.percent, true],
+    [gripper.handPercent, true],
+    [gripper.gripperPercent, true],
+  ];
+  for (const [value, forcePercent] of candidates) {
+    if (hasValue(value)) return normalizedHandPosition(value, fallback, forcePercent);
+  }
+  return normalizedHandPosition(fallback, DEFAULT_GRIPPER_POSITION);
 }
 
 function boolValue(value, fallback = false) {
@@ -990,6 +1041,7 @@ function armPlanExportPayload() {
     units: {
       target: "meters",
       gap: "seconds",
+      hand: "percent open",
     },
     armContext: {
       jointCount: arm.jointCount,
@@ -1448,6 +1500,18 @@ function renderArmPlanBlockFields(block, index) {
         }),
       ));
     });
+    fields.appendChild(plannerNumberInput(
+      "Hand %",
+      String(Math.round(normalizedHandPosition(block.handPosition) * 100)),
+      { min: "0", max: "100", step: "1", inputMode: "numeric" },
+      (input) => updateArmPlanBlock(index, (draft) => {
+        draft.handPosition = normalizedHandPosition(
+          input.value,
+          normalizedHandPosition(draft.handPosition),
+          true,
+        );
+      }),
+    ));
   } else if (block.type === "wait") {
     fields.appendChild(plannerNumberInput(
       "Seconds",
@@ -1500,7 +1564,9 @@ function renderArmPlanBlockActions(block, index) {
     actions.appendChild(plannerActionButton("Edit", () => openArmPlanTargetEditor(index), "soft"));
     actions.appendChild(plannerActionButton("Use", () => {
       updateArmPlanBlock(index, (draft) => {
-        draft.target = currentTargetBlock().target;
+        const current = currentTargetBlock();
+        draft.target = current.target;
+        draft.handPosition = current.handPosition;
       });
       renderArmPlanBlocks();
     }, "soft"));
@@ -1542,6 +1608,7 @@ function updateArmPlanSummary(plan = state && state.armPlan ? state.armPlan : {}
     const expanded = expandedArmPlanBlocks(armPlanBlocks);
     const forever = armPlanHasForeverLoop(armPlanBlocks);
     const moves = expanded.filter((block) => block.type === "move").length;
+    const handMoves = expanded.filter((block) => block.type === "move" && Number.isFinite(Number(block.handPosition))).length;
     const gaps = expanded.filter((block) => block.type === "wait").length;
     const gapSeconds = expanded
       .filter((block) => block.type === "wait")
@@ -1550,7 +1617,7 @@ function updateArmPlanSummary(plan = state && state.armPlan ? state.armPlan : {}
       valid = false;
       title = "add at least one position block";
     }
-    text = `${armPlanBlocks.length} blocks / ${expanded.length} steps / ${moves} moves / ${gaps} gaps / ${gapSeconds.toFixed(1)}s hold`;
+    text = `${armPlanBlocks.length} blocks / ${expanded.length} steps / ${moves} moves / ${handMoves} hand / ${gaps} gaps / ${gapSeconds.toFixed(1)}s hold`;
     text += forever ? " / forever" : " / returns home";
   } catch (error) {
     valid = false;

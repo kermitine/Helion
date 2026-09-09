@@ -798,6 +798,10 @@ select {
   gap: 8px;
 }
 
+.planner-fields.move-fields {
+  grid-template-columns: repeat(4, minmax(70px, 1fr));
+}
+
 .planner-fields.wait-fields {
   grid-template-columns: minmax(90px, 0.42fr);
 }
@@ -1499,6 +1503,7 @@ pre {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .planner-fields.move-fields,
   .planner-fields.wait-fields,
   .planner-fields.loop-fields {
     grid-template-columns: 1fr;

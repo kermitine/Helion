@@ -252,7 +252,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.08.05"
+APP_VERSION = "2026.09.08.06"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1127,6 +1127,9 @@ class DashboardController:
         self.gripper_last_grip_angle_deg: Optional[float] = None
         self.gripper_last_angle_deg: Optional[float] = None
         self.gripper_last_error = ""
+        self.gripper_plan_lock = threading.Lock()
+        self.gripper_plan_position: Optional[float] = None
+        self.gripper_plan_thread: Optional[threading.Thread] = None
         self._gpio: Optional[Any] = None
         self._gripper_pwm: Optional[Any] = None
         self._gripper_pwm_pin: Optional[int] = None
@@ -1747,6 +1750,7 @@ class DashboardController:
                 "type": "move",
                 "name": "Home",
                 "target": self.arm_home_target(),
+                "handPosition": getattr(self, "gripper_position", GRIPPER_DEFAULT_POSITION),
             },
             {
                 "type": "wait",
@@ -1761,6 +1765,56 @@ class DashboardController:
             arm = payload.get("arm")
             plan = arm.get("planner") if isinstance(arm, dict) and isinstance(arm.get("planner"), dict) else {}
         return plan if isinstance(plan, dict) else {}
+
+    def sanitize_arm_plan_hand_position(
+        self,
+        block: Dict[str, Any],
+        target: Optional[Dict[str, Any]] = None,
+    ) -> float:
+        def add_candidate(
+            candidates: List[Tuple[Any, bool]],
+            value: Any,
+            is_percent: bool = False,
+        ) -> None:
+            if value is not None and value != "":
+                candidates.append((value, is_percent))
+
+        candidates: List[Tuple[Any, bool]] = []
+        add_candidate(candidates, block.get("handPosition"))
+        add_candidate(candidates, block.get("gripperPosition"))
+        add_candidate(candidates, block.get("handPercent"), True)
+        add_candidate(candidates, block.get("gripperPercent"), True)
+
+        if isinstance(target, dict):
+            add_candidate(candidates, target.get("handPosition"))
+            add_candidate(candidates, target.get("gripperPosition"))
+            add_candidate(candidates, target.get("handPercent"), True)
+            add_candidate(candidates, target.get("gripperPercent"), True)
+
+        for group_key in ("hand", "gripper"):
+            group = block.get(group_key)
+            if isinstance(group, dict):
+                add_candidate(candidates, group.get("position"))
+                add_candidate(candidates, group.get("handPosition"))
+                add_candidate(candidates, group.get("gripperPosition"))
+                add_candidate(candidates, group.get("percent"), True)
+                add_candidate(candidates, group.get("handPercent"), True)
+                add_candidate(candidates, group.get("gripperPercent"), True)
+            else:
+                add_candidate(candidates, group)
+
+        fallback = getattr(self, "gripper_position", GRIPPER_DEFAULT_POSITION)
+        for value, is_percent in candidates:
+            try:
+                parsed = parse_float(value, fallback)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(parsed):
+                continue
+            if is_percent or abs(parsed) > 1.0:
+                parsed /= 100.0
+            return max(0.0, min(1.0, parsed))
+        return max(0.0, min(1.0, float(fallback)))
 
     def sanitize_arm_plan_block(self, block: Any, index: int) -> Dict[str, Any]:
         if not isinstance(block, dict):
@@ -1789,6 +1843,7 @@ class DashboardController:
                     "y": parse_float(target.get("y"), fallback["y"]),
                     "z": parse_float(target.get("z"), fallback["z"]),
                 },
+                "handPosition": self.sanitize_arm_plan_hand_position(block, target),
             }
         if block_type == "wait":
             return {
@@ -2249,6 +2304,37 @@ class DashboardController:
                 suffix = " then released" if not result.get("attached", True) else ""
             result["message"] = f"Gripper {percent * 100.0:.0f}% open at {angle:.1f} deg{suffix}"
         return result
+
+    def queue_arm_plan_gripper_position(self, position: Any) -> None:
+        try:
+            percent = parse_float(position, self.gripper_position)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(percent):
+            return
+        percent = max(0.0, min(1.0, percent))
+        start_thread: Optional[threading.Thread] = None
+        with self.gripper_plan_lock:
+            self.gripper_plan_position = percent
+            if self.gripper_plan_thread is None or not self.gripper_plan_thread.is_alive():
+                self.gripper_plan_thread = threading.Thread(
+                    target=self.arm_plan_gripper_worker,
+                    name="arm-plan-gripper",
+                    daemon=True,
+                )
+                start_thread = self.gripper_plan_thread
+        if start_thread is not None:
+            start_thread.start()
+
+    def arm_plan_gripper_worker(self) -> None:
+        while self.running:
+            with self.gripper_plan_lock:
+                position = self.gripper_plan_position
+                self.gripper_plan_position = None
+                if position is None:
+                    self.gripper_plan_thread = None
+                    return
+            self.move_gripper_position(position, quiet=True)
 
     def run_gripper_command(self, command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         if command == "gripper-release":
@@ -3618,6 +3704,8 @@ class DashboardController:
             axis: float(motor_velocities.get(axis, 0.0))
             for axis in ARM_AXES
         }
+        if "gripperPosition" in waypoint:
+            self.queue_arm_plan_gripper_position(waypoint["gripperPosition"])
 
     def arm_resolve_target_joints(
         self,
@@ -4417,6 +4505,10 @@ class DashboardController:
                     previous_angles,
                     ARM_ROUTE_MAX_STEP_RAD,
                 )
+                if "handPosition" in block:
+                    if not segment:
+                        segment = [self.arm_hold_waypoint(final_joint_angles, ARM_ROUTE_SAMPLE_S)]
+                    segment[-1]["gripperPosition"] = block["handPosition"]
                 route_waypoints.extend(segment)
                 previous_angles = final_joint_angles
                 move_count += 1

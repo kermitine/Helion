@@ -252,18 +252,20 @@ the base plane, the route planner allows a limited recovery path back to a safe
 target instead of blocking the move at the first below-plane waypoint.
 
 **Movement Planner** builds a finite arm route from editable blocks. **Position**
-blocks store an IK target (`x`, `y`, `z`) and can open the target gizmo editor or
-capture the current target; **Gap** blocks hold the current pose for a set number
-of seconds; **Loop** blocks repeat a numbered block span. A loop can use a fixed
+blocks store an IK target (`x`, `y`, `z`) plus the hand percentage, and can open
+the target gizmo editor or capture the current target and gripper setting; **Gap**
+blocks hold the current pose for a set number of seconds; **Loop** blocks repeat a
+numbered block span. A loop can use a fixed
 `Count`, or `Forever` to keep replaying its span until **Stop Plan**. Blocks after
 a forever loop are unreachable. **Export Plan** downloads those blocks as a
 portable JSON file, and **Import Plan** accepts either that plan file, a raw block
 array, or a full HelionOS values JSON with `armPlan.blocks`. The backend expands
-the blocks, checks the same reach, twist, and base-plane safety rules as
-**Move IK**, then streams the resulting route through the normal operation-control
-hold loop. Finite plans automatically append a safe **Home** return and hold
-there. Use **Stop Plan** to cancel the queued route and hold the current pose; use
-**Stop Arm** for a full arm disable.
+the blocks, checks the same reach, twist, and base-plane safety rules as **Move
+IK**, then streams the resulting route through the normal operation-control hold
+loop. Hand percentages execute through the MG90S gripper path when each Position
+node is reached. Finite plans automatically append a safe **Home** return and
+hold there. Use **Stop Plan** to cancel the queued route and hold the current
+pose; use **Stop Arm** for a full arm disable.
 
 **Adaptive Assist** adds a slow learned shoulder/elbow trim on top of the manual
 assist values. It learns only while the arm is holding still near the target,
