@@ -803,7 +803,7 @@ select {
 }
 
 .planner-fields.loop-fields {
-  grid-template-columns: repeat(3, minmax(74px, 0.5fr));
+  grid-template-columns: repeat(4, minmax(74px, 0.5fr));
 }
 
 .planner-fields label {
@@ -812,6 +812,15 @@ select {
 
 .planner-fields input {
   min-height: 34px;
+}
+
+.planner-fields .planner-switch {
+  min-height: 34px;
+  padding: 0 9px;
+}
+
+.planner-fields .planner-switch input {
+  min-height: 18px;
 }
 
 .planner-block-actions {

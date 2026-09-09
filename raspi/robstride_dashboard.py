@@ -218,6 +218,7 @@ ARM_PLANNER_MIN_WAIT_S = 0.0
 ARM_PLANNER_MAX_WAIT_S = 30.0
 ARM_PLANNER_DEFAULT_LOOP_COUNT = 2
 ARM_PLANNER_MAX_LOOP_COUNT = 50
+ARM_PLANNER_HOME_HOLD_S = 0.50
 ARM_MOTION_PRESET_LABELS = {
     "showcase": "Showcase",
     "sweep": "Sweep",
@@ -251,7 +252,7 @@ VALUES_PATH = Path(
         Path.home() / ".config" / "helion" / "dashboard-values.json",
     )
 )
-APP_VERSION = "2026.09.08.02"
+APP_VERSION = "2026.09.08.03"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1104,6 +1105,12 @@ class DashboardController:
         self.arm_plan_active = False
         self.arm_plan_started_at = 0.0
         self.arm_plan_duration_s = 0.0
+        self.arm_plan_forever_active = False
+        self.arm_plan_forever_blocks: List[Dict[str, Any]] = []
+        self.arm_plan_forever_start_index = -1
+        self.arm_plan_forever_end_index = -1
+        self.arm_plan_config_signature: Optional[Tuple[Any, ...]] = None
+        self.arm_plan_cycle_count = 0
         self.gripper_gpio_pin = GRIPPER_DEFAULT_GPIO_PIN
         self.gripper_pulse_min_us = GRIPPER_DEFAULT_PULSE_MIN_US
         self.gripper_pulse_max_us = GRIPPER_DEFAULT_PULSE_MAX_US
@@ -1726,17 +1733,20 @@ class DashboardController:
                 GRIPPER_ADAPTIVE_GRIP_MAX_SQUEEZE_S,
             )
 
-    def default_arm_plan_blocks(self) -> List[Dict[str, Any]]:
+    def arm_home_target(self) -> Dict[str, float]:
         home_z = max(ARM_MIN_TARGET_REACH, self.arm_link_1 + self.arm_link_2)
+        return {
+            "x": 0.0,
+            "y": 0.0,
+            "z": home_z,
+        }
+
+    def default_arm_plan_blocks(self) -> List[Dict[str, Any]]:
         return [
             {
                 "type": "move",
                 "name": "Home",
-                "target": {
-                    "x": 0.0,
-                    "y": 0.0,
-                    "z": home_z,
-                },
+                "target": self.arm_home_target(),
             },
             {
                 "type": "wait",
@@ -1791,17 +1801,24 @@ class DashboardController:
                     ARM_PLANNER_MAX_WAIT_S,
                 ),
             }
+        loop_count = block.get("count", block.get("repeats", block.get("repeat", ARM_PLANNER_DEFAULT_LOOP_COUNT)))
+        loop_count_text = str(loop_count).strip().lower()
+        loop_forever = parse_bool(
+            block.get("forever", block.get("infinite", block.get("repeatForever"))),
+            False,
+        ) or loop_count_text in ("forever", "infinite", "always")
         return {
             "type": "loop",
             "name": name or f"Loop {index + 1}",
             "start": clamped_int(block.get("start"), 1, 1, ARM_PLANNER_MAX_BLOCKS),
             "end": clamped_int(block.get("end"), max(1, index), 1, ARM_PLANNER_MAX_BLOCKS),
             "count": clamped_int(
-                block.get("count", block.get("repeats", block.get("repeat", ARM_PLANNER_DEFAULT_LOOP_COUNT))),
+                loop_count,
                 ARM_PLANNER_DEFAULT_LOOP_COUNT,
                 1,
                 ARM_PLANNER_MAX_LOOP_COUNT,
             ),
+            "forever": loop_forever,
         }
 
     def sanitize_arm_plan_blocks(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1822,10 +1839,22 @@ class DashboardController:
         with self.lock:
             self.arm_plan_blocks = blocks
 
-    def expand_arm_plan_blocks(self, blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def expand_arm_plan_blocks(
+        self,
+        blocks: List[Dict[str, Any]],
+        stop_after_forever: bool = False,
+        top_level_indexes: Optional[List[int]] = None,
+    ) -> List[Dict[str, Any]]:
         if not blocks:
             raise ValueError("Arm planner needs at least one block")
+        forever_indexes = [
+            index for index, block in enumerate(blocks)
+            if block.get("type") == "loop" and bool(block.get("forever"))
+        ]
+        if len(forever_indexes) > 1:
+            raise ValueError("Arm planner can only have one forever loop")
         expanded: List[Dict[str, Any]] = []
+        stop_expansion = False
 
         def append_expanded(block: Dict[str, Any]) -> None:
             if len(expanded) >= ARM_PLANNER_MAX_EXPANDED_BLOCKS:
@@ -1833,6 +1862,7 @@ class DashboardController:
             expanded.append(block)
 
         def expand_index(index: int, loop_stack: Tuple[int, ...]) -> None:
+            nonlocal stop_expansion
             if index < 0 or index >= len(blocks):
                 raise ValueError(f"Loop references block {index + 1}, outside the planner")
             block = blocks[index]
@@ -1844,6 +1874,9 @@ class DashboardController:
                 raise ValueError(f"Unknown planner block type at {index + 1}")
             if index in loop_stack:
                 raise ValueError(f"Loop at block {index + 1} references itself")
+            forever = bool(block.get("forever"))
+            if forever and loop_stack:
+                raise ValueError(f"Forever loop at block {index + 1} cannot be inside another loop")
             start = int(block.get("start", 1)) - 1
             end = int(block.get("end", start + 1)) - 1
             if start > end:
@@ -1852,16 +1885,42 @@ class DashboardController:
                 raise ValueError(f"Loop at block {index + 1} references blocks outside the planner")
             if start <= index <= end:
                 raise ValueError(f"Loop at block {index + 1} cannot include itself")
-            count = int(block.get("count", ARM_PLANNER_DEFAULT_LOOP_COUNT))
+            count = 1 if forever else int(block.get("count", ARM_PLANNER_DEFAULT_LOOP_COUNT))
             for _repeat in range(count):
                 for child_index in range(start, end + 1):
                     expand_index(child_index, (*loop_stack, index))
+            if forever and stop_after_forever:
+                stop_expansion = True
 
-        for index in range(len(blocks)):
+        indexes = list(range(len(blocks))) if top_level_indexes is None else list(top_level_indexes)
+        for index in indexes:
+            if stop_expansion:
+                break
             expand_index(index, ())
         if not expanded:
             raise ValueError("Arm planner has no move or gap blocks")
         return expanded
+
+    def arm_plan_forever_span(self, blocks: List[Dict[str, Any]]) -> Optional[Tuple[int, int]]:
+        forever_indexes = [
+            index for index, block in enumerate(blocks)
+            if block.get("type") == "loop" and bool(block.get("forever"))
+        ]
+        if not forever_indexes:
+            return None
+        if len(forever_indexes) > 1:
+            raise ValueError("Arm planner can only have one forever loop")
+        index = forever_indexes[0]
+        block = blocks[index]
+        start = int(block.get("start", 1)) - 1
+        end = int(block.get("end", start + 1)) - 1
+        if start > end:
+            start, end = end, start
+        if start < 0 or end >= len(blocks):
+            raise ValueError(f"Forever loop at block {index + 1} references blocks outside the planner")
+        if start <= index <= end:
+            raise ValueError(f"Forever loop at block {index + 1} cannot include itself")
+        return start, end
 
     def gripper_angle_for_position(self, position: Optional[float] = None) -> float:
         with self.lock:
@@ -3514,6 +3573,12 @@ class DashboardController:
             self.arm_plan_active = False
             self.arm_plan_started_at = 0.0
             self.arm_plan_duration_s = 0.0
+            self.arm_plan_forever_active = False
+            self.arm_plan_forever_blocks = []
+            self.arm_plan_forever_start_index = -1
+            self.arm_plan_forever_end_index = -1
+            self.arm_plan_config_signature = None
+            self.arm_plan_cycle_count = 0
         return was_active
 
     def arm_route_waypoint_interval(self, waypoint: Dict[str, Any]) -> float:
@@ -4318,8 +4383,16 @@ class DashboardController:
         blocks: List[Dict[str, Any]],
         start_angles: Dict[str, float],
         launch_hold_s: float = 0.0,
+        return_home: bool = False,
+        stop_after_forever: bool = False,
+        require_move: bool = True,
+        top_level_indexes: Optional[List[int]] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, float], Dict[str, float], Dict[str, Any]]:
-        expanded_blocks = self.expand_arm_plan_blocks(blocks)
+        expanded_blocks = self.expand_arm_plan_blocks(
+            blocks,
+            stop_after_forever=stop_after_forever,
+            top_level_indexes=top_level_indexes,
+        )
         previous_angles = normalized_joint_angles(self.arm_joint_count, start_angles)
         final_target = dict(self.arm_target)
         final_joint_angles = dict(previous_angles)
@@ -4327,6 +4400,8 @@ class DashboardController:
         move_count = 0
         wait_count = 0
         loop_count = sum(1 for block in blocks if block.get("type") == "loop")
+        forever = any(block.get("type") == "loop" and bool(block.get("forever")) for block in blocks)
+        returns_home = False
 
         if launch_hold_s > 0.0:
             route_waypoints.append(self.arm_hold_waypoint(previous_angles, launch_hold_s))
@@ -4360,17 +4435,39 @@ class DashboardController:
             if len(route_waypoints) > ARM_PLANNER_MAX_ROUTE_WAYPOINTS:
                 raise ValueError(f"Arm planner route exceeds {ARM_PLANNER_MAX_ROUTE_WAYPOINTS} waypoints")
 
+        if move_count <= 0 and require_move:
+            raise ValueError("Arm planner needs at least one move block")
+        if return_home:
+            home_target = self.arm_home_target()
+            try:
+                segment, final_target, final_joint_angles = self.arm_route_waypoints_to_target(
+                    home_target,
+                    previous_angles,
+                    ARM_ROUTE_MAX_STEP_RAD,
+                )
+                route_waypoints.extend(segment)
+                previous_angles = final_joint_angles
+            except ValueError as exc:
+                if str(exc) != "Arm route has no waypoints":
+                    raise
+                final_target = dict(home_target)
+                final_joint_angles = dict(previous_angles)
+            if ARM_PLANNER_HOME_HOLD_S > 0.0:
+                route_waypoints.append(self.arm_hold_waypoint(previous_angles, ARM_PLANNER_HOME_HOLD_S))
+            returns_home = True
+            if len(route_waypoints) > ARM_PLANNER_MAX_ROUTE_WAYPOINTS:
+                raise ValueError(f"Arm planner route exceeds {ARM_PLANNER_MAX_ROUTE_WAYPOINTS} waypoints")
         if not route_waypoints:
             raise ValueError("Arm planner has no route waypoints")
-        if move_count <= 0:
-            raise ValueError("Arm planner needs at least one move block")
         duration_s = sum(self.arm_route_waypoint_interval(item) for item in route_waypoints)
         summary = {
-            "blocks": len(blocks),
+            "blocks": len(blocks) if top_level_indexes is None else len(top_level_indexes),
             "expandedBlocks": len(expanded_blocks),
             "moves": move_count,
             "gaps": wait_count,
             "loops": loop_count,
+            "forever": forever,
+            "returnsHome": returns_home,
             "durationS": duration_s,
         }
         return route_waypoints, final_target, final_joint_angles, summary
@@ -4384,6 +4481,8 @@ class DashboardController:
         blocks = self.sanitize_arm_plan_blocks(payload)
         with self.lock:
             self.arm_plan_blocks = blocks
+        forever_span = self.arm_plan_forever_span(blocks)
+        forever_active = forever_span is not None
         config_signature = self.arm_position_config_signature()
         launch_hold_s = 0.0
         if self.arm_position_configured and self.arm_position_signature == config_signature:
@@ -4394,6 +4493,8 @@ class DashboardController:
             blocks,
             start_angles,
             launch_hold_s=launch_hold_s,
+            return_home=not forever_active,
+            stop_after_forever=forever_active,
         )
         self.arm_target = final_target
         route_ok = self.start_arm_route(
@@ -4408,13 +4509,83 @@ class DashboardController:
             self.arm_plan_active = True
             self.arm_plan_started_at = now
             self.arm_plan_duration_s = summary["durationS"]
+            self.arm_plan_forever_active = forever_active
+            self.arm_plan_forever_blocks = json.loads(json.dumps(blocks)) if forever_active else []
+            self.arm_plan_forever_start_index = forever_span[0] if forever_span else -1
+            self.arm_plan_forever_end_index = forever_span[1] if forever_span else -1
+            self.arm_plan_config_signature = config_signature
+            self.arm_plan_cycle_count = 0
         message = (
             f"Arm planner started: {summary['moves']} move(s), {summary['gaps']} gap(s), "
             f"{summary['loops']} loop block(s), {summary['expandedBlocks']} expanded block(s), "
             f"{summary['durationS']:.1f}s"
         )
+        if forever_active:
+            message += "; forever loop active"
+        elif summary.get("returnsHome"):
+            message += "; returns home"
         self.log(message)
         return {"ok": True, "message": message, **summary}
+
+    def queue_next_arm_plan_forever_cycle(self) -> bool:
+        with self.lock:
+            if not self.arm_plan_active or not self.arm_plan_forever_active:
+                return False
+            blocks = json.loads(json.dumps(self.arm_plan_forever_blocks))
+            start_index = self.arm_plan_forever_start_index
+            end_index = self.arm_plan_forever_end_index
+            config_signature = self.arm_plan_config_signature or self.arm_position_config_signature()
+        if not blocks or start_index < 0 or end_index < start_index or end_index >= len(blocks):
+            self.log("Arm planner forever loop stopped: no loop body")
+            self.stop_arm_plan_state()
+            return False
+        try:
+            route_waypoints, final_target, _final_joint_angles, summary = self.build_arm_plan_route(
+                blocks,
+                normalized_joint_angles(self.arm_joint_count, self.arm_joint_angles),
+                require_move=False,
+                top_level_indexes=list(range(start_index, end_index + 1)),
+            )
+        except ValueError as exc:
+            self.log(f"Arm planner forever loop stopped: {exc}")
+            self.stop_arm_plan_state()
+            return False
+        if not route_waypoints:
+            self.log("Arm planner forever loop stopped: no route waypoints")
+            self.stop_arm_plan_state()
+            return False
+
+        self.arm_target = final_target
+        first_waypoint = route_waypoints[0]
+        remaining_waypoints = route_waypoints[1:]
+        if not remaining_waypoints:
+            remaining_waypoints = [
+                self.arm_hold_waypoint(
+                    first_waypoint["jointAngles"],
+                    self.arm_route_waypoint_interval(first_waypoint),
+                )
+            ]
+        route_now = time.monotonic()
+        self.apply_arm_route_waypoint(first_waypoint)
+        self.arm_route_waypoints = deque(remaining_waypoints)
+        self.arm_route_next_at = (
+            route_now + self.arm_route_waypoint_interval(first_waypoint)
+            if remaining_waypoints
+            else 0.0
+        )
+        self.arm_adaptive_assist_pause_until = route_now + ARM_ADAPTIVE_ASSIST_SETTLE_S
+        self.arm_route_support_until = route_now + ARM_ROUTE_SUPPORT_GRACE_S
+        self.arm_hold_correction_ramp_until = (
+            route_now + ARM_HOLD_ERROR_RAMP_S
+            if not remaining_waypoints
+            else 0.0
+        )
+        self.arm_position_configured = True
+        self.arm_position_signature = config_signature
+        with self.lock:
+            self.arm_plan_cycle_count += 1
+            self.arm_plan_duration_s += float(summary.get("durationS", 0.0))
+        return True
 
     def stop_arm_plan(self) -> Dict[str, Any]:
         was_active = self.stop_arm_plan_state()
@@ -4456,8 +4627,10 @@ class DashboardController:
                 self.arm_route_support_until = now + ARM_ROUTE_SUPPORT_GRACE_S
                 self.arm_hold_correction_ramp_until = now + ARM_HOLD_ERROR_RAMP_S
                 if self.arm_plan_active:
-                    self.stop_arm_plan_state()
-                    self.log("Arm planner complete")
+                    if self.arm_plan_forever_active and self.queue_next_arm_plan_forever_cycle():
+                        pass
+                    elif self.stop_arm_plan_state():
+                        self.log("Arm planner complete")
                 else:
                     self.log("Arm route complete")
         self.update_arm_adaptive_assist(now)
@@ -5045,6 +5218,8 @@ class DashboardController:
                     "active": self.arm_plan_active,
                     "startedAt": self.arm_plan_started_at,
                     "durationS": self.arm_plan_duration_s,
+                    "forever": self.arm_plan_active and self.arm_plan_forever_active,
+                    "cycles": self.arm_plan_cycle_count if self.arm_plan_active else 0,
                     "routeRemaining": len(self.arm_route_waypoints) if self.arm_plan_active else 0,
                     "blocks": json.loads(json.dumps(self.arm_plan_blocks)),
                 },

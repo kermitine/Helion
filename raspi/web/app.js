@@ -494,12 +494,19 @@ function normalizedArmPlanBlock(block, index = 0) {
     };
   }
 
+  const loopCount = firstValue(source.count, source.repeats, source.repeat);
+  const loopCountText = hasValue(loopCount) ? String(loopCount).trim().toLowerCase() : "";
+  const forever = boolValue(
+    firstValue(source.forever, source.infinite, source.repeatForever),
+    ["forever", "infinite", "always"].includes(loopCountText),
+  );
   return {
     type,
     name: name || `Loop ${index + 1}`,
     start: Math.round(clampedNumber(source.start, 1, 1, ARM_PLAN_MAX_BLOCKS)),
     end: Math.round(clampedNumber(source.end, Math.max(1, index), 1, ARM_PLAN_MAX_BLOCKS)),
-    count: Math.round(clampedNumber(firstValue(source.count, source.repeats, source.repeat), ARM_PLAN_DEFAULT_LOOP_COUNT, 1, ARM_PLAN_MAX_LOOP_COUNT)),
+    count: Math.round(clampedNumber(loopCount, ARM_PLAN_DEFAULT_LOOP_COUNT, 1, ARM_PLAN_MAX_LOOP_COUNT)),
+    forever,
   };
 }
 
@@ -514,9 +521,15 @@ function collectArmPlanBlocks() {
   return armPlanBlocks.map((block) => JSON.parse(JSON.stringify(block)));
 }
 
-function expandedArmPlanBlocks(blocks = armPlanBlocks) {
+function expandedArmPlanBlocks(blocks = armPlanBlocks, options = {}) {
   const normalized = normalizedArmPlanBlocks(blocks);
+  const foreverIndexes = normalized
+    .map((block, index) => (block.type === "loop" && block.forever ? index : -1))
+    .filter((index) => index >= 0);
+  if (foreverIndexes.length > 1) throw new Error("planner can only have one forever loop");
+  const stopAfterForever = options.stopAfterForever !== false;
   const expanded = [];
+  let stopExpansion = false;
 
   const appendBlock = (block) => {
     if (expanded.length >= ARM_PLAN_MAX_EXPANDED_BLOCKS) {
@@ -534,20 +547,30 @@ function expandedArmPlanBlocks(blocks = armPlanBlocks) {
     }
     if (block.type !== "loop") throw new Error(`unknown planner block ${index + 1}`);
     if (stack.includes(index)) throw new Error(`loop ${index + 1} references itself`);
+    if (block.forever && stack.length) throw new Error(`forever loop ${index + 1} cannot be inside another loop`);
     let start = Math.round(block.start) - 1;
     let end = Math.round(block.end) - 1;
     if (start > end) [start, end] = [end, start];
     if (start < 0 || end >= normalized.length) throw new Error(`loop ${index + 1} points outside the plan`);
     if (start <= index && index <= end) throw new Error(`loop ${index + 1} includes itself`);
-    for (let repeat = 0; repeat < block.count; repeat += 1) {
+    const repeatCount = block.forever ? 1 : block.count;
+    for (let repeat = 0; repeat < repeatCount; repeat += 1) {
       for (let child = start; child <= end; child += 1) {
         expandIndex(child, [...stack, index]);
       }
     }
+    if (block.forever && stopAfterForever) stopExpansion = true;
   };
 
-  normalized.forEach((_block, index) => expandIndex(index));
+  for (let index = 0; index < normalized.length; index += 1) {
+    if (stopExpansion) break;
+    expandIndex(index);
+  }
   return expanded;
+}
+
+function armPlanHasForeverLoop(blocks = armPlanBlocks) {
+  return normalizedArmPlanBlocks(blocks).some((block) => block.type === "loop" && block.forever);
 }
 
 function commandPayload(command) {
@@ -633,6 +656,16 @@ function firstValue(...values) {
     if (hasValue(value)) return value;
   }
   return undefined;
+}
+
+function boolValue(value, fallback = false) {
+  if (!hasValue(value)) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value !== 0 : fallback;
+  const text = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on", "enabled", "forever", "infinite", "always"].includes(text)) return true;
+  if (["0", "false", "no", "off", "disabled"].includes(text)) return false;
+  return fallback;
 }
 
 function idText(value, fallback) {
@@ -1318,11 +1351,25 @@ function plannerNumberInput(labelText, value, options, onChange) {
   input.step = options.step || "0.01";
   if (options.min !== undefined) input.min = options.min;
   if (options.max !== undefined) input.max = options.max;
+  if (options.disabled) input.disabled = true;
   input.value = value;
   input.inputMode = options.inputMode || "decimal";
   input.addEventListener("input", () => onChange(input));
   input.addEventListener("change", () => onChange(input));
   label.append(span, input);
+  return label;
+}
+
+function plannerCheckboxInput(labelText, checked, onChange) {
+  const label = document.createElement("label");
+  const input = document.createElement("input");
+  const span = document.createElement("span");
+  label.className = "switch planner-switch";
+  input.type = "checkbox";
+  input.checked = checked;
+  span.textContent = labelText;
+  input.addEventListener("change", () => onChange(input));
+  label.append(input, span);
   return label;
 }
 
@@ -1379,6 +1426,7 @@ function addArmPlanBlock(type) {
       start: 1,
       end: Math.max(1, index),
       count: ARM_PLAN_DEFAULT_LOOP_COUNT,
+      forever: false,
     });
   }
   setArmPlanDirty();
@@ -1429,9 +1477,16 @@ function renderArmPlanBlockFields(block, index) {
     fields.appendChild(plannerNumberInput(
       "Count",
       String(block.count || ARM_PLAN_DEFAULT_LOOP_COUNT),
-      { min: "1", max: String(ARM_PLAN_MAX_LOOP_COUNT), step: "1", inputMode: "numeric" },
+      { min: "1", max: String(ARM_PLAN_MAX_LOOP_COUNT), step: "1", inputMode: "numeric", disabled: block.forever },
       (input) => updateArmPlanBlock(index, (draft) => {
         draft.count = Math.round(clampedNumber(input.value, draft.count || ARM_PLAN_DEFAULT_LOOP_COUNT, 1, ARM_PLAN_MAX_LOOP_COUNT));
+      }),
+    ));
+    fields.appendChild(plannerCheckboxInput(
+      "Forever",
+      Boolean(block.forever),
+      (input) => updateArmPlanBlock(index, (draft) => {
+        draft.forever = input.checked;
       }),
     ));
   }
@@ -1485,6 +1540,7 @@ function updateArmPlanSummary(plan = state && state.armPlan ? state.armPlan : {}
   let title = "";
   try {
     const expanded = expandedArmPlanBlocks(armPlanBlocks);
+    const forever = armPlanHasForeverLoop(armPlanBlocks);
     const moves = expanded.filter((block) => block.type === "move").length;
     const gaps = expanded.filter((block) => block.type === "wait").length;
     const gapSeconds = expanded
@@ -1495,6 +1551,7 @@ function updateArmPlanSummary(plan = state && state.armPlan ? state.armPlan : {}
       title = "add at least one position block";
     }
     text = `${armPlanBlocks.length} blocks / ${expanded.length} steps / ${moves} moves / ${gaps} gaps / ${gapSeconds.toFixed(1)}s hold`;
+    text += forever ? " / forever" : " / returns home";
   } catch (error) {
     valid = false;
     title = error.message;
@@ -1508,8 +1565,12 @@ function updateArmPlanSummary(plan = state && state.armPlan ? state.armPlan : {}
   const status = $("armPlanStatus");
   if (status) {
     const active = Boolean(plan && plan.active);
+    const forever = Boolean(plan && plan.forever);
     const remaining = Number(plan && plan.routeRemaining);
-    status.textContent = active && Number.isFinite(remaining)
+    const cycles = Number(plan && plan.cycles);
+    status.textContent = active && forever
+      ? `Running forever${Number.isFinite(cycles) && cycles > 0 ? ` ${cycles}` : ""}`
+      : active && Number.isFinite(remaining)
       ? `Running ${remaining}`
       : active
         ? "Running"
